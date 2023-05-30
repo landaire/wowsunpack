@@ -1,8 +1,11 @@
 use std::{
     cell::RefCell,
     collections::BTreeMap,
+    fs::File,
     io::{Cursor, Read, SeekFrom},
+    ops::Deref,
     path::PathBuf,
+    rc::{Rc, Weak},
 };
 
 use binrw::{BinRead, NullString, PosValue};
@@ -57,7 +60,7 @@ struct PackedFileMetadata {
     #[br(seek_before = SeekFrom::Start(this_offset.pos + filename_ptr), restore_position)]
     filename: NullString,
     #[br(ignore)]
-    cached_path: Option<PathBuf>,
+    cached_tree_node: Option<WeakFileNode>,
 }
 
 #[derive(Debug, BinRead)]
@@ -89,7 +92,60 @@ pub struct Resource {
     pub volume_info: Volume,
 }
 
-pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
+#[derive(Debug, Default, Clone)]
+pub struct FileNode(Rc<RefCell<FileTree>>);
+unsafe impl Send for FileNode {}
+unsafe impl Sync for FileNode {}
+impl Deref for FileNode {
+    type Target = Rc<RefCell<FileTree>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WeakFileNode(Weak<RefCell<FileTree>>);
+unsafe impl Send for WeakFileNode {}
+unsafe impl Sync for WeakFileNode {}
+impl Deref for WeakFileNode {
+    type Target = Weak<RefCell<FileTree>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct FileTree {
+    pub filename: PathBuf,
+    pub children: BTreeMap<PathBuf, FileNode>,
+    pub parent: Option<WeakFileNode>,
+    pub is_file: bool,
+    pub file_info: Option<FileInfo>,
+    pub volume_info: Option<Volume>,
+}
+
+impl FileTree {
+    fn new() -> FileTree {
+        FileTree {
+            filename: "/".into(),
+            children: Default::default(),
+            parent: None,
+            is_file: false,
+            file_info: None,
+            volume_info: None,
+        }
+    }
+}
+
+impl Default for FileTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn parse(data: &mut Cursor<&[u8]>) -> Result<FileNode> {
     let header = Header::read_ne(data).wrap_err("Failed to parse header")?;
     if header.endianness != 0x20000000 && header.endianness2 != 0x40 {
         return Err(IdxError::IncorrectEndian.into());
@@ -113,35 +169,19 @@ pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
         volumes.insert(volume_info.volume_id, volume_info);
     }
 
+    let file_tree = FileNode::default();
+
     // Now that we have lookup tables, let's build a list of Resources by path
-    let mut packed_files = Vec::new();
     for (id, packed_file) in &packed_resources {
-        let is_file;
         {
             let packed_file = packed_file.borrow();
-            is_file = file_infos.contains_key(id);
 
-            if is_file {
-                if let Some(cached_path) = &packed_file.cached_path {
-                    let file_info = file_infos
-                        .remove(id)
-                        .expect("failed to get file info for resource!");
-
-                    let volume_info = volumes
-                        .get(&file_info.volume_id)
-                        .expect("failed to find volume");
-
-                    packed_files.push(Resource {
-                        filename: cached_path.clone(),
-                        file_info: file_info,
-                        volume_info: volume_info.clone(),
-                    });
-                    continue;
-                }
+            if packed_file.cached_tree_node.is_some() {
+                continue;
             }
         }
 
-        let mut partial_cached_path = None;
+        let mut root_node = file_tree.clone();
         let mut file_chain = vec![*id];
 
         // Build the file's path based on its parents
@@ -158,8 +198,12 @@ pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
                 // As we go along in this algorithm we cache each parent's filename if it
                 // hasn't been cached yet. If cached, we can save time by just using what's
                 // already been computed.
-                if let Some(cached_path) = parent.cached_path.as_ref() {
-                    partial_cached_path = Some(cached_path.clone());
+                if let Some(cached_path) = parent.cached_tree_node.as_ref() {
+                    root_node = FileNode(
+                        cached_path
+                            .upgrade()
+                            .expect("failed to upgrade weak node ptr"),
+                    );
                     break;
                 }
 
@@ -169,36 +213,44 @@ pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
         }
 
         // Go through each of the files in the chain and:
-        // 1. Ensure their paths are cached
-        // 2. Build the rest of the filename starting from the `partial_cached_path`
-        let mut result_path = partial_cached_path.unwrap_or(PathBuf::new());
+        // 1. Ensure their nodes are cached
+        // 2. Build the rest of the chain starting from the `root_node`
         for file_id in file_chain.drain(..).rev() {
+            let filename;
             let file_metadata = packed_resources.get(&file_id).unwrap();
-            let mut file_metadata = file_metadata.borrow_mut();
+            {
+                filename = file_metadata.borrow().filename.to_string();
+            }
 
-            result_path = result_path.join(file_metadata.filename.to_string());
-            file_metadata.cached_path = Some(result_path.clone());
+            let this_node_ptr = FileNode::default();
+
+            root_node
+                .borrow_mut()
+                .children
+                .insert(PathBuf::from(filename), this_node_ptr.clone());
+
+            {
+                let mut this_node = this_node_ptr.borrow_mut();
+                {
+                    file_metadata.borrow_mut().cached_tree_node =
+                        Some(WeakFileNode(Rc::downgrade(&this_node_ptr.0)));
+                }
+
+                let file_info = file_infos.remove(id);
+
+                let volume_info = file_info
+                    .as_ref()
+                    .and_then(|file_info| volumes.get(&file_info.volume_id));
+
+                this_node.is_file = file_info.is_some();
+                this_node.file_info = file_info;
+                this_node.volume_info = volume_info.cloned();
+                this_node.parent = Some(WeakFileNode(Rc::downgrade(&root_node.0)));
+            }
+
+            root_node = this_node_ptr;
         }
-
-        // We don't care about directories
-        if !is_file {
-            continue;
-        }
-
-        let file_info = file_infos
-            .remove(id)
-            .expect("failed to get file info for resource!");
-
-        let volume_info = volumes
-            .get(&file_info.volume_id)
-            .expect("failed to find volume");
-
-        packed_files.push(Resource {
-            filename: result_path,
-            file_info: file_info,
-            volume_info: volume_info.clone(),
-        });
     }
 
-    Ok(packed_files)
+    Ok(file_tree)
 }

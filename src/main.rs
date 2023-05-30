@@ -27,7 +27,7 @@ struct Args {
     idx: Vec<PathBuf>,
 }
 
-fn load_idx_file(path: PathBuf) -> Result<Vec<idx::Resource>> {
+fn load_idx_file(path: PathBuf) -> Result<idx::FileNode> {
     let input_file = File::open(path).wrap_err("Failed to open idx file")?;
     let mmap = unsafe { MmapOptions::new().map(&input_file)? };
 
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     });
 
     paths.into_par_iter().try_for_each(|path| {
-        resources.lock().unwrap().append(&mut load_idx_file(path)?);
+        resources.lock().unwrap().push(load_idx_file(path)?);
 
         Ok::<(), eyre::Error>(())
     })?;
