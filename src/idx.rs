@@ -77,7 +77,7 @@ pub struct Resource {
     volume_info: Volume,
 }
 
-pub fn parse(data: &mut Cursor<&[u8]>) -> Result<()> {
+pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
     let header = Header::read_ne(data).wrap_err("Failed to parse header")?;
     if header.endianness != 0x20000000 && header.endianness2 != 0x40 {
         return Err(IdxError::IncorrectEndian.into());
@@ -211,7 +211,5 @@ pub fn parse(data: &mut Cursor<&[u8]>) -> Result<()> {
         });
     }
 
-    panic!("{:#X?}", &packed_files[..5]);
-
-    Ok(())
+    Ok(packed_files)
 }
