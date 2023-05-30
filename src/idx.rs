@@ -49,32 +49,32 @@ struct PackedFileMetadata {
 }
 
 #[derive(Debug, BinRead)]
-struct FileInfo {
-    resource_id: u64,
-    volume_id: u64,
-    offset: u64,
-    compression_info: u64,
-    size: u32,
-    crc32: u32,
-    unpacked_size: u32,
-    padding: u32,
+pub struct FileInfo {
+    pub resource_id: u64,
+    pub volume_id: u64,
+    pub offset: u64,
+    pub compression_info: u64,
+    pub size: u32,
+    pub crc32: u32,
+    pub unpacked_size: u32,
+    pub padding: u32,
 }
 
 #[derive(Debug, Clone, BinRead)]
-struct Volume {
+pub struct Volume {
     this_offset: PosValue<()>,
-    len: u64,
-    name_ptr: u64,
-    volume_id: u64,
+    pub len: u64,
+    pub name_ptr: u64,
+    pub volume_id: u64,
     #[br(seek_before = SeekFrom::Start(this_offset.pos + name_ptr), restore_position)]
-    filename: NullString,
+    pub filename: NullString,
 }
 
 #[derive(Debug)]
 pub struct Resource {
-    filename: PathBuf,
-    file_info: FileInfo,
-    volume_info: Volume,
+    pub filename: PathBuf,
+    pub file_info: FileInfo,
+    pub volume_info: Volume,
 }
 
 pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
