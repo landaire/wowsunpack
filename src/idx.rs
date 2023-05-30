@@ -16,6 +16,18 @@ pub enum IdxError {
 }
 
 #[derive(Debug, BinRead)]
+struct IdxFile {
+    resources_meta_offset: PosValue<()>,
+    resources_metadata: ResourceMetadata,
+    #[br(count = resources_metadata.resources_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.resources_table_pointer))]
+    resources: Vec<PackedFileMetadata>,
+    #[br(count = resources_metadata.file_infos_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.file_infos_table_pointer))]
+    file_infos: Vec<FileInfo>,
+    #[br(count = resources_metadata.volumes_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.volumes_table_pointer))]
+    volumes: Vec<Volume>,
+}
+
+#[derive(Debug, BinRead)]
 #[br(magic = 0x50465349u32)]
 struct Header {
     endianness: u32,
@@ -35,14 +47,14 @@ struct ResourceMetadata {
 }
 
 #[derive(Debug, BinRead)]
-#[br(import(offset: u64))]
 struct PackedFileMetadata {
+    this_offset: PosValue<()>,
     resource_ptr: u64,
     filename_ptr: u64,
     id: u64,
     parent_id: u64,
 
-    #[br(seek_before = SeekFrom::Start(offset + filename_ptr), restore_position)]
+    #[br(seek_before = SeekFrom::Start(this_offset.pos + filename_ptr), restore_position)]
     filename: NullString,
     #[br(ignore)]
     cached_path: Option<PathBuf>,
@@ -83,48 +95,25 @@ pub fn parse(data: &mut Cursor<&[u8]>) -> Result<Vec<Resource>> {
         return Err(IdxError::IncorrectEndian.into());
     }
 
-    let resources_header_position = data.position();
-    let resource_metadata =
-        ResourceMetadata::read_ne(data).wrap_err("Failed to parse resource metadata")?;
+    let idx_file = IdxFile::read_ne(data).wrap_err("Failed to parse IdxFile")?;
 
+    // Create hash lookups for each resource, file info, and volume
     let mut packed_resources = BTreeMap::new();
-    if resource_metadata.resources_count != 0 {
-        let mut metadata_offset =
-            resources_header_position + resource_metadata.resources_table_pointer;
-        data.set_position(metadata_offset);
-
-        for _ in 0..resource_metadata.resources_count {
-            metadata_offset = data.position();
-            let file_metadata = PackedFileMetadata::read_ne_args(data, (metadata_offset,))
-                .wrap_err("Failed to parse packed file metadata")?;
-
-            packed_resources.insert(file_metadata.id, RefCell::new(file_metadata));
-        }
+    for resource in idx_file.resources {
+        packed_resources.insert(resource.id, RefCell::new(resource));
     }
 
     let mut file_infos = BTreeMap::new();
-    if resource_metadata.file_infos_count != 0 {
-        let metadata_offset =
-            resources_header_position + resource_metadata.file_infos_table_pointer;
-        data.set_position(metadata_offset);
-
-        for _ in 0..resource_metadata.file_infos_count {
-            let file_info = FileInfo::read_ne(data).wrap_err("Failed to parse file info")?;
-            file_infos.insert(file_info.resource_id, file_info);
-        }
+    for file_info in idx_file.file_infos {
+        file_infos.insert(file_info.resource_id, file_info);
     }
 
     let mut volumes = BTreeMap::new();
-    if resource_metadata.volumes_count != 0 {
-        let metadata_offset = resources_header_position + resource_metadata.volumes_table_pointer;
-        data.set_position(metadata_offset);
-
-        for _ in 0..resource_metadata.volumes_count {
-            let volume_info = Volume::read_ne(data).wrap_err("Failed to parse volume info")?;
-            volumes.insert(volume_info.volume_id, volume_info);
-        }
+    for volume_info in idx_file.volumes {
+        volumes.insert(volume_info.volume_id, volume_info);
     }
 
+    // Now that we have lookup tables, let's build a list of Resources by path
     let mut packed_files = Vec::new();
     for (id, packed_file) in &packed_resources {
         let is_file;
