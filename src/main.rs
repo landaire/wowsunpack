@@ -29,13 +29,13 @@ struct Args {
     idx: Vec<PathBuf>,
 }
 
-fn load_idx_file(path: PathBuf) -> Result<idx::FileNode> {
-    let input_file = File::open(path).wrap_err("Failed to open idx file")?;
+fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
+    let input_file = File::open(&path).wrap_err("Failed to open idx file")?;
     let mmap = unsafe { MmapOptions::new().map(&input_file)? };
 
     let mut reader = Cursor::new(&mmap[..]);
 
-    crate::idx::parse(&mut reader)
+    Ok(crate::idx::parse(&mut reader)?)
 }
 
 fn main() -> Result<()> {
@@ -44,6 +44,7 @@ fn main() -> Result<()> {
 
     let resources = Mutex::new(Vec::new());
     let mut paths = Vec::with_capacity(args.idx.len());
+
     for path in args.idx {
         if path.is_dir() {
             for path in fs::read_dir(path)? {
@@ -76,16 +77,18 @@ fn main() -> Result<()> {
         Ok::<(), eyre::Error>(())
     })?;
 
-    let resources = resources.into_inner().unwrap();
-    for resource in resources {
-        if let Ok(node) = resource.find("content/GameParams.data") {
-            if let Some(pkg_loader) = pkg_loader.as_mut() {
-                let mut file = File::create("out.bin")?;
-                node.read_file(pkg_loader, &mut file)?;
-                panic!("{:#X?}", node.path());
-            }
-        }
+    let idx_files = resources.into_inner().unwrap();
+    let file_tree = idx::build_file_tree(&idx_files);
+    if let Some(pkg_loader) = pkg_loader.as_mut() {
+        file_tree.extract_to("res", pkg_loader)?;
     }
+    // if let Ok(node) = resource.find("content/GameParams.data") {
+    //     if let Some(pkg_loader) = pkg_loader.as_mut() {
+    //         let mut file = File::create("out.bin")?;
+    //         node.read_file(pkg_loader, &mut file)?;
+    //         panic!("{:#X?}", node.path());
+    //     }
+    // }
 
     // for file in &resources {
     //     if file.filename.file_name().unwrap() == "GameParams.data" {
@@ -113,11 +116,10 @@ fn main() -> Result<()> {
     //     }
     // }
 
-    // println!(
-    //     "Parsed {} resources in {} seconds",
-    //     resources.len(),
-    //     (Instant::now() - timestamp).as_secs_f32()
-    // );
+    println!(
+        "Parsed resources in {} seconds",
+        (Instant::now() - timestamp).as_secs_f32()
+    );
 
     // let mut decoder = ZlibDecoder::new(File::open(&args.pkg).expect("Input file does not exist"));
     // let mut out_data = Vec::new();

@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
+    sync::RwLock,
 };
 
 use flate2::read::DeflateDecoder;
@@ -14,7 +15,7 @@ use crate::idx::FileInfo;
 #[derive(Debug)]
 pub struct PkgFileLoader {
     pkgs_dir: PathBuf,
-    pkgs: HashMap<PathBuf, (File, memmap::Mmap)>,
+    pkgs: RwLock<HashMap<PathBuf, (File, memmap::Mmap)>>,
 }
 
 #[derive(Debug, Error)]
@@ -29,13 +30,14 @@ impl PkgFileLoader {
     pub fn new<P: AsRef<Path>>(pkgs_dir: P) -> Self {
         PkgFileLoader {
             pkgs_dir: pkgs_dir.as_ref().into(),
-            pkgs: HashMap::new(),
+            pkgs: Default::default(),
         }
     }
 
-    fn ensure_pkg_loaded<P: AsRef<Path>>(&mut self, pkg: P) -> Result<&Mmap, PkgError> {
+    fn ensure_pkg_loaded<P: AsRef<Path>>(&self, pkg: P) -> Result<(), PkgError> {
         let pkg = pkg.as_ref().to_owned();
-        if !self.pkgs.contains_key(&pkg) {
+        let pkg_loaded = { self.pkgs.read().unwrap().contains_key(&pkg) };
+        if !pkg_loaded {
             let pkg_path = self.pkgs_dir.join(&pkg);
             if !pkg_path.exists() {
                 return Err(PkgError::PkgNotFound(pkg));
@@ -45,27 +47,37 @@ impl PkgFileLoader {
 
             let mmap = unsafe { MmapOptions::new().map(&pkg_file)? };
 
-            self.pkgs.insert(pkg.clone(), (pkg_file, mmap));
+            self.pkgs
+                .write()
+                .unwrap()
+                .insert(pkg.clone(), (pkg_file, mmap));
         }
 
-        Ok(&self.pkgs.get(&pkg).unwrap().1)
+        Ok(())
     }
 
     pub fn read<P: AsRef<Path>, W: Write>(
-        &mut self,
+        &self,
         pkg: P,
         file_info: &FileInfo,
         out_data: &mut W,
     ) -> Result<(), PkgError> {
-        let mmap = self.ensure_pkg_loaded(pkg)?;
+        let pkg = pkg.as_ref();
+        self.ensure_pkg_loaded(pkg)?;
+        let pkgs = self.pkgs.read().unwrap();
+        let mmap = &pkgs.get(pkg).unwrap().1;
 
         let start_offset = file_info.offset as usize;
         let end_offset = start_offset + (file_info.size as usize);
 
-        let cursor = Cursor::new(&mmap[start_offset..end_offset]);
-        let mut decoder = DeflateDecoder::new(cursor);
+        let mut cursor = Cursor::new(&mmap[start_offset..end_offset]);
+        if file_info.compression_info != 0 {
+            let mut decoder = DeflateDecoder::new(cursor);
 
-        std::io::copy(&mut decoder, out_data)?;
+            std::io::copy(&mut decoder, out_data)?;
+        } else {
+            std::io::copy(&mut cursor, out_data)?;
+        }
 
         Ok(())
     }
