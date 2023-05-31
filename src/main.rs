@@ -1,6 +1,7 @@
 use eyre::{Result, WrapErr};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use memmap::MmapOptions;
+use pkg::PkgFileLoader;
 use std::{
     fs::{self, File, FileType},
     io::{Cursor, Read},
@@ -13,6 +14,7 @@ use clap::Parser;
 use rayon::prelude::*;
 
 mod idx;
+mod pkg;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -66,6 +68,8 @@ fn main() -> Result<()> {
         )
     });
 
+    let mut pkg_loader = packages_dir.as_ref().map(|dir| PkgFileLoader::new(&dir));
+
     paths.into_par_iter().try_for_each(|path| {
         resources.lock().unwrap().push(load_idx_file(path)?);
 
@@ -73,6 +77,15 @@ fn main() -> Result<()> {
     })?;
 
     let resources = resources.into_inner().unwrap();
+    for resource in resources {
+        if let Ok(node) = resource.find("content/GameParams.data") {
+            if let Some(pkg_loader) = pkg_loader.as_mut() {
+                let mut file = File::create("out.bin")?;
+                node.read_file(pkg_loader, &mut file)?;
+                panic!("{:#X?}", node.path());
+            }
+        }
+    }
 
     // for file in &resources {
     //     if file.filename.file_name().unwrap() == "GameParams.data" {
@@ -100,11 +113,11 @@ fn main() -> Result<()> {
     //     }
     // }
 
-    println!(
-        "Parsed {} resources in {} seconds",
-        resources.len(),
-        (Instant::now() - timestamp).as_secs_f32()
-    );
+    // println!(
+    //     "Parsed {} resources in {} seconds",
+    //     resources.len(),
+    //     (Instant::now() - timestamp).as_secs_f32()
+    // );
 
     // let mut decoder = ZlibDecoder::new(File::open(&args.pkg).expect("Input file does not exist"));
     // let mut out_data = Vec::new();
