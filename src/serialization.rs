@@ -38,7 +38,7 @@ pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
 
         let file = SerializedFile {
             path: this_path.clone(),
-            is_directory: node.file_info.is_some(),
+            is_directory: node.file_info.is_none(),
             compressed_size,
             compression_info,
             unpacked_size,
