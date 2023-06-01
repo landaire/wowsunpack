@@ -10,13 +10,14 @@ use std::{
     time::Instant,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
 mod idx;
 mod pkg;
+mod serialization;
 
-/// Simple program to greet a person
+/// Utility for interacting with World of Warships `.idx` and `.pkg` files
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -25,8 +26,43 @@ struct Args {
     #[clap(short, long)]
     pkg_dir: Option<PathBuf>,
 
-    /// .idx file(s)
-    idx: Vec<PathBuf>,
+    /// .idx file(s) or their containing directory
+    #[clap(short, long)]
+    idx_files: Vec<PathBuf>,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Extract files to an output directory
+    Extract {
+        /// Flatten the file structure when writing files. For example, if the
+        /// given output directory is `res` and the target file is `content/GameParams.data`,
+        /// the file will normally be written to `res/content/GameParams.data`.
+        /// When this flag is set, the file will be written to `res/GameParams.data`
+        #[clap(long)]
+        flatten: bool,
+
+        /// Files to extract. Glob patterns such as `content/**/*.xml` are accepted
+        files: Vec<String>,
+
+        /// Where to write files to
+        out_dir: PathBuf,
+    },
+    Metadata {
+        #[clap(short, long)]
+        format: MetadataFormat,
+
+        out_file: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, ValueEnum)]
+enum MetadataFormat {
+    Json,
+    Csv,
 }
 
 fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
@@ -43,9 +79,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let resources = Mutex::new(Vec::new());
-    let mut paths = Vec::with_capacity(args.idx.len());
+    let mut paths = Vec::with_capacity(args.idx_files.len());
 
-    for path in args.idx {
+    for path in args.idx_files {
         if path.is_dir() {
             for path in fs::read_dir(path)? {
                 let path = path?;
@@ -79,9 +115,34 @@ fn main() -> Result<()> {
 
     let idx_files = resources.into_inner().unwrap();
     let file_tree = idx::build_file_tree(&idx_files);
-    if let Some(pkg_loader) = pkg_loader.as_mut() {
-        file_tree.extract_to("res", pkg_loader)?;
+
+    match &args.command {
+        Commands::Extract {
+            flatten,
+            files,
+            out_dir,
+        } => todo!(),
+        Commands::Metadata { format, out_file } => {
+            let mut data = serialization::tree_to_serialized_files(file_tree.clone());
+            let mut out_file = File::create(out_file)?;
+            match format {
+                MetadataFormat::Json => {
+                    serde_json::to_writer(out_file, &data)?;
+                }
+                MetadataFormat::Csv => {
+                    let mut writer = csv::Writer::from_writer(out_file);
+                    for record in data {
+                        writer.serialize(record)?;
+                    }
+                }
+            };
+        }
     }
+
+    // if let Some(pkg_loader) = pkg_loader.as_mut() {
+    //     file_tree.extract_to("res", pkg_loader)?;
+    // }
+
     // if let Ok(node) = resource.find("content/GameParams.data") {
     //     if let Some(pkg_loader) = pkg_loader.as_mut() {
     //         let mut file = File::create("out.bin")?;

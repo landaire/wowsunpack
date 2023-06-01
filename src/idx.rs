@@ -103,7 +103,7 @@ pub struct Resource {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct FileNode(Rc<RefCell<FileTree>>);
+pub struct FileNode(pub Rc<RefCell<FileTree>>);
 unsafe impl Send for FileNode {}
 unsafe impl Sync for FileNode {}
 impl Deref for FileNode {
