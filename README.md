@@ -2,18 +2,6 @@
 
 A utility for unpacking World of Warships game assets.
 
-## Motivation
-
-World of Warships game files are packed in two custom file formats -- `.idx` files and `.pkg` files. `.idx` files contain serialized resource and volume (.pkg) metadata. There exists [an official utility](https://forum.worldofwarships.com/topic/183662-all-wows-unpack-tool-unpack-game-client-resources/) provided by the game developer, Wargaming, but has the following drawbacks compared to this utility:
-
-- Is not open-source
-- This utility's backing library can be easily adopted into other applications that would like to directly read game data
-- Slower (~2x margin using the CLI tool, ~6x margin using the GUI)
-- Does not expose meta information about the resources
-- Does not expose data in a machine-serializable format
-
-That two points are the big motivator for development of this utility. Applications like [minimap_renderer](https://github.com/WoWs-Builder-Team/minimap_renderer) depend on game assets and reading these assets isn't easily automated with today's tools.
-
 ## Features
 
 - Directly read and convert `GameParams.data` to JSON
@@ -21,7 +9,7 @@ That two points are the big motivator for development of this utility. Applicati
 - Extract game assets using glob file patterns
 - Use this utility as a library
 
-## Planned Features
+Planned:
 
 - [ ] Parsing assets.bin
 - [ ] C FFI
@@ -43,3 +31,15 @@ Options:
   -h, --help                   Print help
   -V, --version                Print version
 ```
+
+## Motivation
+
+World of Warships game files are packed in two custom file formats -- `.idx` files and `.pkg` files. `.idx` files contain serialized resource and volume (.pkg) metadata. There exists [an official utility](https://forum.worldofwarships.com/topic/183662-all-wows-unpack-tool-unpack-game-client-resources/) provided by the game developer, Wargaming, but has the following drawbacks compared to this utility:
+
+- Is not open-source
+- This utility's backing library can be easily adopted into other applications that would like to directly read game data
+- Slower (~2x margin using the CLI tool, ~6x margin using the GUI)
+- Does not expose meta information about the resources
+- Does not expose data in a machine-serializable format
+
+That two points are the big motivator for development of this utility. Applications like [minimap_renderer](https://github.com/WoWs-Builder-Team/minimap_renderer) depend on game assets and reading these assets isn't easily automated with today's tools.
