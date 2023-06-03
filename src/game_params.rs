@@ -120,7 +120,6 @@ pub fn read_game_params_as_json<W: Write>(
         &mut decompressed_data,
         DeOptions::default()
             .replace_unresolved_globals()
-            .replace_recursive()
             .decode_strings(),
     )?;
 
