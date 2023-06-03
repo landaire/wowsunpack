@@ -2,6 +2,8 @@
 
 A utility for unpacking World of Warships game assets.
 
+![crates.io](https://img.shields.io/crates/v/wowsunpack.svg)  ![docs.rs](https://img.shields.io/crates/v/docsrs.svg)
+
 ## Features
 
 - Directly read and convert `GameParams.data` to JSON
