@@ -22,7 +22,7 @@ mod idx;
 mod pkg;
 mod serialization;
 
-/// Utility for interacting with World of Warships `.idx` and `.pkg` files
+/// Utility for interacting with World of Warships game assets
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
