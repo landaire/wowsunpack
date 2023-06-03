@@ -4,10 +4,12 @@ use glob::glob;
 use memmap::MmapOptions;
 use pkg::PkgFileLoader;
 use std::{
+    collections::HashSet,
     convert,
     fs::{self, File, FileType},
     io::{BufWriter, Cursor, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    rc::Rc,
     sync::Mutex,
     time::Instant,
 };
@@ -134,11 +136,11 @@ fn main() -> Result<()> {
     let idx_files = resources.into_inner().unwrap();
     let file_tree = idx::build_file_tree(&idx_files);
 
-    match &args.command {
+    match args.command {
         Commands::Extract {
             flatten,
             files,
-            out_dir,
+            mut out_dir,
         } => {
             let paths = file_tree.paths();
             let globs = files
@@ -146,7 +148,9 @@ fn main() -> Result<()> {
                 .map(|file_name| glob::Pattern::new(&file_name).expect("invalid glob pattern"))
                 .collect::<Vec<_>>();
 
-            for (path, node) in paths {
+            let mut extracted_paths = HashSet::<&Path>::new();
+
+            for (path, node) in &paths {
                 let mut matches = false;
 
                 for glob in &globs {
@@ -156,20 +160,24 @@ fn main() -> Result<()> {
                     }
                 }
 
-                if !matches {
+                // Skip this node if the file path doesn't match OR we're told to
+                // flatten the file system
+                if !matches || (flatten && !node.0.borrow().is_file) {
                     continue;
                 }
 
-                let target_path = if *flatten {
-                    out_dir.join(path.file_name().expect("file has no filename"))
-                } else {
-                    out_dir.join(&*path)
-                };
+                // Also skip this path if its parent directory has already been extracted
+                if let Some(parent) = path.parent() {
+                    if extracted_paths.contains(parent) {
+                        continue;
+                    }
+                }
+
+                extracted_paths.insert((&*path).as_ref());
 
                 match pkg_loader.as_mut() {
                     Some(pkg_loader) => {
-                        // TODO: currently doesn't flatten
-                        node.extract_to(target_path, pkg_loader)?;
+                        node.extract_to(&out_dir, pkg_loader)?;
                     }
                     None => {
                         return Err(eyre::eyre!(
