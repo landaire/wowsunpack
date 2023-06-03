@@ -1,11 +1,11 @@
 use eyre::{Result, WrapErr};
 
-
 use memmap::MmapOptions;
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{BufWriter, Cursor},
+    io::{stdout, BufWriter, Cursor, Write},
+    os::unix::prelude::OsStrExt,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Instant,
@@ -57,9 +57,11 @@ enum Commands {
     ///
     /// The output data will always be sorted by filename.
     Metadata {
-        #[clap(short, long)]
+        #[clap(short, long, default_value_t = MetadataFormat::Plain, value_enum)]
         format: MetadataFormat,
 
+        /// A value of "-" will print to stdout
+        #[clap(default_value = "-")]
         out_file: PathBuf,
     },
     /// Special command for directly reading the `content/GameParams.data` file,
@@ -75,6 +77,7 @@ enum Commands {
 
 #[derive(Debug, Clone, Eq, PartialEq, ValueEnum)]
 enum MetadataFormat {
+    Plain,
     Json,
     Csv,
 }
@@ -183,16 +186,51 @@ fn main() -> Result<()> {
         }
         Commands::Metadata { format, out_file } => {
             let data = serialization::tree_to_serialized_files(file_tree.clone());
-            let out_file = File::create(out_file)?;
+            let out_file = if out_file.to_str().unwrap() != "-" {
+                Some(BufWriter::new(File::create(out_file)?))
+            } else {
+                None
+            };
+            // TODO: use dynamic dispatch with Box<T>
             match format {
                 MetadataFormat::Json => {
-                    serde_json::to_writer(out_file, &data)?;
+                    if let Some(out_file) = out_file {
+                        serde_json::to_writer(out_file, &data)?;
+                    } else {
+                        let stdout = stdout().lock();
+
+                        serde_json::to_writer(stdout, &data)?;
+                    }
                 }
                 MetadataFormat::Csv => {
-                    let mut writer = csv::Writer::from_writer(out_file);
-                    for record in data {
-                        writer.serialize(record)?;
-                    }
+                    if let Some(out_file) = out_file {
+                        let mut writer = csv::Writer::from_writer(out_file);
+
+                        for record in data {
+                            writer.serialize(record)?;
+                        }
+                    } else {
+                        let mut writer = csv::Writer::from_writer(stdout().lock());
+
+                        for record in data {
+                            writer.serialize(record)?;
+                        }
+                    };
+                }
+                MetadataFormat::Plain => {
+                    if let Some(out_file) = out_file {
+                        let mut writer = out_file;
+
+                        for record in data {
+                            writeln!(&mut writer, "{}", record.path.to_str().unwrap())?;
+                        }
+                    } else {
+                        let mut writer = stdout().lock();
+
+                        for record in data {
+                            writeln!(&mut writer, "{}", record.path.to_str().unwrap())?;
+                        }
+                    };
                 }
             };
         }

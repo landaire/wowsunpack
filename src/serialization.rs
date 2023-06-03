@@ -5,7 +5,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct SerializedFile {
-    path: PathBuf,
+    pub path: PathBuf,
     is_directory: bool,
     compressed_size: usize,
     compression_info: u64,
