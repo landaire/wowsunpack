@@ -13,6 +13,7 @@ Planned:
 
 - [ ] Parsing assets.bin
 - [ ] C FFI
+- [ ] Refactoring of library APIs
 
 ## Usage
 
