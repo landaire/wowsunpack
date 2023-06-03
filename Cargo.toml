@@ -1,5 +1,7 @@
 [package]
 name = "wowsunpack"
+description = "Utility for interacting with World of Warships game assets"
+license = "MIT"
 version = "0.1.0"
 edition = "2021"
 exclude = [".github/"]
