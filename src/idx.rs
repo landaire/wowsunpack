@@ -257,6 +257,30 @@ impl FileNode {
 
         Ok(())
     }
+
+    pub fn paths(&self) -> Vec<(Rc<PathBuf>, FileNode)> {
+        let mut out_nodes = Vec::new();
+        let mut pending_nodes: Vec<(Rc<PathBuf>, FileNode)> = vec![(
+            Rc::new(PathBuf::from(&self.0.borrow().filename)),
+            self.clone(),
+        )];
+
+        while let Some((parent_path, node_ptr)) = pending_nodes.pop() {
+            let full_path = {
+                let node = node_ptr.0.borrow();
+                let full_path = Rc::new(parent_path.join(&node.filename));
+                for (_child_name, child) in &node.children {
+                    pending_nodes.push((Rc::clone(&full_path), child.clone()));
+                }
+
+                full_path
+            };
+
+            out_nodes.push((full_path, node_ptr));
+        }
+
+        out_nodes
+    }
 }
 
 #[derive(Debug, Clone, Default)]

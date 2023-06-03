@@ -1,9 +1,8 @@
 use eyre::{Result, WrapErr};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
+use glob::glob;
 use memmap::MmapOptions;
 use pkg::PkgFileLoader;
-use serde_json::Map;
-use serde_pickle::DeOptions;
 use std::{
     convert,
     fs::{self, File, FileType},
@@ -16,6 +15,7 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
+mod game_params;
 mod idx;
 mod pkg;
 mod serialization;
@@ -54,10 +54,25 @@ enum Commands {
         /// Where to write files to
         out_dir: PathBuf,
     },
+    /// Write meta information about the game assets to the specified output file.
+    /// This may be useful for diffing contents between builds at a glance. Output
+    /// data includes file name, size, CRC32, unpacked size, compression info,
+    /// and a flag indicating if the file is a directory.
+    ///
+    /// The output data will always be sorted by filename.
     Metadata {
         #[clap(short, long)]
         format: MetadataFormat,
 
+        out_file: PathBuf,
+    },
+    /// Special command for directly reading the `content/GameParams.data` file,
+    /// converting it to JSON, and writing to the specified output file path.
+    GameParams {
+        /// Don't pretty-print the JSON (may make serialization/deserialization faster)
+        #[clap(short, long)]
+        ugly: bool,
+        #[clap(default_value = "GameParams.json")]
         out_file: PathBuf,
     },
 }
@@ -119,151 +134,54 @@ fn main() -> Result<()> {
     let idx_files = resources.into_inner().unwrap();
     let file_tree = idx::build_file_tree(&idx_files);
 
-    let game_params = file_tree.find("content/GameParams.data")?;
-    let mut game_params_data = Vec::new();
-    game_params.read_file(pkg_loader.as_mut().unwrap(), &mut game_params_data)?;
-    game_params_data.reverse();
-
-    let mut decompressed_data = Cursor::new(Vec::new());
-    let mut decoder = ZlibDecoder::new(Cursor::new(game_params_data));
-    std::io::copy(&mut decoder, &mut decompressed_data)?;
-    decompressed_data.set_position(0);
-
-    let decoded: serde_pickle::Value = serde_pickle::from_reader(
-        &mut decompressed_data,
-        DeOptions::default()
-            .replace_unresolved_globals()
-            .replace_recursive()
-            .decode_strings(),
-    )?;
-
-    fn hashable_pickle_to_json(pickled: serde_pickle::HashableValue) -> serde_json::Value {
-        match pickled {
-            serde_pickle::HashableValue::None => serde_json::Value::Null,
-            serde_pickle::HashableValue::Bool(v) => serde_json::Value::Bool(v),
-            serde_pickle::HashableValue::I64(v) => {
-                serde_json::Value::Number(serde_json::Number::from(v))
-            }
-            serde_pickle::HashableValue::Int(v) => todo!(),
-            serde_pickle::HashableValue::F64(v) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
-            }
-            serde_pickle::HashableValue::Bytes(v) => serde_json::Value::Array(
-                v.into_iter()
-                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
-                    .collect(),
-            ),
-            serde_pickle::HashableValue::String(v) => serde_json::Value::String(v),
-            serde_pickle::HashableValue::Tuple(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-            serde_pickle::HashableValue::FrozenSet(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-        }
-    }
-
-    fn pickle_to_json(pickled: serde_pickle::Value) -> serde_json::Value {
-        match pickled {
-            serde_pickle::Value::None => serde_json::Value::Null,
-            serde_pickle::Value::Bool(v) => serde_json::Value::Bool(v),
-            serde_pickle::Value::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
-            serde_pickle::Value::Int(v) => todo!(),
-            serde_pickle::Value::F64(v) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
-            }
-            serde_pickle::Value::Bytes(v) => serde_json::Value::Array(
-                v.into_iter()
-                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
-                    .collect(),
-            ),
-            serde_pickle::Value::String(v) => serde_json::Value::String(v),
-            serde_pickle::Value::List(v) => {
-                serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
-            }
-            serde_pickle::Value::Tuple(v) => {
-                serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
-            }
-            serde_pickle::Value::Set(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-            serde_pickle::Value::FrozenSet(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-            serde_pickle::Value::Dict(v) => {
-                let mut map = Map::new();
-                for (key, value) in &v {
-                    let converted_key = hashable_pickle_to_json(key.clone());
-                    let string_key = match converted_key {
-                        serde_json::Value::Number(num) => num.to_string(),
-                        serde_json::Value::String(s) => s.to_string(),
-                        other => {
-                            continue;
-                            panic!(
-                                "Unsupported key type: {:?} (original: {:#?}, {:#?})",
-                                other, key, v
-                            );
-                        }
-                    };
-
-                    let converted_value = pickle_to_json(value.clone());
-
-                    map.insert(string_key, converted_value);
-                }
-
-                serde_json::Value::Object(map)
-            }
-        }
-    }
-
-    // match decoded {
-    //     serde_pickle::Value::None => todo!(),
-    //     serde_pickle::Value::Bool(_) => todo!(),
-    //     serde_pickle::Value::I64(_) => todo!(),
-    //     serde_pickle::Value::Int(_) => todo!(),
-    //     serde_pickle::Value::F64(_) => todo!(),
-    //     serde_pickle::Value::Bytes(_) => todo!(),
-    //     serde_pickle::Value::String(_) => todo!(),
-    //     serde_pickle::Value::List(list) => panic!("{}", &list[1]),
-    //     serde_pickle::Value::Tuple(_) => todo!(),
-    //     serde_pickle::Value::Set(_) => todo!(),
-    //     serde_pickle::Value::FrozenSet(_) => todo!(),
-    //     serde_pickle::Value::Dict(_) => todo!(),
-    // };
-
-    // panic!("{:#?}", decoded);
-
-    let converted = if let serde_pickle::Value::List(list) = decoded {
-        pickle_to_json(list.into_iter().next().unwrap())
-    } else {
-        panic!("");
-    };
-    println!(
-        "converted in {} seconds",
-        (Instant::now() - timestamp).as_secs_f32()
-    );
-
-    println!("writing data");
-    let mut f = BufWriter::new(File::create("GameParams.json")?);
-    //let mut data = Vec::new();
-    serde_json::to_writer_pretty(f, &converted)?;
-    //std::fs::write("GameParams.data", &data);
-    println!(
-        "Parsed resources in {} seconds",
-        (Instant::now() - timestamp).as_secs_f32()
-    );
-
-    panic!("");
-
     match &args.command {
         Commands::Extract {
             flatten,
             files,
             out_dir,
-        } => todo!(),
+        } => {
+            let paths = file_tree.paths();
+            let globs = files
+                .iter()
+                .map(|file_name| glob::Pattern::new(&file_name).expect("invalid glob pattern"))
+                .collect::<Vec<_>>();
+
+            for (path, node) in paths {
+                let mut matches = false;
+
+                for glob in &globs {
+                    if glob.matches_path(&*path) {
+                        matches = true;
+                        break;
+                    }
+                }
+
+                if !matches {
+                    continue;
+                }
+
+                let target_path = if *flatten {
+                    out_dir.join(path.file_name().expect("file has no filename"))
+                } else {
+                    out_dir.join(&*path)
+                };
+
+                match pkg_loader.as_mut() {
+                    Some(pkg_loader) => {
+                        // TODO: currently doesn't flatten
+                        node.extract_to(target_path, pkg_loader)?;
+                    }
+                    None => {
+                        return Err(eyre::eyre!(
+                            "Package file loader is unavailable. Check that the pkg_dir exists."
+                        ));
+                    }
+                }
+            }
+        }
         Commands::Metadata { format, out_file } => {
-            let mut data = serialization::tree_to_serialized_files(file_tree.clone());
-            let mut out_file = File::create(out_file)?;
+            let data = serialization::tree_to_serialized_files(file_tree.clone());
+            let out_file = File::create(out_file)?;
             match format {
                 MetadataFormat::Json => {
                     serde_json::to_writer(out_file, &data)?;
@@ -276,57 +194,28 @@ fn main() -> Result<()> {
                 }
             };
         }
+        Commands::GameParams { out_file, ugly } => match pkg_loader.as_mut() {
+            Some(pkg_loader) => {
+                let mut writer = BufWriter::new(File::create(out_file)?);
+                crate::game_params::read_game_params_as_json(
+                    !ugly,
+                    file_tree.clone(),
+                    pkg_loader,
+                    &mut writer,
+                )?;
+            }
+            None => {
+                return Err(eyre::eyre!(
+                    "Package file loader is unavailable. Check that the pkg_dir exists."
+                ));
+            }
+        },
     }
-
-    // if let Some(pkg_loader) = pkg_loader.as_mut() {
-    //     file_tree.extract_to("res", pkg_loader)?;
-    // }
-
-    // if let Ok(node) = resource.find("content/GameParams.data") {
-    //     if let Some(pkg_loader) = pkg_loader.as_mut() {
-    //         let mut file = File::create("out.bin")?;
-    //         node.read_file(pkg_loader, &mut file)?;
-    //         panic!("{:#X?}", node.path());
-    //     }
-    // }
-
-    // for file in &resources {
-    //     if file.filename.file_name().unwrap() == "GameParams.data" {
-    //         println!("{:#X?}", file);
-    //         if let Some(packages_dir) = packages_dir {
-    //             println!(
-    //                 "{:?}",
-    //                 packages_dir.join(file.volume_info.filename.to_string())
-    //             );
-    //             let pkg_file = File::open(packages_dir.join(file.volume_info.filename.to_string()))
-    //                 .expect("Input file does not exist");
-
-    //             let mmap = unsafe { MmapOptions::new().map(&pkg_file)? };
-    //             let end_offset = (file.file_info.offset + (file.file_info.size as u64)) as usize;
-
-    //             let cursor = Cursor::new(&mmap[(file.file_info.offset as usize)..end_offset]);
-    //             let mut decoder = DeflateDecoder::new(cursor);
-    //             let mut out_data = Vec::new();
-    //             decoder
-    //                 .read_to_end(&mut out_data)
-    //                 .expect("failed to decompress data");
-    //             std::fs::write("out.bin", out_data).unwrap();
-    //         }
-    //         break;
-    //     }
-    // }
 
     println!(
         "Parsed resources in {} seconds",
         (Instant::now() - timestamp).as_secs_f32()
     );
-
-    // let mut decoder = ZlibDecoder::new(File::open(&args.pkg).expect("Input file does not exist"));
-    // let mut out_data = Vec::new();
-    // decoder
-    //     .read_to_end(&mut out_data)
-    //     .expect("failed to decompress data");
-    // std::fs::write("out.bin", out_data).unwrap();
 
     Ok(())
 }
