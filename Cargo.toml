@@ -5,6 +5,8 @@ license = "MIT"
 version = "0.1.0"
 edition = "2021"
 exclude = [".github/"]
+repository = "https://github.com/landaire/wowsunpack"
+documnetation = "https://docs.rs/wowsunpack/"
 
 [lib]
 name = "wowsunpack"

@@ -2,7 +2,7 @@
 
 A utility for unpacking World of Warships game assets.
 
-![crates.io](https://img.shields.io/crates/v/wowsunpack.svg)  ![docs.rs](https://img.shields.io/crates/v/docsrs.svg)
+[![crates.io](https://img.shields.io/crates/v/wowsunpack.svg)](https://crates.io/crates/wowsunpack)  [![docs.rs](https://img.shields.io/docsrs/v/wowsunpack.svg)](https://docs.rs/wowsunpack/)
 
 ## Features
 
