@@ -2,7 +2,6 @@ use eyre::{Result, WrapErr};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use glob::glob;
 use memmap::MmapOptions;
-use pkg::PkgFileLoader;
 use std::{
     collections::HashSet,
     convert,
@@ -13,14 +12,11 @@ use std::{
     sync::Mutex,
     time::Instant,
 };
+use wowsunpack::pkg::PkgFileLoader;
+use wowsunpack::{idx, serialization};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
-
-mod game_params;
-mod idx;
-mod pkg;
-mod serialization;
 
 /// Utility for interacting with World of Warships game assets
 #[derive(Parser, Debug)]
@@ -91,7 +87,7 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
 
     let mut reader = Cursor::new(&mmap[..]);
 
-    Ok(crate::idx::parse(&mut reader)?)
+    Ok(wowsunpack::idx::parse(&mut reader)?)
 }
 
 fn main() -> Result<()> {
@@ -205,7 +201,7 @@ fn main() -> Result<()> {
         Commands::GameParams { out_file, ugly } => match pkg_loader.as_mut() {
             Some(pkg_loader) => {
                 let mut writer = BufWriter::new(File::create(out_file)?);
-                crate::game_params::read_game_params_as_json(
+                wowsunpack::game_params::read_game_params_as_json(
                     !ugly,
                     file_tree.clone(),
                     pkg_loader,
