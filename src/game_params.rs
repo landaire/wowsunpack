@@ -1,4 +1,4 @@
-use std::io::{BufWriter, Cursor, Write};
+use std::io::{Cursor, Write};
 
 use flate2::read::ZlibDecoder;
 use serde_json::Map;

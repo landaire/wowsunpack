@@ -7,7 +7,6 @@ use std::{
     path::{Component, Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
-    thread::current,
 };
 
 use binrw::{BinRead, NullString, PosValue};

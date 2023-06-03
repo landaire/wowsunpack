@@ -7,7 +7,7 @@ use std::{
 };
 
 use flate2::read::DeflateDecoder;
-use memmap::{Mmap, MmapOptions};
+use memmap::{MmapOptions};
 use thiserror::Error;
 
 use crate::idx::FileInfo;

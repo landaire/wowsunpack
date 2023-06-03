@@ -1,14 +1,12 @@
 use eyre::{Result, WrapErr};
-use flate2::read::{DeflateDecoder, ZlibDecoder};
-use glob::glob;
+
+
 use memmap::MmapOptions;
 use std::{
     collections::HashSet,
-    convert,
-    fs::{self, File, FileType},
-    io::{BufWriter, Cursor, Read},
+    fs::{self, File},
+    io::{BufWriter, Cursor},
     path::{Path, PathBuf},
-    rc::Rc,
     sync::Mutex,
     time::Instant,
 };
@@ -136,7 +134,7 @@ fn main() -> Result<()> {
         Commands::Extract {
             flatten,
             files,
-            mut out_dir,
+            out_dir,
         } => {
             let paths = file_tree.paths();
             let globs = files
