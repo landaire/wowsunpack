@@ -10,24 +10,29 @@ path = "src/lib.rs"
 [[bin]]
 name = "wowsunpack"
 path = "src/main.rs"
+required-features = ["bin"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.3.0", features = ["derive"] }
+clap = { version = "4.3.0", features = ["derive"], optional = true }
 flate2 = "1.0"
 byteorder = "1.4"
 binrw = "0.11"
-eyre = "0.6"
+eyre = { version = "0.6", optional = true }
 memmap = "0.7"
 thiserror = "1.0"
 rayon = "1.7"
-murmur3 = "0.5"
+# murmur3 = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-csv = "1.2"
+csv = { version = "1.2", optional = true }
 serde-pickle = "1.0"
-glob = "0.3"
+glob = { version = "0.3", optional = true }
+
+[features]
+bin = ["eyre", "clap", "csv", "glob"]
+default = []
 
 [patch.crates-io]
 serde-pickle = { git = "https://github.com/landaire/serde-pickle.git" }
