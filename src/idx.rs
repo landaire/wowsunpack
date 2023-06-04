@@ -202,6 +202,19 @@ impl FileNode {
         path: P,
         pkg_loader: &PkgFileLoader,
     ) -> Result<(), IdxError> {
+        self.extract_to_path_with_callback(path, pkg_loader, || {
+            // do nothing
+        })
+    }
+    pub fn extract_to_path_with_callback<P: AsRef<Path>, F>(
+        &self,
+        path: P,
+        pkg_loader: &PkgFileLoader,
+        callback: F,
+    ) -> Result<(), IdxError>
+    where
+        F: Fn() -> () + Send + Sync,
+    {
         let out_path = path.as_ref();
         if !out_path.exists() {
             std::fs::create_dir_all(out_path).unwrap();
@@ -251,7 +264,11 @@ impl FileNode {
 
         files.par_iter().try_for_each(|(this_node_path, node)| {
             let mut out_file = File::create(this_node_path.as_ref())?;
-            node.read_file(pkg_loader, &mut out_file)
+            let res = node.read_file(pkg_loader, &mut out_file);
+
+            (callback)();
+
+            res
         })?;
 
         Ok(())

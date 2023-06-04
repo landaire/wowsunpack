@@ -7,13 +7,16 @@ use std::{
     io::{stdout, BufWriter, Cursor, Write},
     os::unix::prelude::OsStrExt,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     time::Instant,
 };
 use wowsunpack::pkg::PkgFileLoader;
 use wowsunpack::{idx, serialization};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
 /// Utility for interacting with World of Warships game assets
@@ -93,7 +96,48 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
 
 fn main() -> Result<()> {
     let timestamp = Instant::now();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    // If we didn't get any idx dirs/files passed to us, try auto-detecting the
+    // WoWs directory
+    if args.idx_files.is_empty() {
+        let mut latest_version = None;
+        if Path::new("WorldOfWarships.exe").exists() {
+            // Maybe we are? Try enumerating the `bin` directory
+            let paths = fs::read_dir("bin")
+                .wrap_err("No index files were provided and could not enumerate `bin` directory")?;
+            for path in paths {
+                let path = path.wrap_err("could not enumerate path")?;
+                if path.file_type()?.is_dir() {
+                    if let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
+                    {
+                        match latest_version {
+                            Some(other_version) => {
+                                if other_version < version {
+                                    latest_version = Some(version);
+                                }
+                            }
+                            None => latest_version = Some(version),
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(latest_version) = latest_version {
+            let latest_version_str = format!("{}", latest_version);
+
+            args.idx_files
+                .push(["bin", latest_version_str.as_str(), "idx"].iter().collect())
+        }
+
+        if latest_version.is_none() || !args.idx_files[0].exists() {
+            Args::command().print_help()?;
+
+            eprintln!("");
+
+            return Err(eyre::eyre!("Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"));
+        }
+    }
 
     let resources = Mutex::new(Vec::new());
     let mut paths = Vec::with_capacity(args.idx_files.len());
@@ -146,6 +190,7 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>();
 
             let mut extracted_paths = HashSet::<&Path>::new();
+            let mut files_written = AtomicUsize::new(0);
 
             for (path, node) in &paths {
                 let mut matches = false;
@@ -174,7 +219,9 @@ fn main() -> Result<()> {
 
                 match pkg_loader.as_mut() {
                     Some(pkg_loader) => {
-                        node.extract_to(&out_dir, pkg_loader)?;
+                        node.extract_to_path_with_callback(&out_dir, pkg_loader, || {
+                            files_written.fetch_add(1, Ordering::Relaxed);
+                        })?;
                     }
                     None => {
                         return Err(eyre::eyre!(
@@ -183,6 +230,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            println!("Wrote {} files", files_written.load(Ordering::Relaxed));
         }
         Commands::Metadata { format, out_file } => {
             let data = serialization::tree_to_serialized_files(file_tree.clone());
@@ -236,13 +284,15 @@ fn main() -> Result<()> {
         }
         Commands::GameParams { out_file, ugly } => match pkg_loader.as_mut() {
             Some(pkg_loader) => {
-                let mut writer = BufWriter::new(File::create(out_file)?);
+                let mut writer = BufWriter::new(File::create(&out_file)?);
                 wowsunpack::game_params::read_game_params_as_json(
                     !ugly,
                     file_tree.clone(),
                     pkg_loader,
                     &mut writer,
                 )?;
+
+                println!("GameParams written to {:?}", out_file);
             }
             None => {
                 return Err(eyre::eyre!(
@@ -253,7 +303,7 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "Parsed resources in {} seconds",
+        "Finished in {} seconds",
         (Instant::now() - timestamp).as_secs_f32()
     );
 
