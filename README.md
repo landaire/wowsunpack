@@ -4,6 +4,16 @@ A utility for unpacking World of Warships game assets.
 
 [![crates.io](https://img.shields.io/crates/v/wowsunpack.svg)](https://crates.io/crates/wowsunpack)  [![docs.rs](https://img.shields.io/docsrs/v/wowsunpack.svg)](https://docs.rs/wowsunpack/)
 
+## Installation
+
+Head over to the [Releases](https://github.com/landaire/wowsunpack/releases) page to grab the latest precompiled binary.
+
+If you wish to install manually (building from crates.io source):
+
+```
+$ cargo install --force wowsunpack
+```
+
 ## Features
 
 - Directly read and convert `GameParams.data` to JSON
