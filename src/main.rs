@@ -2,6 +2,7 @@ use eyre::{Result, WrapErr};
 
 use memmap::MmapOptions;
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs::{self, File},
     io::{stdout, BufWriter, Cursor, Write},
@@ -45,6 +46,13 @@ enum Commands {
         /// When this flag is set, the file will be written to `res/GameParams.data`
         #[clap(long)]
         flatten: bool,
+
+        /// Do not preserve the matched file path when writing output files. For example,
+        /// if `gui/achievements/*` is passed as a `files` arg and `res_unpacked` is the `out_dir`, it would normally
+        /// extract as `res_unpacked/gui/achievements/<FILE_NAME>`. Enabling this option will instead extract as
+        /// `res_unpacked/<FILE_NAME>`, not preserving the originally matched directory structure.
+        #[clap(long)]
+        no_preserve_path: bool,
 
         /// Files to extract. Glob patterns such as `content/**/*.xml` are accepted
         files: Vec<String>,
@@ -181,6 +189,7 @@ fn main() -> Result<()> {
             flatten,
             files,
             out_dir,
+            no_preserve_path,
         } => {
             let paths = file_tree.paths();
             let globs = files
@@ -215,6 +224,15 @@ fn main() -> Result<()> {
                 }
 
                 extracted_paths.insert((&*path).as_ref());
+
+                let is_root = { node.0.borrow().is_root };
+
+                let out_dir = if !is_root && !no_preserve_path {
+                    out_dir.join(node.path()?.parent().expect("no parent node"))
+                } else {
+                    // TODO: optimize -- should be an unnecessary clone
+                    out_dir.clone()
+                };
 
                 match pkg_loader.as_mut() {
                     Some(pkg_loader) => {
