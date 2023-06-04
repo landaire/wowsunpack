@@ -1,12 +1,12 @@
 use std::{
-    cell::RefCell,
-    collections::BTreeMap,
+    cell::{RefCell, UnsafeCell},
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{self, Cursor, Read, SeekFrom, Write},
     ops::Deref,
     path::{Component, Path, PathBuf},
-    rc::{Rc, Weak},
-    sync::Arc,
+    rc::{Rc, Weak as RcWeak},
+    sync::{Arc, Weak},
 };
 
 use binrw::{BinRead, NullString, PosValue};
@@ -139,24 +139,31 @@ pub struct Resource {
 
 /// Represents a node in a FileTree
 #[derive(Debug, Default, Clone)]
-pub struct FileNode(pub Rc<RefCell<FileTree>>);
-/// SAFETY: we're definitely skirting the rules a bit and this is NOT safe for
-/// a public library, but is safe for how the main app uses FileNodes
-///
-/// 1. Do not clone within a rayon task
-/// 2. Do not borrow mutably within a rayon task
+pub struct FileNode(Arc<UnsafeCell<FileTree>>);
+/// SAFETY: We never construct a mutable reference after the FileTree is constructed
 unsafe impl Send for FileNode {}
 unsafe impl Sync for FileNode {}
 
+impl FileNode {
+    fn get_mut(&self) -> &mut FileTree {
+        unsafe { &mut *self.0.get() }
+    }
+}
+
 impl Deref for FileNode {
-    type Target = Rc<RefCell<FileTree>>;
+    type Target = FileTree;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        unsafe { &*self.0.get() }
     }
 }
 
 impl FileNode {
+    /// Whether this is node is a file
+    pub fn is_file(&self) -> bool {
+        self.is_file
+    }
+
     /// Finds a node with the given path starting from this node
     pub fn find<P: AsRef<Path>>(&self, path: P) -> Result<FileNode, IdxError> {
         let path = path.as_ref();
@@ -166,7 +173,7 @@ impl FileNode {
             match component {
                 // This might be an absolute path
                 Component::RootDir => {
-                    if current_tree_ptr.borrow().is_root {
+                    if current_tree_ptr.is_root {
                         continue;
                     }
                 }
@@ -175,8 +182,7 @@ impl FileNode {
                     let mut found_child = None;
                     {
                         if let Some(child) = current_tree_ptr
-                            .borrow()
-                            .children
+                            .children()
                             .get(name.to_str().expect("path could not be converted"))
                         {
                             found_child = Some(child.clone());
@@ -217,10 +223,9 @@ impl FileNode {
     ) -> Result<(), IdxError> {
         // Build this file's full path
         //file.extract(path, destination)
-        let this = self.0.borrow();
         pkg_loader.read(
-            &this.volume_info.as_ref().unwrap().filename.to_string(),
-            this.file_info.as_ref().unwrap(),
+            &self.volume_info().as_ref().unwrap().filename.to_string(),
+            self.file_info().unwrap(),
             out_data,
         )?;
 
@@ -234,13 +239,12 @@ impl FileNode {
         let mut path_parts = Vec::with_capacity(4);
         let mut node = Some(self.clone());
         while let Some(current_node) = node {
-            let current_node = current_node.0.borrow();
-            path_parts.push(current_node.filename.clone());
+            path_parts.push(current_node.filename().to_owned());
 
             node = current_node
                 .parent
                 .as_ref()
-                .map(|p| FileNode(p.upgrade().expect("failed to get parent node")));
+                .map(|p| FileNode(p.0.upgrade().expect("failed to get parent node")));
         }
 
         Ok(path_parts.as_slice().iter().rev().collect())
@@ -273,7 +277,7 @@ impl FileNode {
             std::fs::create_dir_all(out_path).unwrap();
         }
 
-        let child_nodes_count = { self.0.borrow().children.len() };
+        let child_nodes_count = { self.children().len() };
 
         let mut nodes = Vec::with_capacity(1 + child_nodes_count);
         nodes.push((Arc::new(out_path.to_owned()), self.clone()));
@@ -289,8 +293,7 @@ impl FileNode {
             let is_file;
             let this_node_path;
             {
-                let node = node.0.borrow();
-                is_file = node.file_info.is_some();
+                is_file = node.is_file();
                 if node.is_root {
                     this_node_path = Arc::clone(&target_path);
                 } else {
@@ -301,13 +304,12 @@ impl FileNode {
             if is_file {
                 files.push((this_node_path, node))
             } else {
-                let node = node.0.borrow();
                 let this_node_path = this_node_path;
                 if !this_node_path.exists() {
                     std::fs::create_dir(&*this_node_path)?;
                 }
 
-                for (_child_name, child) in &node.children {
+                for (_child_name, child) in node.children() {
                     nodes.push((Arc::clone(&this_node_path), child.clone()));
                 }
             }
@@ -330,23 +332,20 @@ impl FileNode {
     /// Returns a `Vec<(full path, node)>` of this node and all of its children
     pub fn paths(&self) -> Vec<(Rc<PathBuf>, FileNode)> {
         let mut out_nodes = Vec::new();
-        let mut pending_nodes: Vec<(Rc<PathBuf>, FileNode)> = vec![(
-            Rc::new(PathBuf::from(&self.0.borrow().filename)),
-            self.clone(),
-        )];
+        let mut pending_nodes: Vec<(Rc<PathBuf>, FileNode)> =
+            vec![(Rc::new(PathBuf::from(self.filename())), self.clone())];
 
-        while let Some((parent_path, node_ptr)) = pending_nodes.pop() {
+        while let Some((parent_path, node)) = pending_nodes.pop() {
             let full_path = {
-                let node = node_ptr.0.borrow();
-                let full_path = Rc::new(parent_path.join(&node.filename));
-                for (_child_name, child) in &node.children {
+                let full_path = Rc::new(parent_path.join(node.filename()));
+                for (_child_name, child) in node.children() {
                     pending_nodes.push((Rc::clone(&full_path), child.clone()));
                 }
 
                 full_path
             };
 
-            out_nodes.push((full_path, node_ptr));
+            out_nodes.push((full_path, node));
         }
 
         out_nodes
@@ -355,28 +354,21 @@ impl FileNode {
 
 /// Weak file node to avoid cyclic references
 #[derive(Debug, Clone, Default)]
-pub struct WeakFileNode(Weak<RefCell<FileTree>>);
-/// SAFETY: see comment above -- not really safe for generic library usage
+pub struct WeakFileNode(Weak<UnsafeCell<FileTree>>);
+/// SAFETY: We never construct a mutable reference after the FileTree is constructed
 unsafe impl Send for WeakFileNode {}
 unsafe impl Sync for WeakFileNode {}
-impl Deref for WeakFileNode {
-    type Target = Weak<RefCell<FileTree>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 /// A FileTree is essentially a lightweight filesystem tree but with a clunkier API
 #[derive(Debug)]
 pub struct FileTree {
-    pub filename: String,
-    pub children: BTreeMap<String, FileNode>,
-    pub parent: Option<WeakFileNode>,
-    pub is_file: bool,
-    pub file_info: Option<FileInfo>,
-    pub volume_info: Option<Volume>,
-    pub is_root: bool,
+    filename: String,
+    children: BTreeMap<String, FileNode>,
+    parent: Option<WeakFileNode>,
+    is_file: bool,
+    file_info: Option<FileInfo>,
+    volume_info: Option<Volume>,
+    is_root: bool,
 }
 
 impl FileTree {
@@ -390,6 +382,39 @@ impl FileTree {
             volume_info: None,
             is_root: false,
         }
+    }
+
+    pub fn filename(&self) -> &str {
+        self.filename.as_str()
+    }
+
+    pub fn children(&self) -> &BTreeMap<String, FileNode> {
+        // SAFETY: we will never construct a mutable reference after the filetree has been built
+        &self.children
+    }
+
+    /// Returns a reference to this file's parent FileTree (directory).
+    pub fn parent(&self) -> Option<FileNode> {
+        self.parent
+            .as_ref()
+            .and_then(|parent| Some(FileNode(parent.0.upgrade()?)))
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.is_file
+    }
+
+    pub fn file_info(&self) -> Option<&FileInfo> {
+        self.file_info.as_ref()
+    }
+
+    pub fn volume_info(&self) -> Option<&Volume> {
+        self.volume_info.as_ref()
+    }
+
+    /// Whether or not this is the root directory
+    pub fn is_root(&self) -> bool {
+        self.is_root
     }
 }
 
@@ -430,9 +455,9 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
         }
     }
 
-    let file_tree = FileNode::default();
+    let mut file_tree = FileNode::default();
     {
-        file_tree.borrow_mut().is_root = true;
+        file_tree.get_mut().is_root = true;
     }
     let mut cached_nodes = BTreeMap::<u64, WeakFileNode>::new();
 
@@ -484,16 +509,16 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
             let this_node_ptr = FileNode::default();
 
             root_node
-                .borrow_mut()
+                .get_mut()
                 .children
                 .insert(filename.clone(), this_node_ptr.clone());
 
             {
-                let mut this_node = this_node_ptr.borrow_mut();
+                let mut this_node = this_node_ptr.get_mut();
                 {
                     cached_nodes.insert(
                         file_in_chain_id,
-                        WeakFileNode(Rc::downgrade(&this_node_ptr.0)),
+                        WeakFileNode(Arc::downgrade(&this_node_ptr.0)),
                     );
                 }
 
@@ -504,7 +529,7 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
                 this_node.file_info = file_info.cloned();
                 this_node.volume_info = volume_info.map(|v| *v).cloned();
 
-                this_node.parent = Some(WeakFileNode(Rc::downgrade(&root_node.0)));
+                this_node.parent = Some(WeakFileNode(Arc::downgrade(&root_node.0)));
                 this_node.filename = filename;
             }
 

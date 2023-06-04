@@ -21,11 +21,9 @@ pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
 
     let mut nodes = vec![(Rc::new(PathBuf::new()), node)];
     while let Some((path, node)) = nodes.pop() {
-        let node = node.0.borrow();
-        let this_path = path.join(&node.filename);
+        let this_path = path.join(node.filename());
         let (compressed_size, compression_info, unpacked_size, crc32) = node
-            .file_info
-            .as_ref()
+            .file_info()
             .map(|file_info| {
                 (
                     file_info.size as usize,
@@ -38,7 +36,7 @@ pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
 
         let file = SerializedFile {
             path: this_path.clone(),
-            is_directory: node.file_info.is_none(),
+            is_directory: !node.is_file(),
             compressed_size,
             compression_info,
             unpacked_size,
@@ -49,7 +47,7 @@ pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
 
         let this_path = Rc::new(this_path);
 
-        for (_child_name, child) in &node.children {
+        for (_child_name, child) in node.children() {
             nodes.push((Rc::clone(&this_path), child.clone()));
         }
     }

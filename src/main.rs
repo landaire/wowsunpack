@@ -213,7 +213,7 @@ fn main() -> Result<()> {
 
                 // Skip this node if the file path doesn't match OR we're told to
                 // flatten the file system
-                if !matches || (flatten && !node.0.borrow().is_file) {
+                if !matches || (flatten && !node.is_file()) {
                     continue;
                 }
 
@@ -226,9 +226,7 @@ fn main() -> Result<()> {
 
                 extracted_paths.insert((&*path).as_ref());
 
-                let is_root = { node.0.borrow().is_root };
-
-                let out_dir = if !is_root && !strip_prefix {
+                let out_dir = if !node.is_root() && !strip_prefix {
                     out_dir.join(node.path()?.parent().expect("no parent node"))
                 } else {
                     // TODO: optimize -- should be an unnecessary clone
