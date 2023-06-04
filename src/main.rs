@@ -5,7 +5,6 @@ use std::{
     collections::HashSet,
     fs::{self, File},
     io::{stdout, BufWriter, Cursor, Write},
-    os::unix::prelude::OsStrExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -190,7 +189,7 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>();
 
             let mut extracted_paths = HashSet::<&Path>::new();
-            let mut files_written = AtomicUsize::new(0);
+            let files_written = AtomicUsize::new(0);
 
             for (path, node) in &paths {
                 let mut matches = false;
