@@ -19,7 +19,7 @@ $ cargo install --force wowsunpack
 - Directly read and convert `GameParams.data` to JSON
 - Dump IDX file resource metadata to a serialized format (JSON or CSV)
 - Extract game assets using glob file patterns
-- Use this utility as a library
+- Core logic can be used as a library by other applications
 
 Planned:
 
@@ -51,8 +51,8 @@ World of Warships game files are packed in two custom file formats -- `.idx` fil
 
 - Is not open-source
 - This utility's backing library can be easily adopted into other applications that would like to directly read game data
-- Slower (~2x margin using the CLI tool, ~6x margin using the GUI)
+- Slower (~2x using the CLI tool, ~6x using the GUI)
 - Does not expose meta information about the resources
 - Does not expose data in a machine-serializable format
 
-That two points are the big motivator for development of this utility. Applications like [minimap_renderer](https://github.com/WoWs-Builder-Team/minimap_renderer) depend on game assets and reading these assets isn't easily automated with today's tools.
+The first two points are the big motivator for development of this utility. Applications like [minimap_renderer](https://github.com/WoWs-Builder-Team/minimap_renderer) depend on game assets and reading these assets isn't easily automated with today's tools.

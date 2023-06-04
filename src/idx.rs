@@ -29,14 +29,20 @@ pub enum IdxError {
     BinReadErr(#[from] binrw::Error),
 }
 
+/// Main struct describing an `.idx` file
 #[derive(Debug, BinRead)]
 pub struct IdxFile {
+    /// The offset at which parsing began for this structure
     resources_meta_offset: PosValue<()>,
+    /// Metadata describing resource/file/volume tables
     resources_metadata: ResourceMetadata,
+    /// Files and directories
     #[br(count = resources_metadata.resources_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.resources_table_pointer))]
     resources: Vec<PackedFileMetadata>,
+    /// File metadata
     #[br(count = resources_metadata.file_infos_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.file_infos_table_pointer))]
     file_infos: Vec<FileInfo>,
+    /// Where resource data is actually stored
     #[br(count = resources_metadata.volumes_count, seek_before = SeekFrom::Start(resources_meta_offset.pos + resources_metadata.volumes_table_pointer))]
     volumes: Vec<Volume>,
 }
@@ -44,56 +50,86 @@ pub struct IdxFile {
 #[derive(Debug, BinRead)]
 #[br(magic = 0x50465349u32)]
 struct Header {
+    /// Helps identify if we're loading data on a system with incorrect endianness
     endianness: u32,
+    /// Murmur3 hash of the whole file starting from the end of the header
     murmur_hash: u32,
-    endianness2: u32,
+    /// Format revision
+    version: u32,
 }
 
 #[derive(Debug, BinRead)]
 struct ResourceMetadata {
+    /// Number of resources in the resources table
     resources_count: u32,
+    /// Number of files in the file table
     file_infos_count: u32,
+    /// Number of volumes in the volume table
     volumes_count: u32,
     unused: u32,
+    /// Offset from the base of this struct to the resources table
     resources_table_pointer: u64,
+    /// Offset from the base of this struct to the file infos table
     file_infos_table_pointer: u64,
+    /// Offset from the base of this struct to the volumes table
     volumes_table_pointer: u64,
 }
-
 #[derive(Debug, Clone, BinRead)]
 pub struct PackedFileMetadata {
+    /// This struct's offset in the IDX file it was read from
     this_offset: PosValue<()>,
+    /// ???? why did I name it this? possibly drunk and can't remember what this field
+    /// represents
     resource_ptr: u64,
+
+    /// The offset relative to this struct where the filename is stored
     filename_ptr: u64,
+    /// This resource's ID
     id: u64,
+    /// This resource's parent ID
     parent_id: u64,
 
+    /// This resource's filename
     #[br(seek_before = SeekFrom::Start(this_offset.pos + filename_ptr), restore_position)]
     filename: NullString,
 }
 
+/// Meta information about a file
 #[derive(Debug, Clone, BinRead)]
 pub struct FileInfo {
+    /// The resource ID which this file info belongs to
     pub resource_id: u64,
+    /// The volume ID which this resource resides in
     pub volume_id: u64,
+    /// This resource's offset within the volume
     pub offset: u64,
+    /// How the file is compressed
     pub compression_info: u64,
+    /// Compressed data size
     pub size: u32,
+    /// Uncompressed file CRC32
     pub crc32: u32,
+    /// Uncompressed file size
     pub unpacked_size: u32,
     pub padding: u32,
 }
 
+/// Meta informationa bout a volume
 #[derive(Debug, Clone, BinRead)]
 pub struct Volume {
     this_offset: PosValue<()>,
+    /// The length of this volume's name
     pub len: u64,
+    /// Where this volume's name is located relative to this struct (or perhaps the table?)
     pub name_ptr: u64,
+    /// The volume's ID
     pub volume_id: u64,
+    /// The volume's filename
     #[br(seek_before = SeekFrom::Start(this_offset.pos + name_ptr), restore_position)]
     pub filename: NullString,
 }
 
+/// A parsed resource
 #[derive(Debug)]
 pub struct Resource {
     pub filename: PathBuf,
@@ -101,10 +137,17 @@ pub struct Resource {
     pub volume_info: Volume,
 }
 
+/// Represents a node in a FileTree
 #[derive(Debug, Default, Clone)]
 pub struct FileNode(pub Rc<RefCell<FileTree>>);
+/// SAFETY: we're definitely skirting the rules a bit and this is NOT safe for
+/// a public library, but is safe for how the main app uses FileNodes
+///
+/// 1. Do not clone within a rayon task
+/// 2. Do not borrow mutably within a rayon task
 unsafe impl Send for FileNode {}
 unsafe impl Sync for FileNode {}
+
 impl Deref for FileNode {
     type Target = Rc<RefCell<FileTree>>;
 
@@ -114,6 +157,7 @@ impl Deref for FileNode {
 }
 
 impl FileNode {
+    /// Finds a node with the given path starting from this node
     pub fn find<P: AsRef<Path>>(&self, path: P) -> Result<FileNode, IdxError> {
         let path = path.as_ref();
         let mut current_tree_ptr = self.clone();
@@ -154,6 +198,8 @@ impl FileNode {
         Ok(current_tree_ptr)
     }
 
+    /// Given a `path` and `pkg_loader`, this will first find the node at the given path and
+    /// then copy its data to the given writer.
     pub fn read_file_at_path<P: AsRef<Path>, W: Write>(
         &self,
         path: P,
@@ -163,6 +209,7 @@ impl FileNode {
         self.find(path)?.read_file(pkg_loader, out_data)
     }
 
+    /// Copy this file's data to the given writer.
     pub fn read_file<W: Write>(
         &self,
         pkg_loader: &PkgFileLoader,
@@ -180,6 +227,8 @@ impl FileNode {
         Ok(())
     }
 
+    /// This file's full path.
+    /// TODO: Cache for optimization. Currently O(n) with path components.
     pub fn path(&self) -> Result<PathBuf, IdxError> {
         // Assume at least 4 parts to the path
         let mut path_parts = Vec::with_capacity(4);
@@ -197,6 +246,7 @@ impl FileNode {
         Ok(path_parts.as_slice().iter().rev().collect())
     }
 
+    /// Extract this file to disk at the given `path`
     pub fn extract_to<P: AsRef<Path>>(
         &self,
         path: P,
@@ -206,6 +256,9 @@ impl FileNode {
             // do nothing
         })
     }
+
+    /// Extract this file to disk at the given `path`, executing the given `callback` after
+    /// a file is written.
     pub fn extract_to_path_with_callback<P: AsRef<Path>, F>(
         &self,
         path: P,
@@ -274,6 +327,7 @@ impl FileNode {
         Ok(())
     }
 
+    /// Returns a `Vec<(full path, node)>` of this node and all of its children
     pub fn paths(&self) -> Vec<(Rc<PathBuf>, FileNode)> {
         let mut out_nodes = Vec::new();
         let mut pending_nodes: Vec<(Rc<PathBuf>, FileNode)> = vec![(
@@ -299,8 +353,10 @@ impl FileNode {
     }
 }
 
+/// Weak file node to avoid cyclic references
 #[derive(Debug, Clone, Default)]
 pub struct WeakFileNode(Weak<RefCell<FileTree>>);
+/// SAFETY: see comment above -- not really safe for generic library usage
 unsafe impl Send for WeakFileNode {}
 unsafe impl Sync for WeakFileNode {}
 impl Deref for WeakFileNode {
@@ -311,13 +367,13 @@ impl Deref for WeakFileNode {
     }
 }
 
+/// A FileTree is essentially a lightweight filesystem tree but with a clunkier API
 #[derive(Debug)]
 pub struct FileTree {
     pub filename: String,
     pub children: BTreeMap<String, FileNode>,
     pub parent: Option<WeakFileNode>,
     pub is_file: bool,
-    pub resource_info: Option<PackedFileMetadata>,
     pub file_info: Option<FileInfo>,
     pub volume_info: Option<Volume>,
     pub is_root: bool,
@@ -330,7 +386,6 @@ impl FileTree {
             children: Default::default(),
             parent: None,
             is_file: false,
-            resource_info: None,
             file_info: None,
             volume_info: None,
             is_root: false,
@@ -344,16 +399,18 @@ impl Default for FileTree {
     }
 }
 
+/// Parse an `idx` file
 pub fn parse(data: &mut Cursor<&[u8]>) -> Result<IdxFile, IdxError> {
     let header = Header::read_ne(data)?;
-    if header.endianness != 0x20000000 && header.endianness2 != 0x40 {
+    if header.endianness != 0x20000000 && header.version != 0x40 {
         return Err(IdxError::IncorrectEndian.into());
     }
 
     IdxFile::read_ne(data).map_err(IdxError::from)
 }
 
-pub fn build_file_tree(idx_files: &Vec<IdxFile>) -> FileNode {
+/// Builds a file tree from a slice of index files
+pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
     // Create hash lookups for each resource, file info, and volume
     let mut packed_resources = BTreeMap::new();
     let mut file_infos = BTreeMap::new();
@@ -446,7 +503,6 @@ pub fn build_file_tree(idx_files: &Vec<IdxFile>) -> FileNode {
                 this_node.is_file = file_info.is_some();
                 this_node.file_info = file_info.cloned();
                 this_node.volume_info = volume_info.map(|v| *v).cloned();
-                this_node.resource_info = Some(file_metadata.clone());
 
                 this_node.parent = Some(WeakFileNode(Rc::downgrade(&root_node.0)));
                 this_node.filename = filename;

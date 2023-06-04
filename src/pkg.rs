@@ -7,11 +7,14 @@ use std::{
 };
 
 use flate2::read::DeflateDecoder;
-use memmap::{MmapOptions};
+use memmap::MmapOptions;
 use thiserror::Error;
 
 use crate::idx::FileInfo;
 
+/// `PkgFileLoader` is reponsible for automatically loading and maintaining pkg files
+/// in-memory to ensure that a file is only loaded once, and can be conveniently
+/// loaded on-demand.
 #[derive(Debug)]
 pub struct PkgFileLoader {
     pkgs_dir: PathBuf,
@@ -27,6 +30,7 @@ pub enum PkgError {
 }
 
 impl PkgFileLoader {
+    /// Construct a new `PkgFileLoader` using `.pkg` files in the given directory
     pub fn new<P: AsRef<Path>>(pkgs_dir: P) -> Self {
         PkgFileLoader {
             pkgs_dir: pkgs_dir.as_ref().into(),
@@ -34,6 +38,9 @@ impl PkgFileLoader {
         }
     }
 
+    /// Ensures that the package with the given name is loaded.
+    ///
+    /// Returns an error if no package can be found or the package cannot be read.
     fn ensure_pkg_loaded<P: AsRef<Path>>(&self, pkg: P) -> Result<(), PkgError> {
         let pkg = pkg.as_ref().to_owned();
         let pkg_loaded = { self.pkgs.read().unwrap().contains_key(&pkg) };
@@ -56,6 +63,9 @@ impl PkgFileLoader {
         Ok(())
     }
 
+    /// Read some [`FileInfo`] out of the given `pkg`. Internally, this constructs
+    /// a decompression decoder that seeks to the offset specified by the file info
+    /// and copies the decompressed data to the given writer.
     pub fn read<P: AsRef<Path>, W: Write>(
         &self,
         pkg: P,
