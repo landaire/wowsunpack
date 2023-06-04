@@ -48,11 +48,12 @@ enum Commands {
         flatten: bool,
 
         /// Do not preserve the matched file path when writing output files. For example,
-        /// if `gui/achievements/*` is passed as a `files` arg and `res_unpacked` is the `out_dir`, it would normally
-        /// extract as `res_unpacked/gui/achievements/<FILE_NAME>`. Enabling this option will instead extract as
-        /// `res_unpacked/<FILE_NAME>`, not preserving the originally matched directory structure.
+        /// if `gui/achievements` is passed as a `files` arg and `res_unpacked` is the `out_dir`, it would normally
+        /// extract as `res_unpacked/gui/achievements/`. Enabling this option will instead extract as
+        /// `res_unpacked/achievements/` -- stripping the matched part which is not part of the filename
+        /// or its children.
         #[clap(long)]
-        no_preserve_path: bool,
+        strip_prefix: bool,
 
         /// Files to extract. Glob patterns such as `content/**/*.xml` are accepted
         files: Vec<String>,
@@ -189,7 +190,7 @@ fn main() -> Result<()> {
             flatten,
             files,
             out_dir,
-            no_preserve_path,
+            strip_prefix,
         } => {
             let paths = file_tree.paths();
             let globs = files
@@ -227,7 +228,7 @@ fn main() -> Result<()> {
 
                 let is_root = { node.0.borrow().is_root };
 
-                let out_dir = if !is_root && !no_preserve_path {
+                let out_dir = if !is_root && !strip_prefix {
                     out_dir.join(node.path()?.parent().expect("no parent node"))
                 } else {
                     // TODO: optimize -- should be an unnecessary clone
