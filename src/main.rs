@@ -55,11 +55,12 @@ enum Commands {
         #[clap(long)]
         strip_prefix: bool,
 
+        /// Where to extract files to
+        #[clap(short, long, default_value = "wowsunpack_extracted")]
+        out_dir: PathBuf,
+
         /// Files to extract. Glob patterns such as `content/**/*.xml` are accepted
         files: Vec<String>,
-
-        /// Where to write files to
-        out_dir: PathBuf,
     },
     /// Write meta information about the game assets to the specified output file.
     /// This may be useful for diffing contents between builds at a glance. Output
