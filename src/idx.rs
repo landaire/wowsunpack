@@ -2,6 +2,7 @@ use std::{
     cell::{RefCell, UnsafeCell},
     collections::{BTreeMap, VecDeque},
     fs::File,
+    hash::Hash,
     io::{self, Cursor, Read, SeekFrom, Write},
     ops::Deref,
     path::{Component, Path, PathBuf},
@@ -143,6 +144,19 @@ pub struct FileNode(Arc<UnsafeCell<FileTree>>);
 /// SAFETY: We never construct a mutable reference after the FileTree is constructed
 unsafe impl Send for FileNode {}
 unsafe impl Sync for FileNode {}
+
+impl std::cmp::PartialEq for FileNode {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl std::cmp::Eq for FileNode {}
+
+impl Hash for FileNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
 
 impl FileNode {
     fn get_mut(&self) -> &mut FileTree {
