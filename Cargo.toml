@@ -2,7 +2,7 @@
 name = "wowsunpack"
 description = "Utility for interacting with World of Warships game assets"
 license = "MIT"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 exclude = [".github/", "./format_templates/"]
 repository = "https://github.com/landaire/wowsunpack"
@@ -17,6 +17,10 @@ name = "wowsunpack"
 path = "src/main.rs"
 required-features = ["bin"]
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 clap = { version = "4.3.0", features = ["derive"], optional = true }
 flate2 = "1.0"
@@ -30,12 +34,9 @@ rayon = "1.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 csv = { version = "1.2", optional = true }
-serde-pickle = "1.0"
+serde-pickle = { git = "https://github.com/landaire/serde-pickle.git" }
 glob = { version = "0.3", optional = true }
 
 [features]
 bin = ["eyre", "clap", "csv", "glob"]
 default = ["bin"]
-
-[patch.crates-io]
-serde-pickle = { git = "https://github.com/landaire/serde-pickle.git" }
