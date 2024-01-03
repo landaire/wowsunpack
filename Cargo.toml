@@ -34,9 +34,7 @@ rayon = "1.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 csv = { version = "1.2", optional = true }
-serde-pickle = { version = "1.0", git = "https://github.com/landaire/serde-pickle.git", features = [
-    "variantly",
-] }
+pickled = { version = "1.0", features = ["variantly"] }
 glob = { version = "0.3", optional = true }
 
 [features]

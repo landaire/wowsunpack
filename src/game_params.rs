@@ -1,8 +1,8 @@
 use std::io::{Cursor, Write};
 
 use flate2::read::ZlibDecoder;
+use pickled::DeOptions;
 use serde_json::Map;
-use serde_pickle::DeOptions;
 use thiserror::Error;
 
 use crate::{idx::FileNode, pkg::PkgFileLoader};
@@ -10,7 +10,7 @@ use crate::{idx::FileNode, pkg::PkgFileLoader};
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Pickle deserialization")]
-    PickleError(#[from] serde_pickle::Error),
+    PickleError(#[from] pickled::Error),
     #[error("JSON serialization")]
     Json(#[from] serde_json::Error),
     #[error("I/O error")]
@@ -21,60 +21,58 @@ pub enum Error {
     FileTreeError(#[from] crate::idx::IdxError),
 }
 
-fn hashable_pickle_to_json(pickled: serde_pickle::HashableValue) -> serde_json::Value {
+fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value {
     match pickled {
-        serde_pickle::HashableValue::None => serde_json::Value::Null,
-        serde_pickle::HashableValue::Bool(v) => serde_json::Value::Bool(v),
-        serde_pickle::HashableValue::I64(v) => {
-            serde_json::Value::Number(serde_json::Number::from(v))
-        }
-        serde_pickle::HashableValue::Int(_v) => todo!("Hashable int -> JSON"),
-        serde_pickle::HashableValue::F64(v) => {
+        pickled::HashableValue::None => serde_json::Value::Null,
+        pickled::HashableValue::Bool(v) => serde_json::Value::Bool(v),
+        pickled::HashableValue::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
+        pickled::HashableValue::Int(_v) => todo!("Hashable int -> JSON"),
+        pickled::HashableValue::F64(v) => {
             serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
         }
-        serde_pickle::HashableValue::Bytes(v) => serde_json::Value::Array(
+        pickled::HashableValue::Bytes(v) => serde_json::Value::Array(
             v.into_iter()
                 .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
                 .collect(),
         ),
-        serde_pickle::HashableValue::String(v) => serde_json::Value::String(v),
-        serde_pickle::HashableValue::Tuple(v) => {
+        pickled::HashableValue::String(v) => serde_json::Value::String(v),
+        pickled::HashableValue::Tuple(v) => {
             serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
         }
-        serde_pickle::HashableValue::FrozenSet(v) => {
+        pickled::HashableValue::FrozenSet(v) => {
             serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
         }
     }
 }
 
-fn pickle_to_json(pickled: serde_pickle::Value) -> serde_json::Value {
+fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
     match pickled {
-        serde_pickle::Value::None => serde_json::Value::Null,
-        serde_pickle::Value::Bool(v) => serde_json::Value::Bool(v),
-        serde_pickle::Value::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
-        serde_pickle::Value::Int(_v) => todo!("Int -> JSON"),
-        serde_pickle::Value::F64(v) => {
+        pickled::Value::None => serde_json::Value::Null,
+        pickled::Value::Bool(v) => serde_json::Value::Bool(v),
+        pickled::Value::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
+        pickled::Value::Int(_v) => todo!("Int -> JSON"),
+        pickled::Value::F64(v) => {
             serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
         }
-        serde_pickle::Value::Bytes(v) => serde_json::Value::Array(
+        pickled::Value::Bytes(v) => serde_json::Value::Array(
             v.into_iter()
                 .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
                 .collect(),
         ),
-        serde_pickle::Value::String(v) => serde_json::Value::String(v),
-        serde_pickle::Value::List(v) => {
+        pickled::Value::String(v) => serde_json::Value::String(v),
+        pickled::Value::List(v) => {
             serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
         }
-        serde_pickle::Value::Tuple(v) => {
+        pickled::Value::Tuple(v) => {
             serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
         }
-        serde_pickle::Value::Set(v) => {
+        pickled::Value::Set(v) => {
             serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
         }
-        serde_pickle::Value::FrozenSet(v) => {
+        pickled::Value::FrozenSet(v) => {
             serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
         }
-        serde_pickle::Value::Dict(v) => {
+        pickled::Value::Dict(v) => {
             let mut map = Map::new();
             for (key, value) in &v {
                 let converted_key = hashable_pickle_to_json(key.clone());
@@ -116,14 +114,14 @@ pub fn read_game_params_as_json<W: Write>(
     std::io::copy(&mut decoder, &mut decompressed_data)?;
     decompressed_data.set_position(0);
 
-    let decoded: serde_pickle::Value = serde_pickle::from_reader(
+    let decoded: pickled::Value = pickled::from_reader(
         &mut decompressed_data,
         DeOptions::default()
             .replace_unresolved_globals()
             .decode_strings(),
     )?;
 
-    let converted = if let serde_pickle::Value::List(list) = decoded {
+    let converted = if let pickled::Value::List(list) = decoded {
         pickle_to_json(list.into_iter().next().unwrap())
     } else {
         return Err(Error::InvalidGameParamsData);
