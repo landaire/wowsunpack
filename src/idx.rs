@@ -6,7 +6,6 @@ use std::{
     io::{self, Cursor, Read, SeekFrom, Write},
     ops::Deref,
     path::{Component, Path, PathBuf},
-    rc::{Rc, Weak as RcWeak},
     sync::{Arc, Weak},
 };
 
@@ -15,6 +14,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::pkg::PkgFileLoader;
+use crate::Rc;
 
 #[derive(Debug, Error)]
 pub enum IdxError {

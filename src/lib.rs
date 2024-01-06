@@ -6,3 +6,8 @@ pub mod idx;
 pub mod pkg;
 /// Utilities for assisting with serializing game resource metadata
 pub mod serialization;
+
+#[cfg(feature = "arc")]
+pub type Rc<T> = std::sync::Arc<T>;
+#[cfg(not(feature = "arc"))]
+pub type Rc<T> = std::rc::Rc<T>;

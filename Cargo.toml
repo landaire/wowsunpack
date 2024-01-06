@@ -38,5 +38,6 @@ pickled = { version = "1.0", features = ["variantly"] }
 glob = { version = "0.3", optional = true }
 
 [features]
+arc = []
 bin = ["eyre", "clap", "csv", "glob"]
 default = ["bin"]
