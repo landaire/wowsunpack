@@ -74,11 +74,11 @@ fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
         }
         pickled::Value::Dict(v) => {
             let mut map = Map::new();
-            for (key, value) in &v {
-                let converted_key = hashable_pickle_to_json(key.clone());
+            for (key, value) in v {
+                let converted_key = hashable_pickle_to_json(key);
                 let string_key = match converted_key {
                     serde_json::Value::Number(num) => num.to_string(),
-                    serde_json::Value::String(s) => s.to_string(),
+                    serde_json::Value::String(s) => s,
                     _other => {
                         continue;
                         // panic!(
@@ -88,7 +88,7 @@ fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
                     }
                 };
 
-                let converted_value = pickle_to_json(value.clone());
+                let converted_value = pickle_to_json(value);
 
                 map.insert(string_key, converted_value);
             }
