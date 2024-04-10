@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, Cursor, Read, Write},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -42,12 +42,12 @@ impl PkgFileLoader {
     ///
     /// Returns an error if no package can be found or the package cannot be read.
     fn ensure_pkg_loaded<P: AsRef<Path>>(&self, pkg: P) -> Result<(), PkgError> {
-        let pkg = pkg.as_ref().to_owned();
-        let pkg_loaded = { self.pkgs.read().unwrap().contains_key(&pkg) };
+        let pkg = pkg.as_ref();
+        let pkg_loaded = { self.pkgs.read().unwrap().contains_key(pkg) };
         if !pkg_loaded {
             let pkg_path = self.pkgs_dir.join(&pkg);
             if !pkg_path.exists() {
-                return Err(PkgError::PkgNotFound(pkg));
+                return Err(PkgError::PkgNotFound(pkg.to_owned()));
             }
 
             let pkg_file = File::open(pkg_path).expect("Input file does not exist");
@@ -57,7 +57,7 @@ impl PkgFileLoader {
             self.pkgs
                 .write()
                 .unwrap()
-                .insert(pkg.clone(), (pkg_file, mmap));
+                .insert(pkg.to_owned(), (pkg_file, mmap));
         }
 
         Ok(())

@@ -1,9 +1,9 @@
 use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{BTreeMap, VecDeque},
+    cell::UnsafeCell,
+    collections::BTreeMap,
     fs::File,
     hash::Hash,
-    io::{self, Cursor, Read, SeekFrom, Write},
+    io::{self, Cursor, SeekFrom, Write},
     ops::Deref,
     path::{Component, Path, PathBuf},
     sync::{Arc, Weak},
