@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, Cursor, Read, Write},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     sync::RwLock,
 };
