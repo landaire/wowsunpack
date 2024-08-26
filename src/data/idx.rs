@@ -25,7 +25,7 @@ pub enum IdxError {
     #[error("I/O error")]
     IoError(#[from] io::Error),
     #[error("PKG loader error")]
-    PkgError(#[from] crate::pkg::PkgError),
+    PkgError(#[from] PkgError),
     #[error("BinRead error")]
     BinReadErr(#[from] binrw::Error),
 }

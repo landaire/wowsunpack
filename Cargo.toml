@@ -31,11 +31,21 @@ memmap = "0.7"
 thiserror = "1.0"
 rayon = "1.7"
 # murmur3 = "0.5"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 csv = { version = "1.2", optional = true }
 pickled = { version = "1.0", features = ["variantly"] }
 glob = { version = "0.3", optional = true }
+pickled = { version = "1.0", features = ["variantly"] }
+nom = "7.0.0"
+variantly = "0.4"
+strum = "0.25"
+strum_macros = "0.25"
+derive_builder = "0.12"
+roxmltree = "0.19"
+tracing = "0.1.40"
+itertools = "0.13.0"
+gettext = "0.4.0"
 
 [features]
 arc = []
