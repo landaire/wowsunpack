@@ -585,16 +585,101 @@ impl GameMetadataProvider {
 
         let pickled_params: Value = game_params_to_pickle(game_params_data)?;
 
-        let params_list = pickled_params
-            .list_ref()
-            .expect("Root game params is not a list");
+        Self::from_params(
+            convert_pickled_params(pickled_params),
+            file_tree,
+            pkg_loader,
+        )
+    }
 
-        let params = &params_list[0];
-        let params_dict = params
-            .dict_ref()
-            .expect("First element of GameParams is not a dictionary");
+    /// Constructs a GameMetadataProvider from a pre-built list of GameParams. This may be useful for callers
+    /// who wish to cache GameParams and avoid the cost of loading and converting directly from game PKG files.
+    pub fn from_params(
+        params: Vec<Param>,
+        file_tree: &FileNode,
+        pkg_loader: &PkgFileLoader,
+    ) -> Result<GameMetadataProvider, ErrorKind> {
+        let param_id_to_translation_id = generate_localization_ids(&params);
 
-        let new_params = params_dict
+        Ok(GameMetadataProvider {
+            params: params.into(),
+            param_id_to_translation_id,
+            translations: None,
+            specs: load_entity_specs(file_tree, pkg_loader),
+        })
+    }
+
+    /// Creates a provider that can only offer translations and game params
+    pub fn from_game_params(data: Vec<u8>) -> Result<GameMetadataProvider, ErrorKind> {
+        let pickled_params: Value = game_params_to_pickle(data)?;
+
+        let new_params = convert_pickled_params(pickled_params);
+
+        let param_id_to_translation_id = generate_localization_ids(&new_params);
+        Ok(GameMetadataProvider {
+            params: new_params.into(),
+            param_id_to_translation_id,
+            translations: None,
+            specs: Arc::new(Vec::new()),
+        })
+    }
+
+    pub fn set_translations(&mut self, catalog: Catalog) {
+        self.translations = Some(catalog);
+    }
+
+    pub fn param_localization_id(&self, ship_id: u32) -> Option<&str> {
+        self.param_id_to_translation_id
+            .get(&ship_id)
+            .map(|s| s.as_str())
+    }
+
+    // pub fn get(&self, path: &str) -> Option<&pickled::Value> {
+    //     let path_parts = path.split("/");
+    //     let mut current = Some(&self.0);
+    //     while let Some(pickled::Value::Dict(dict)) = current {
+
+    //     }
+    //     None
+    // }
+}
+
+fn generate_localization_ids(params: &[Param]) -> HashMap<u32, String> {
+    HashMap::from_iter(
+        params
+            .iter()
+            .map(|param| (param.id(), format!("IDS_{}", param.index()))),
+    )
+}
+
+fn load_entity_specs(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Arc<Vec<EntitySpec>> {
+    let data_file_loader = DataFileWithCallback::new(|path| {
+        debug!("requesting file: {path}");
+
+        let path = Path::new(path);
+
+        let mut file_data = Vec::new();
+        file_tree
+            .read_file_at_path(path, pkg_loader, &mut file_data)
+            .expect("failed to read file");
+
+        Ok(Cow::Owned(file_data))
+    });
+
+    Arc::new(parse_scripts(&data_file_loader).unwrap())
+}
+
+fn convert_pickled_params(pickled_params: Value) -> Vec<Param> {
+    let params_list = pickled_params
+        .list_ref()
+        .expect("Root game params is not a list");
+
+    let params = &params_list[0];
+    let params_dict = params
+        .dict_ref()
+        .expect("First element of GameParams is not a dictionary");
+
+    let new_params = params_dict
                 .values()
                 .filter_map(|param| {
                     let param_data = param.dict_ref().expect("Params root level dictionary values are not dictionaries");
@@ -678,63 +763,5 @@ impl GameMetadataProvider {
                 })
                 .collect::<Vec<Param>>();
 
-        let params = new_params;
-
-        Self::from_params(params, file_tree, pkg_loader)
-    }
-
-    /// Constructs a GameMetadataProvider from a pre-built list of GameParams. This may be useful for callers
-    /// who wish to cache GameParams and avoid the cost of loading and converting directly from game PKG files.
-    pub fn from_params(
-        params: Vec<Param>,
-        file_tree: &FileNode,
-        pkg_loader: &PkgFileLoader,
-    ) -> Result<GameMetadataProvider, ErrorKind> {
-        let param_id_to_translation_id = HashMap::from_iter(
-            params
-                .iter()
-                .map(|param| (param.id(), format!("IDS_{}", param.index()))),
-        );
-
-        let data_file_loader = DataFileWithCallback::new(|path| {
-            debug!("requesting file: {path}");
-
-            let path = Path::new(path);
-
-            let mut file_data = Vec::new();
-            file_tree
-                .read_file_at_path(path, pkg_loader, &mut file_data)
-                .expect("failed to read file");
-
-            Ok(Cow::Owned(file_data))
-        });
-
-        let specs = Arc::new(parse_scripts(&data_file_loader).unwrap());
-
-        Ok(GameMetadataProvider {
-            params: params.into(),
-            param_id_to_translation_id,
-            translations: None,
-            specs,
-        })
-    }
-
-    pub fn set_translations(&mut self, catalog: Catalog) {
-        self.translations = Some(catalog);
-    }
-
-    pub fn param_localization_id(&self, ship_id: u32) -> Option<&str> {
-        self.param_id_to_translation_id
-            .get(&ship_id)
-            .map(|s| s.as_str())
-    }
-
-    // pub fn get(&self, path: &str) -> Option<&pickled::Value> {
-    //     let path_parts = path.split("/");
-    //     let mut current = Some(&self.0);
-    //     while let Some(pickled::Value::Dict(dict)) = current {
-
-    //     }
-    //     None
-    // }
+    new_params
 }
