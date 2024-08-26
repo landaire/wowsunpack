@@ -2,7 +2,6 @@ use eyre::{Result, WrapErr};
 
 use memmap::MmapOptions;
 use std::{
-    borrow::Cow,
     collections::HashSet,
     fs::{self, File},
     io::{stdout, BufWriter, Cursor, Write},
