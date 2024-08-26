@@ -3,26 +3,11 @@ use std::io::{Cursor, Write};
 use flate2::read::ZlibDecoder;
 use pickled::DeOptions;
 use serde_json::Map;
-use thiserror::Error;
 
 use crate::{
     data::{idx::FileNode, pkg::PkgFileLoader},
     error::ErrorKind,
 };
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Pickle deserialization")]
-    PickleError(#[from] pickled::Error),
-    #[error("JSON serialization")]
-    Json(#[from] serde_json::Error),
-    #[error("I/O error")]
-    Io(#[from] std::io::Error),
-    #[error("Unexpected GameParams data type")]
-    InvalidGameParamsData,
-    #[error("File tree error")]
-    FileTreeError(#[from] crate::idx::IdxError),
-}
 
 fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value {
     match pickled {
@@ -48,7 +33,7 @@ fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value
     }
 }
 
-fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
+pub fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
     match pickled {
         pickled::Value::None => serde_json::Value::Null,
         pickled::Value::Bool(v) => serde_json::Value::Bool(v),
@@ -112,13 +97,6 @@ pub fn read_game_params_as_json<W: Write>(
     game_params.read_file(pkg_loader, &mut game_params_data)?;
 
     let decoded = game_params_to_pickle(game_params_data)?;
-
-    let decoded: pickled::Value = pickled::from_reader(
-        &mut decompressed_data,
-        DeOptions::default()
-            .replace_unresolved_globals()
-            .decode_strings(),
-    )?;
 
     let converted = if let pickled::Value::List(list) = decoded {
         pickle_to_json(list.into_iter().next().unwrap())

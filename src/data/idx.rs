@@ -13,8 +13,10 @@ use binrw::{BinRead, NullString, PosValue};
 use rayon::prelude::*;
 use thiserror::Error;
 
-use crate::pkg::PkgFileLoader;
+use crate::data::pkg::PkgFileLoader;
 use crate::Rc;
+
+use super::pkg::PkgError;
 
 #[derive(Debug, Error)]
 pub enum IdxError {

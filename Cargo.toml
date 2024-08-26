@@ -34,8 +34,8 @@ rayon = "1.7"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 csv = { version = "1.2", optional = true }
-pickled = { version = "1.0", features = ["variantly"] }
 glob = { version = "0.3", optional = true }
+pickled = { version = "1.0", features = ["variantly"] }
 nom = "7.0.0"
 variantly = "0.4"
 strum = "0.25"
@@ -50,3 +50,4 @@ gettext = "0.4.0"
 arc = []
 bin = ["eyre", "clap", "csv", "glob"]
 default = ["bin"]
+arc = []
