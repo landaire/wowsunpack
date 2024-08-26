@@ -1,6 +1,6 @@
 use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{BTreeMap, VecDeque},
+    cell::UnsafeCell,
+    collections::BTreeMap,
     fs::File,
     hash::Hash,
     io::{self, Cursor, Read, SeekFrom, Write},
@@ -469,7 +469,7 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
         }
     }
 
-    let mut file_tree = FileNode::default();
+    let file_tree = FileNode::default();
     {
         file_tree.get_mut().is_root = true;
     }
@@ -528,7 +528,7 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
                 .insert(filename.clone(), this_node_ptr.clone());
 
             {
-                let mut this_node = this_node_ptr.get_mut();
+                let this_node = this_node_ptr.get_mut();
                 {
                     cached_nodes.insert(
                         file_in_chain_id,

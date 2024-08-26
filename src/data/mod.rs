@@ -7,7 +7,6 @@ pub mod serialization;
 
 use serde::Serialize;
 use std::borrow::Cow;
-use std::path::PathBuf;
 
 use crate::error::ErrorKind;
 use crate::game_params::types::Param;
