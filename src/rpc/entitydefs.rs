@@ -364,7 +364,7 @@ pub fn parse_scripts(
             EntityFlags.CELL_PUBLIC_AND_OWN |
             EntityFlags.ALL_CLIENTS
         */
-        let internal_properties: Vec<_> = properties
+        let mut internal_properties: Vec<_> = properties
             .iter()
             .filter(|property| {
                 property.flags == Flags::AllClients
@@ -377,7 +377,7 @@ pub fn parse_scripts(
 
         //internal_properties.sort_by_key(|prop| prop.prop_type.sort_size());
 
-        let base_properties: Vec<_> = properties
+        let mut base_properties: Vec<_> = properties
             .iter()
             .filter(|property| property.flags == Flags::BaseAndClient)
             .map(|property| (*property).clone())
