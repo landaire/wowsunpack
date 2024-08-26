@@ -50,4 +50,3 @@ gettext = "0.4.0"
 arc = []
 bin = ["eyre", "clap", "csv", "glob"]
 default = ["bin"]
-arc = []
