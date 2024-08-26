@@ -13,8 +13,8 @@ use std::{
     },
     time::Instant,
 };
-use wowsunpack::pkg::PkgFileLoader;
-use wowsunpack::{idx, serialization};
+use wowsunpack::data::pkg::PkgFileLoader;
+use wowsunpack::data::{idx, serialization};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
@@ -100,7 +100,7 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
 
     let mut reader = Cursor::new(&mmap[..]);
 
-    Ok(wowsunpack::idx::parse(&mut reader)?)
+    Ok(idx::parse(&mut reader)?)
 }
 
 fn main() -> Result<()> {
@@ -302,7 +302,7 @@ fn main() -> Result<()> {
         Commands::GameParams { out_file, ugly } => match pkg_loader.as_mut() {
             Some(pkg_loader) => {
                 let mut writer = BufWriter::new(File::create(&out_file)?);
-                wowsunpack::game_params::read_game_params_as_json(
+                wowsunpack::game_params::convert::read_game_params_as_json(
                     !ugly,
                     file_tree.clone(),
                     pkg_loader,

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, rc::Rc};
 
-use crate::idx::FileNode;
+use crate::data::idx::FileNode;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]

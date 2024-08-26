@@ -1,3 +1,7 @@
+/// Utilities for interacting with the game's data files
+pub mod data;
+/// Error definitions
+pub mod error;
 /// Utilities for interacting with the `content/GameParams.data` file
 pub mod game_params;
 /// Main logic for parsing the game's resource index files

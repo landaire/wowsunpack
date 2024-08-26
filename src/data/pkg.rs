@@ -10,7 +10,7 @@ use flate2::read::DeflateDecoder;
 use memmap::MmapOptions;
 use thiserror::Error;
 
-use crate::idx::FileInfo;
+use crate::data::idx::FileInfo;
 
 /// `PkgFileLoader` is reponsible for automatically loading and maintaining pkg files
 /// in-memory to ensure that a file is only loaded once, and can be conveniently

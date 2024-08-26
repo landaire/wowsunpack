@@ -5,7 +5,10 @@ use pickled::DeOptions;
 use serde_json::Map;
 use thiserror::Error;
 
-use crate::{idx::FileNode, pkg::PkgFileLoader};
+use crate::{
+    data::{idx::FileNode, pkg::PkgFileLoader},
+    error::ErrorKind,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -103,16 +106,12 @@ pub fn read_game_params_as_json<W: Write>(
     file_tree: FileNode,
     pkg_loader: &PkgFileLoader,
     writer: &mut W,
-) -> Result<(), Error> {
+) -> Result<(), crate::error::ErrorKind> {
     let game_params = file_tree.find("content/GameParams.data")?;
     let mut game_params_data = Vec::new();
     game_params.read_file(pkg_loader, &mut game_params_data)?;
-    game_params_data.reverse();
 
-    let mut decompressed_data = Cursor::new(Vec::new());
-    let mut decoder = ZlibDecoder::new(Cursor::new(game_params_data));
-    std::io::copy(&mut decoder, &mut decompressed_data)?;
-    decompressed_data.set_position(0);
+    let decoded = game_params_to_pickle(game_params_data)?;
 
     let decoded: pickled::Value = pickled::from_reader(
         &mut decompressed_data,
@@ -124,7 +123,7 @@ pub fn read_game_params_as_json<W: Write>(
     let converted = if let pickled::Value::List(list) = decoded {
         pickle_to_json(list.into_iter().next().unwrap())
     } else {
-        return Err(Error::InvalidGameParamsData);
+        return Err(ErrorKind::InvalidGameParamsData);
     };
 
     if pretty_print {
@@ -134,4 +133,25 @@ pub fn read_game_params_as_json<W: Write>(
     }
 
     Ok(())
+}
+
+/// Converts a raw pickled GameParams.data file to its pickled representation. This operation is quite
+/// expensive.
+pub fn game_params_to_pickle(
+    mut game_params_data: Vec<u8>,
+) -> Result<pickled::Value, crate::error::ErrorKind> {
+    game_params_data.reverse();
+
+    let mut decompressed_data = Cursor::new(Vec::new());
+    let mut decoder = ZlibDecoder::new(Cursor::new(game_params_data));
+    std::io::copy(&mut decoder, &mut decompressed_data)?;
+    decompressed_data.set_position(0);
+
+    pickled::from_reader(
+        &mut decompressed_data,
+        DeOptions::default()
+            .replace_unresolved_globals()
+            .decode_strings(),
+    )
+    .map_err(|err| err.into())
 }
