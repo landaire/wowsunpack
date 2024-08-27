@@ -21,7 +21,7 @@ pub trait ResourceLoader {
     fn entity_specs(&self) -> &[EntitySpec];
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
