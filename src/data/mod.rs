@@ -5,7 +5,7 @@ pub mod pkg;
 // File tree serialization utilities
 pub mod serialization;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
@@ -21,7 +21,7 @@ pub trait ResourceLoader {
     fn entity_specs(&self) -> &[EntitySpec];
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
