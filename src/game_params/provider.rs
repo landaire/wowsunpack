@@ -39,8 +39,8 @@ impl GameParamProvider for GameMetadataProvider {
         self.params.game_param_by_id(id)
     }
 
-    fn game_param_by_index(&self, _index: &str) -> Option<Rc<Param>> {
-        todo!()
+    fn game_param_by_index(&self, index: &str) -> Option<Rc<Param>> {
+        self.params.game_param_by_index(index)
     }
 
     fn game_param_by_name(&self, _name: &str) -> Option<Rc<Param>> {
@@ -714,6 +714,25 @@ impl GameMetadataProvider {
         });
 
         let specs = Arc::new(parse_scripts(&data_file_loader).unwrap());
+
+        Ok(GameMetadataProvider {
+            params: params.into(),
+            param_id_to_translation_id,
+            translations: None,
+            specs,
+        })
+    }
+
+    /// Similar to [`Self::from_params`], but does not allow looking up specs. Useful for scenarios where you
+    /// want to use utility functions for only game params.
+    pub fn from_params_no_specs(params: Vec<Param>) -> Result<GameMetadataProvider, ErrorKind> {
+        let param_id_to_translation_id = HashMap::from_iter(
+            params
+                .iter()
+                .map(|param| (param.id(), format!("IDS_{}", param.index()))),
+        );
+
+        let specs = Arc::new(Vec::new());
 
         Ok(GameMetadataProvider {
             params: params.into(),
