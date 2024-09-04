@@ -9,15 +9,11 @@ pub use crate::game_params::convert::cbor::*;
 #[cfg(feature = "json")]
 pub use crate::game_params::convert::json::*;
 
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
 use flate2::read::ZlibDecoder;
 use pickled::DeOptions;
 
-use crate::{
-    data::{idx::FileNode, pkg::PkgFileLoader},
-    error::ErrorKind,
-};
 
 /// Converts a raw pickled GameParams.data file to its pickled representation. This operation is quite
 /// expensive.

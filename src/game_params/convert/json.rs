@@ -1,9 +1,7 @@
 use serde_json::Map;
 
-use std::io::{Cursor, Write};
+use std::io::Write;
 
-use flate2::read::ZlibDecoder;
-use pickled::DeOptions;
 
 use crate::{
     data::{idx::FileNode, pkg::PkgFileLoader},
