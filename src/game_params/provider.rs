@@ -1,20 +1,16 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
-    io::Cursor,
     path::Path,
     str::FromStr,
     sync::Arc,
-    time::Instant,
 };
 
-use flate2::read::ZlibDecoder;
 use gettext::Catalog;
 use itertools::Itertools;
 
-use pickled::{DeOptions, HashableValue, Value};
+use pickled::{HashableValue, Value};
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
 use tracing::debug;
 
 use crate::{

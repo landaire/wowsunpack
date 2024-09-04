@@ -15,10 +15,17 @@ pub enum ErrorKind {
         err: nom::error::ErrorKind,
         input: Vec<u8>,
     },
-    #[error("Error parsing json")]
-    Serde {
+    #[cfg(feature = "json")]
+    #[error("Error serializing or deserializing json")]
+    SerdeJson {
         #[from]
         err: serde_json::Error,
+    },
+    #[cfg(feature = "cbor")]
+    #[error("Error serializing or deserializing cbor")]
+    SerdeCbor {
+        #[from]
+        err: serde_cbor::Error,
     },
     #[error("Error interpreting UTF-8 string")]
     Utf8Error {

@@ -10,7 +10,6 @@ use std::{
 };
 
 use binrw::{BinRead, NullString, PosValue};
-use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::data::pkg::PkgFileLoader;
@@ -333,7 +332,7 @@ impl FileNode {
             idx += 1;
         }
 
-        files.par_iter().try_for_each(|(this_node_path, node)| {
+        files.iter().try_for_each(|(this_node_path, node)| {
             let mut out_file = File::create(this_node_path.as_ref())?;
             let res = node.read_file(pkg_loader, &mut out_file);
 
