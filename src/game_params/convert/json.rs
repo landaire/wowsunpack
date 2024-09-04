@@ -2,7 +2,6 @@ use serde_json::Map;
 
 use std::io::Write;
 
-
 use crate::{
     data::{idx::FileNode, pkg::PkgFileLoader},
     error::ErrorKind,

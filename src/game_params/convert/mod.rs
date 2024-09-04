@@ -14,7 +14,6 @@ use std::io::Cursor;
 use flate2::read::ZlibDecoder;
 use pickled::DeOptions;
 
-
 /// Converts a raw pickled GameParams.data file to its pickled representation. This operation is quite
 /// expensive.
 pub fn game_params_to_pickle(
