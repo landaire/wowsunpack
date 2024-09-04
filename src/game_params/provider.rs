@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    data::{idx::FileNode, pkg::PkgFileLoader, DataFileWithCallback, ResourceLoader, Version},
+    data::{idx::FileNode, pkg::PkgFileLoader, DataFileWithCallback, ResourceLoader},
     error::ErrorKind,
     game_params::convert::game_params_to_pickle,
     rpc::entitydefs::{parse_scripts, EntitySpec},

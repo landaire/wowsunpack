@@ -652,7 +652,7 @@ mod test {
         let spec = "<Type>ARRAY<of>UINT16</of><size>2</size></Type>";
         let doc = roxmltree::Document::parse(&spec).unwrap();
         let root = doc.root_element();
-        let mut aliases = HashMap::new();
+        let aliases = HashMap::new();
         let t = parse_type(&root, &aliases);
         //println!("{:#?}", t);
 
