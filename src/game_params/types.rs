@@ -204,6 +204,8 @@ pub struct Vehicle {
     level: u32,
     group: String,
     abilities: Vec<Vec<(String, String)>>,
+    #[serde(default)]
+    upgrades: Vec<String>,
 }
 
 impl Vehicle {
@@ -213,6 +215,14 @@ impl Vehicle {
 
     pub fn group(&self) -> &str {
         self.group.as_ref()
+    }
+
+    pub fn abilities(&self) -> &[Vec<(String, String)>] {
+        self.abilities.as_slice()
+    }
+
+    pub fn upgrades(&self) -> &[String] {
+        self.upgrades.as_slice()
     }
 }
 

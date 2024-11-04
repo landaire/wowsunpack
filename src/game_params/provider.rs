@@ -550,6 +550,17 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
         .map(|abil| abil.1)
         .collect();
 
+    let upgrade_data = game_param_to_type!(ship_data, "ShipUpgradeInfo", HashMap<(), ()>);
+    let upgrades: Vec<String> = upgrade_data
+        .iter()
+        .map(|(upgrade_name, upgrade_data)| {
+            upgrade_name
+                .string_ref()
+                .expect("upgrade name is not a string")
+                .to_owned()
+        })
+        .collect();
+
     let level = game_param_to_type!(ship_data, "level", u32);
     let group = game_param_to_type!(ship_data, "group", String);
 
@@ -557,6 +568,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
         .level(level)
         .group(group)
         .abilities(abilities)
+        .upgrades(upgrades)
         .build()
 }
 
