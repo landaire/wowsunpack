@@ -469,6 +469,10 @@ impl Crew {
             .as_ref()
             .and_then(|skills| skills.iter().find(|skill| skill.skill_type == typ as usize))
     }
+
+    pub fn skills(&self) -> Option<&[CrewSkill]> {
+        self.skills.as_deref()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Variantly)]
