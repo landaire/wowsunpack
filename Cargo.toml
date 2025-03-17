@@ -2,11 +2,11 @@
 name = "wowsunpack"
 description = "Utility for interacting with World of Warships game assets"
 license = "MIT"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 exclude = [".github/", "./format_templates/"]
 repository = "https://github.com/landaire/wowsunpack"
-documnetation = "https://docs.rs/wowsunpack/"
+documentation = "https://docs.rs/wowsunpack/"
 
 [lib]
 name = "wowsunpack"
@@ -45,6 +45,7 @@ roxmltree = "0.19"
 tracing = "0.1.40"
 itertools = "0.13.0"
 gettext = "0.4.0"
+convert_case = "0.8.0"
 
 [dependencies.serde_cbor]
 version = "0.11"
