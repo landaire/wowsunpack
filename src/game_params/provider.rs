@@ -335,7 +335,7 @@ fn build_crew_skills(
                 .expect("failed to build skill tiers");
 
             CrewSkillBuilder::default()
-                .name(skill_name)
+                .internal_name(skill_name)
                 .can_be_learned(game_param_to_type!(skill_data, "canBeLearned", bool))
                 .is_epic(game_param_to_type!(skill_data, "isEpic", bool))
                 .skill_type(game_param_to_type!(skill_data, "skillType", usize))

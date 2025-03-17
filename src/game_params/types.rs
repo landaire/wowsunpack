@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
-use crate::Rc;
+use crate::{data::ResourceLoader, Rc};
+
+use super::provider::GameMetadataProvider;
 
 #[derive(
     Serialize,
@@ -412,7 +414,7 @@ impl CrewSkillTiers {
 
 #[derive(Serialize, Deserialize, Clone, Builder, Debug)]
 pub struct CrewSkill {
-    name: String,
+    internal_name: String,
     logic_trigger: CrewSkillLogicTrigger,
     can_be_learned: bool,
     is_epic: bool,
@@ -423,8 +425,39 @@ pub struct CrewSkill {
 }
 
 impl CrewSkill {
-    pub fn name(&self) -> &str {
-        self.name.as_ref()
+    pub fn internal_name(&self) -> &str {
+        self.internal_name.as_ref()
+    }
+
+    pub fn translated_name(&self, metadata_provider: &GameMetadataProvider) -> Option<String> {
+        use convert_case::{Case, Casing};
+        let translation_id = format!(
+            "IDS_SKILL_{}",
+            self.internal_name().to_case(Case::UpperSnake)
+        );
+
+        metadata_provider.localized_name_from_id(&translation_id)
+    }
+
+    pub fn translated_description(
+        &self,
+        metadata_provider: &GameMetadataProvider,
+    ) -> Option<String> {
+        use convert_case::{Case, Casing};
+        let translation_id = format!(
+            "IDS_SKILL_DESC_{}",
+            self.internal_name().to_case(Case::UpperSnake)
+        );
+
+        let description = metadata_provider.localized_name_from_id(&translation_id);
+
+        description.and_then(|desc| {
+            if desc.is_empty() || desc == " " {
+                None
+            } else {
+                Some(desc)
+            }
+        })
     }
 
     pub fn logic_trigger(&self) -> &CrewSkillLogicTrigger {
