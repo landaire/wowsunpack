@@ -57,3 +57,4 @@ json = ["dep:serde_json"]
 bin = ["dep:eyre", "dep:clap", "dep:csv", "dep:glob", "dep:rayon", "json"]
 default = ["bin"]
 cbor = ["dep:serde_cbor"]
+

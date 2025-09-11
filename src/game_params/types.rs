@@ -205,7 +205,7 @@ pub enum ParamType {
 pub struct Vehicle {
     level: u32,
     group: String,
-    abilities: Vec<Vec<(String, String)>>,
+    abilities: Option<Vec<Vec<(String, String)>>>,
     #[serde(default)]
     upgrades: Vec<String>,
 }
@@ -219,8 +219,8 @@ impl Vehicle {
         self.group.as_ref()
     }
 
-    pub fn abilities(&self) -> &[Vec<(String, String)>] {
-        self.abilities.as_slice()
+    pub fn abilities(&self) -> Option<&[Vec<(String, String)>]> {
+        self.abilities.as_deref()
     }
 
     pub fn upgrades(&self) -> &[String] {
@@ -415,7 +415,7 @@ impl CrewSkillTiers {
 #[derive(Serialize, Deserialize, Clone, Builder, Debug)]
 pub struct CrewSkill {
     internal_name: String,
-    logic_trigger: CrewSkillLogicTrigger,
+    logic_trigger: Option<CrewSkillLogicTrigger>,
     can_be_learned: bool,
     is_epic: bool,
     modifiers: Option<Vec<CrewSkillModifier>>,
@@ -460,8 +460,8 @@ impl CrewSkill {
         })
     }
 
-    pub fn logic_trigger(&self) -> &CrewSkillLogicTrigger {
-        &self.logic_trigger
+    pub fn logic_trigger(&self) -> Option<&CrewSkillLogicTrigger> {
+        self.logic_trigger.as_ref()
     }
 
     pub fn can_be_learned(&self) -> bool {
