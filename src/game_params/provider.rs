@@ -243,11 +243,15 @@ fn build_crew_skills(
 ) -> Result<Vec<CrewSkill>, CrewSkillBuilderError> {
     skills
         .iter()
-        .map(|(skill_name, skill_data)| {
+        .filter_map(|(skill_name, skill_data)| {
             let skill_name = skill_name
                 .string_ref()
                 .expect("skill_name is not a String")
                 .to_owned();
+
+            if skill_data.is_none() {
+                return None;
+            }
 
             let skill_data = skill_data.dict_ref().expect("skill data is not dictionary");
 
@@ -260,8 +264,8 @@ fn build_crew_skills(
             // });
 
             let logic_trigger_data =
-                game_param_to_type!(skill_data, "LogicTrigger", HashMap<(), ()>);
-            let logic_trigger = CrewSkillLogicTriggerBuilder::default()
+                game_param_to_type!(skill_data, "LogicTrigger", Option<HashMap<(), ()>>);
+            let logic_trigger = logic_trigger_data.map(|logic_trigger_data| CrewSkillLogicTriggerBuilder::default()
                 .burn_count(game_param_to_type!(
                     logic_trigger_data,
                     "burnCount",
@@ -314,7 +318,8 @@ fn build_crew_skills(
                     String
                 ))
                 .build()
-                .expect("failed to build logic trigger");
+                .expect("failed to build logic trigger")
+            );
 
             let _modifiers = game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
             let modifiers = None;
@@ -334,16 +339,18 @@ fn build_crew_skills(
                 .build()
                 .expect("failed to build skill tiers");
 
-            CrewSkillBuilder::default()
-                .internal_name(skill_name)
-                .can_be_learned(game_param_to_type!(skill_data, "canBeLearned", bool))
-                .is_epic(game_param_to_type!(skill_data, "isEpic", bool))
-                .skill_type(game_param_to_type!(skill_data, "skillType", usize))
-                .ui_treat_as_trigger(game_param_to_type!(skill_data, "uiTreatAsTrigger", bool))
-                .tier(tier)
-                .modifiers(modifiers)
-                .logic_trigger(logic_trigger)
-                .build()
+            Some(
+                CrewSkillBuilder::default()
+                    .internal_name(skill_name)
+                    .can_be_learned(game_param_to_type!(skill_data, "canBeLearned", bool))
+                    .is_epic(game_param_to_type!(skill_data, "isEpic", bool))
+                    .skill_type(game_param_to_type!(skill_data, "skillType", usize))
+                    .ui_treat_as_trigger(game_param_to_type!(skill_data, "uiTreatAsTrigger", bool))
+                    .tier(tier)
+                    .modifiers(modifiers)
+                    .logic_trigger(logic_trigger)
+                    .build(),
+            )
         })
         .collect()
 }
@@ -516,14 +523,19 @@ fn build_ability(
 }
 
 fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, VehicleBuilderError> {
-    let ability_data = game_param_to_type!(ship_data, "ShipAbilities", HashMap<(), ()>);
-    let abilities: Vec<Vec<(String, String)>> = ability_data
+    let ability_data = game_param_to_type!(ship_data, "ShipAbilities", Option<HashMap<(), ()>>);
+    let abilities: Option<Vec<Vec<(String, String)>>> = ability_data.map(|abilities_data|
+        abilities_data
         .iter()
-        .map(|(slot_name, slot_data)| {
+        .filter_map(|(slot_name, slot_data)| {
             let _slot_name = slot_name
                 .string_ref()
                 .expect("ship ability slot name is not a string");
-            let slot_data = slot_data.dict_ref().expect("slot data is nto a dictionary");
+            if slot_data.is_none() {
+                return None;
+            }
+
+            let slot_data = slot_data.dict_ref().expect("slot data is not a dictionary");
             let slot = game_param_to_type!(slot_data, "slot", usize);
             let abils = game_param_to_type!(slot_data, "abils", &[()]);
             let abils: Vec<(String, String)> = abils
@@ -543,12 +555,13 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 })
                 .collect();
 
-            (slot, abils)
+            Some((slot, abils))
         })
         .sorted_by(|a, b| a.0.cmp(&b.0))
         // drop the slot
         .map(|abil| abil.1)
-        .collect();
+        .collect()
+    );
 
     let upgrade_data = game_param_to_type!(ship_data, "ShipUpgradeInfo", HashMap<(), ()>);
     let upgrades: Vec<String> = upgrade_data
@@ -597,18 +610,30 @@ impl GameMetadataProvider {
 
         let pickled_params: Value = game_params_to_pickle(game_params_data)?;
 
-        let params_list = pickled_params
-            .list_ref()
-            .expect("Root game params is not a list");
+        let params_dict = if let Some(params_dict) = pickled_params.dict_ref() {
+            params_dict
+                .get(&HashableValue::String("".to_string()))
+                .expect("failed to get default game_params")
+                .dict_ref()
+                .expect("game params is not a dict")
+        } else {
+            let params_list = pickled_params
+                .list_ref()
+                .expect("Root game params is not a list");
 
-        let params = &params_list[0];
-        let params_dict = params
-            .dict_ref()
-            .expect("First element of GameParams is not a dictionary");
+            let params = &params_list[0];
+            params
+                .dict_ref()
+                .expect("First element of GameParams is not a dictionary")
+        };
 
         let new_params = params_dict
                 .values()
                 .filter_map(|param| {
+                    if param.is_none() {
+                        return None;
+                    }
+
                     let param_data = param.dict_ref().expect("Params root level dictionary values are not dictionaries");
 
                     param_data
