@@ -22,6 +22,12 @@ use rayon::prelude::*;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Game directory. This option can be used instead of pkg_dir / idx_files
+    /// and will automatically use the latest version of the game. If none of these
+    /// args are provided, the executable's directory is assumed to be the game dir.
+    #[clap(short, long)]
+    game_dir: Option<PathBuf>,
+
     /// Directory where pkg files are located. If not provided, this will
     /// default relative to the given idx directory as "../../../../res_packages"
     #[clap(short, long)]
@@ -37,6 +43,11 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// List files in a directory
+    List {
+        /// Directory name to list
+        dir: Option<String>,
+    },
     /// Extract files to an output directory
     Extract {
         /// Flatten the file structure when writing files. For example, if the
@@ -105,13 +116,24 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
 fn main() -> Result<()> {
     let timestamp = Instant::now();
     let mut args = Args::parse();
+
+    let mut game_dir = PathBuf::from(std::env::args().next().expect("failed to get first arg"))
+        .parent()
+        .expect("failed to get executable parent dir")
+        .to_owned();
+
+    if let Some(game_dir_arg) = args.game_dir.take() {
+        game_dir = game_dir_arg;
+    }
+
     // If we didn't get any idx dirs/files passed to us, try auto-detecting the
     // WoWs directory
     if args.idx_files.is_empty() {
         let mut latest_version = None;
-        if Path::new("WorldOfWarships.exe").exists() {
+        let bin_dir = game_dir.join("bin");
+        if game_dir.join("WorldOfWarships.exe").exists() {
             // Maybe we are? Try enumerating the `bin` directory
-            let paths = fs::read_dir("bin")
+            let paths = fs::read_dir(&bin_dir)
                 .wrap_err("No index files were provided and could not enumerate `bin` directory")?;
             for path in paths {
                 let path = path.wrap_err("could not enumerate path")?;
@@ -134,8 +156,11 @@ fn main() -> Result<()> {
         if let Some(latest_version) = latest_version {
             let latest_version_str = format!("{}", latest_version);
 
-            args.idx_files
-                .push(["bin", latest_version_str.as_str(), "idx"].iter().collect())
+            args.idx_files.push(
+                bin_dir
+                    .join(latest_version_str.as_str())
+                    .join("idx"),
+            );
         }
 
         if latest_version.is_none() || !args.idx_files[0].exists() {
@@ -316,6 +341,30 @@ fn main() -> Result<()> {
                 ));
             }
         },
+        Commands::List { dir } => {
+            let paths = file_tree.paths();
+            for (path, node) in &paths {
+                let matches = dir
+                    .as_ref()
+                    .map(|dir| path.starts_with(dir))
+                    .unwrap_or(true);
+                if !matches {
+                    continue;
+                }
+
+                if node.is_file() {
+                    print!("(F)")
+                } else {
+                    print!("(D)")
+                }
+
+                print!(" {}", path.as_os_str().to_str().expect("could not convert path to string"));
+
+                if let Some(info) = node.file_info() {
+                    println!(" {} bytes", info.unpacked_size);
+                }
+            }
+        }
     }
 
     println!(
