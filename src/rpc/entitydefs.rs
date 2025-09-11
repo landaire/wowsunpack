@@ -33,7 +33,7 @@ impl Flags {
         } else if s == "CELL_PUBLIC" {
             Self::CellPublic
         } else {
-            panic!("Unrecognized flag {}!", s);
+            panic!("Unrecognized flag {s}!");
         }
     }
 }
@@ -58,7 +58,7 @@ impl Method {
             .args
             .iter()
             .map(|arg| arg.sort_size())
-            .fold(0, |a, b| a + b);
+            .sum::<usize>();
         if size >= 0xffff {
             0xffff + self.variable_length_header_size
         } else {
@@ -89,12 +89,7 @@ fn child_by_name<'a, 'b>(
     node: &roxmltree::Node<'a, 'b>,
     name: &str,
 ) -> Option<roxmltree::Node<'a, 'b>> {
-    for child in node.children() {
-        if child.tag_name().name() == name {
-            return Some(child);
-        }
-    }
-    None
+    node.children().find(|&child| child.tag_name().name() == name)
 }
 
 fn parse_implements(ilist: &roxmltree::Node) -> Vec<String> {
@@ -153,27 +148,23 @@ fn parse_method(method: &roxmltree::Node, aliases: &TypeAliases) -> Method {
             //panic!();
         }
     }
-    let variable_length_header_size = match child_by_name(&method, "VariableLengthHeaderSize") {
+    let variable_length_header_size = match child_by_name(method, "VariableLengthHeaderSize") {
         Some(x) => {
             //println!("{}: {:#?}", method.tag_name().name(), x.first_child());
-            match x
+            x
                 .first_child()
                 .unwrap()
                 .text()
                 .unwrap()
                 .trim()
-                .parse::<usize>()
-            {
-                Ok(x) => x,
-                Err(_) => 1,
-            }
+                .parse::<usize>().unwrap_or(1)
         }
         None => 1,
     };
     Method {
         name: method.tag_name().name().to_string(),
         variable_length_header_size,
-        args: args,
+        args,
     }
 }
 
@@ -191,7 +182,7 @@ fn parse_method_list(mlist: &roxmltree::Node, aliases: &TypeAliases) -> Vec<Meth
 fn parse_def(def: &[u8], aliases: &TypeAliases) -> DefFile {
     let def = std::str::from_utf8(def).unwrap();
     //let def = std::fs::read_to_string(&file).unwrap();
-    let doc = roxmltree::Document::parse(&def).unwrap();
+    let doc = roxmltree::Document::parse(def).unwrap();
     let root = doc.root();
     let root = child_by_name(&root, "root").unwrap();
     //println!("{:?}", doc);
@@ -200,19 +191,19 @@ fn parse_def(def: &[u8], aliases: &TypeAliases) -> DefFile {
     let mut def = DefFile {
         base_methods: child_by_name(&root, "BaseMethods")
             .map(|n| parse_method_list(&n, aliases))
-            .unwrap_or(vec![]),
+            .unwrap_or_default(),
         cell_methods: child_by_name(&root, "CellMethods")
             .map(|n| parse_method_list(&n, aliases))
-            .unwrap_or(vec![]),
+            .unwrap_or_default(),
         client_methods: child_by_name(&root, "ClientMethods")
             .map(|n| parse_method_list(&n, aliases))
-            .unwrap_or(vec![]),
+            .unwrap_or_default(),
         properties: child_by_name(&root, "Properties")
             .map(|n| parse_properties(&n, aliases))
-            .unwrap_or(vec![]),
+            .unwrap_or_default(),
         implements: child_by_name(&root, "Implements")
             .map(|n| parse_implements(&n))
-            .unwrap_or(vec![]),
+            .unwrap_or_default(),
     };
     def.client_methods.sort_by_key(|method| method.sort_size());
     def
@@ -293,7 +284,7 @@ pub fn parse_scripts(
             .iter()
             .map(|parent| {
                 let parent = gamedata
-                    .get(&format!("scripts/entity_defs/interfaces/{}.def", parent))
+                    .get(&format!("scripts/entity_defs/interfaces/{parent}.def"))
                     .unwrap();
                 parse_def(&parent, &aliases)
             })
@@ -306,7 +297,7 @@ pub fn parse_scripts(
                     .map(|parent| {
                         let parent = parent.trim();
                         let parent = gamedata
-                            .get(&format!("scripts/entity_defs/interfaces/{}.def", parent))
+                            .get(&format!("scripts/entity_defs/interfaces/{parent}.def"))
                             .unwrap();
                         //println!("Parsing parent {}...", parent);
                         parse_def(&parent, &aliases)
@@ -329,8 +320,8 @@ pub fn parse_scripts(
                     a.cell_methods.append(&mut b.cell_methods);
                     a.client_methods.append(&mut b.client_methods);
                     a.properties.append(&mut b.properties);
-                    assert!(a.implements.len() == 0);
-                    assert!(b.implements.len() == 0);
+                    assert!(a.implements.is_empty());
+                    assert!(b.implements.is_empty());
                     a
                 },
             );

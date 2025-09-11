@@ -47,7 +47,7 @@ pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
 
         let this_path = Rc::new(this_path);
 
-        for (_child_name, child) in node.children() {
+        for child in node.children().values() {
             nodes.push((Rc::clone(&this_path), child.clone()));
         }
     }

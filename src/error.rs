@@ -140,7 +140,7 @@ pub type IResult<I, T> = nom::IResult<I, T, Error>;
 
 pub fn failure_from_kind(kind: ErrorKind) -> nom::Err<Error> {
     nom::Err::Failure(Error {
-        kind: kind.into(),
+        kind,
         backtrace: vec![],
     })
 }

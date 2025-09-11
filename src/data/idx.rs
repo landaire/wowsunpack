@@ -183,8 +183,8 @@ impl FileNode {
     pub fn find<P: AsRef<Path>>(&self, path: P) -> Result<FileNode, IdxError> {
         let path = path.as_ref();
         let mut current_tree_ptr = self.clone();
-        let mut components = path.components();
-        while let Some(component) = components.next() {
+        let components = path.components();
+        for component in components {
             match component {
                 // This might be an absolute path
                 Component::RootDir => {
@@ -211,7 +211,7 @@ impl FileNode {
                     }
                 }
                 other => {
-                    panic!("unexpected path component: {:?}", other);
+                    panic!("unexpected path component: {other:?}");
                 }
             }
         }
@@ -239,7 +239,7 @@ impl FileNode {
         // Build this file's full path
         //file.extract(path, destination)
         pkg_loader.read(
-            &self.volume_info().as_ref().unwrap().filename.to_string(),
+            self.volume_info().as_ref().unwrap().filename.to_string(),
             self.file_info().unwrap(),
             out_data,
         )?;
@@ -285,7 +285,7 @@ impl FileNode {
         callback: F,
     ) -> Result<(), IdxError>
     where
-        F: Fn() -> () + Send + Sync,
+        F: Fn() + Send + Sync,
     {
         let out_path = path.as_ref();
         if !out_path.exists() {
@@ -324,7 +324,7 @@ impl FileNode {
                     std::fs::create_dir(&*this_node_path)?;
                 }
 
-                for (_child_name, child) in node.children() {
+                for child in node.children().values() {
                     nodes.push((Arc::clone(&this_node_path), child.clone()));
                 }
             }
@@ -353,7 +353,7 @@ impl FileNode {
         while let Some((parent_path, node)) = pending_nodes.pop() {
             let full_path = {
                 let full_path = Rc::new(parent_path.join(node.filename()));
-                for (_child_name, child) in node.children() {
+                for child in node.children().values() {
                     pending_nodes.push((Rc::clone(&full_path), child.clone()));
                 }
 
@@ -443,7 +443,7 @@ impl Default for FileTree {
 pub fn parse(data: &mut Cursor<&[u8]>) -> Result<IdxFile, IdxError> {
     let header = Header::read_ne(data)?;
     if header.endianness != 0x20000000 && header.version != 0x40 {
-        return Err(IdxError::IncorrectEndian.into());
+        return Err(IdxError::IncorrectEndian);
     }
 
     IdxFile::read_ne(data).map_err(IdxError::from)
@@ -542,7 +542,7 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> FileNode {
 
                 this_node.is_file = file_info.is_some();
                 this_node.file_info = file_info.cloned();
-                this_node.volume_info = volume_info.map(|v| *v).cloned();
+                this_node.volume_info = volume_info.copied().cloned();
 
                 this_node.parent = Some(WeakFileNode(Arc::downgrade(&root_node.0)));
                 this_node.filename = filename;
