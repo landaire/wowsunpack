@@ -154,19 +154,16 @@ fn main() -> Result<()> {
         }
 
         if let Some(latest_version) = latest_version {
-            let latest_version_str = format!("{}", latest_version);
+            let latest_version_str = format!("{latest_version}");
 
-            args.idx_files.push(
-                bin_dir
-                    .join(latest_version_str.as_str())
-                    .join("idx"),
-            );
+            args.idx_files
+                .push(bin_dir.join(latest_version_str.as_str()).join("idx"));
         }
 
         if latest_version.is_none() || !args.idx_files[0].exists() {
             Args::command().print_help()?;
 
-            eprintln!("");
+            eprintln!();
 
             return Err(eyre::eyre!("Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"));
         }
@@ -199,7 +196,7 @@ fn main() -> Result<()> {
         )
     });
 
-    let mut pkg_loader = packages_dir.as_ref().map(|dir| PkgFileLoader::new(&dir));
+    let mut pkg_loader = packages_dir.as_ref().map(PkgFileLoader::new);
 
     paths.into_par_iter().try_for_each(|path| {
         resources.lock().unwrap().push(load_idx_file(path)?);
@@ -220,7 +217,7 @@ fn main() -> Result<()> {
             let paths = file_tree.paths();
             let globs = files
                 .iter()
-                .map(|file_name| glob::Pattern::new(&file_name).expect("invalid glob pattern"))
+                .map(|file_name| glob::Pattern::new(file_name).expect("invalid glob pattern"))
                 .collect::<Vec<_>>();
 
             let mut extracted_paths = HashSet::<&Path>::new();
@@ -230,7 +227,7 @@ fn main() -> Result<()> {
                 let mut matches = false;
 
                 for glob in &globs {
-                    if glob.matches_path(&*path) {
+                    if glob.matches_path(path) {
                         matches = true;
                         break;
                     }
@@ -249,7 +246,7 @@ fn main() -> Result<()> {
                     }
                 }
 
-                extracted_paths.insert((&*path).as_ref());
+                extracted_paths.insert((*path).as_ref());
 
                 let out_dir = if !node.is_root() && !strip_prefix {
                     out_dir.join(node.path()?.parent().expect("no parent node"))
@@ -333,7 +330,7 @@ fn main() -> Result<()> {
                     &mut writer,
                 )?;
 
-                println!("GameParams written to {:?}", out_file);
+                println!("GameParams written to {out_file:?}");
             }
             None => {
                 return Err(eyre::eyre!(
@@ -358,7 +355,12 @@ fn main() -> Result<()> {
                     print!("(D)")
                 }
 
-                print!(" {}", path.as_os_str().to_str().expect("could not convert path to string"));
+                print!(
+                    " {}",
+                    path.as_os_str()
+                        .to_str()
+                        .expect("could not convert path to string")
+                );
 
                 if let Some(info) = node.file_info() {
                     println!(" {} bytes", info.unpacked_size);

@@ -118,7 +118,7 @@ pub enum Species {
 impl Species {
     pub fn translation_id(&self) -> String {
         let name: &'static str = self.into();
-        format!("IDS_{}", name)
+        format!("IDS_{name}")
     }
 }
 
@@ -302,7 +302,7 @@ impl ConsumableReloadTimeModifier {
             Species::Destroyer => self.destroyer,
             Species::Submarine => self.submarine,
             Species::Auxiliary => self.auxiliary,
-            other => panic!("Unexpected species {:?}", other),
+            other => panic!("Unexpected species {other:?}"),
         }
     }
 
@@ -383,7 +383,7 @@ impl CrewSkillTiers {
             Species::Destroyer => self.destroyer,
             Species::Submarine => self.submarine,
             Species::Auxiliary => self.auxiliary,
-            other => panic!("Unexpected species {:?}", other),
+            other => panic!("Unexpected species {other:?}"),
         }
     }
 

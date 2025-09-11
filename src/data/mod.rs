@@ -53,11 +53,7 @@ impl Version {
             true
         } else if self.minor < other.minor {
             false
-        } else if self.patch >= other.patch {
-            true
-        } else {
-            false
-        }
+        } else { self.patch >= other.patch }
     }
 }
 

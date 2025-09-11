@@ -265,61 +265,62 @@ fn build_crew_skills(
 
             let logic_trigger_data =
                 game_param_to_type!(skill_data, "LogicTrigger", Option<HashMap<(), ()>>);
-            let logic_trigger = logic_trigger_data.map(|logic_trigger_data| CrewSkillLogicTriggerBuilder::default()
-                .burn_count(game_param_to_type!(
-                    logic_trigger_data,
-                    "burnCount",
-                    Option<usize>
-                ))
-                .change_priority_target_penalty(game_param_to_type!(
-                    logic_trigger_data,
-                    "changePriorityTargetPenalty",
-                    f32
-                ))
-                .consumable_type(game_param_to_type!(
-                    logic_trigger_data,
-                    "consumableType",
-                    String
-                ))
-                .cooling_delay(game_param_to_type!(logic_trigger_data, "coolingDelay", f32))
-                .cooling_interpolator(Vec::default())
-                .divider_type(game_param_to_type!(
-                    logic_trigger_data,
-                    "dividerType",
-                    Option<String>
-                ))
-                .divider_value(game_param_to_type!(
-                    logic_trigger_data,
-                    "dividerValue",
-                    Option<f32>
-                ))
-                .duration(game_param_to_type!(logic_trigger_data, "duration", f32))
-                .energy_coeff(game_param_to_type!(logic_trigger_data, "energyCoeff", f32))
-                .flood_count(game_param_to_type!(
-                    logic_trigger_data,
-                    "floodCount",
-                    Option<usize>
-                ))
-                .health_factor(game_param_to_type!(
-                    logic_trigger_data,
-                    "healthFactor",
-                    Option<f32>
-                ))
-                .heat_interpolator(Vec::default())
-                .modifiers(logic_modifiers)
-                .trigger_desc_ids(game_param_to_type!(
-                    logic_trigger_data,
-                    "triggerDescIds",
-                    String
-                ))
-                .trigger_type(game_param_to_type!(
-                    logic_trigger_data,
-                    "triggerType",
-                    String
-                ))
-                .build()
-                .expect("failed to build logic trigger")
-            );
+            let logic_trigger = logic_trigger_data.map(|logic_trigger_data| {
+                CrewSkillLogicTriggerBuilder::default()
+                    .burn_count(game_param_to_type!(
+                        logic_trigger_data,
+                        "burnCount",
+                        Option<usize>
+                    ))
+                    .change_priority_target_penalty(game_param_to_type!(
+                        logic_trigger_data,
+                        "changePriorityTargetPenalty",
+                        f32
+                    ))
+                    .consumable_type(game_param_to_type!(
+                        logic_trigger_data,
+                        "consumableType",
+                        String
+                    ))
+                    .cooling_delay(game_param_to_type!(logic_trigger_data, "coolingDelay", f32))
+                    .cooling_interpolator(Vec::default())
+                    .divider_type(game_param_to_type!(
+                        logic_trigger_data,
+                        "dividerType",
+                        Option<String>
+                    ))
+                    .divider_value(game_param_to_type!(
+                        logic_trigger_data,
+                        "dividerValue",
+                        Option<f32>
+                    ))
+                    .duration(game_param_to_type!(logic_trigger_data, "duration", f32))
+                    .energy_coeff(game_param_to_type!(logic_trigger_data, "energyCoeff", f32))
+                    .flood_count(game_param_to_type!(
+                        logic_trigger_data,
+                        "floodCount",
+                        Option<usize>
+                    ))
+                    .health_factor(game_param_to_type!(
+                        logic_trigger_data,
+                        "healthFactor",
+                        Option<f32>
+                    ))
+                    .heat_interpolator(Vec::default())
+                    .modifiers(logic_modifiers)
+                    .trigger_desc_ids(game_param_to_type!(
+                        logic_trigger_data,
+                        "triggerDescIds",
+                        String
+                    ))
+                    .trigger_type(game_param_to_type!(
+                        logic_trigger_data,
+                        "triggerType",
+                        String
+                    ))
+                    .build()
+                    .expect("failed to build logic trigger")
+            });
 
             let _modifiers = game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
             let modifiers = None;
@@ -524,44 +525,44 @@ fn build_ability(
 
 fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, VehicleBuilderError> {
     let ability_data = game_param_to_type!(ship_data, "ShipAbilities", Option<HashMap<(), ()>>);
-    let abilities: Option<Vec<Vec<(String, String)>>> = ability_data.map(|abilities_data|
+    let abilities: Option<Vec<Vec<(String, String)>>> = ability_data.map(|abilities_data| {
         abilities_data
-        .iter()
-        .filter_map(|(slot_name, slot_data)| {
-            let _slot_name = slot_name
-                .string_ref()
-                .expect("ship ability slot name is not a string");
-            if slot_data.is_none() {
-                return None;
-            }
+            .iter()
+            .filter_map(|(slot_name, slot_data)| {
+                let _slot_name = slot_name
+                    .string_ref()
+                    .expect("ship ability slot name is not a string");
+                if slot_data.is_none() {
+                    return None;
+                }
 
-            let slot_data = slot_data.dict_ref().expect("slot data is not a dictionary");
-            let slot = game_param_to_type!(slot_data, "slot", usize);
-            let abils = game_param_to_type!(slot_data, "abils", &[()]);
-            let abils: Vec<(String, String)> = abils
-                .iter()
-                .map(|abil| {
-                    let abil = abil.list_ref().expect("ability is not a list");
-                    (
-                        abil[0]
-                            .string_ref()
-                            .expect("abil[0] is not a string")
-                            .clone(),
-                        abil[1]
-                            .string_ref()
-                            .expect("abil[1] is not a string")
-                            .clone(),
-                    )
-                })
-                .collect();
+                let slot_data = slot_data.dict_ref().expect("slot data is not a dictionary");
+                let slot = game_param_to_type!(slot_data, "slot", usize);
+                let abils = game_param_to_type!(slot_data, "abils", &[()]);
+                let abils: Vec<(String, String)> = abils
+                    .iter()
+                    .map(|abil| {
+                        let abil = abil.list_ref().expect("ability is not a list");
+                        (
+                            abil[0]
+                                .string_ref()
+                                .expect("abil[0] is not a string")
+                                .clone(),
+                            abil[1]
+                                .string_ref()
+                                .expect("abil[1] is not a string")
+                                .clone(),
+                        )
+                    })
+                    .collect();
 
-            Some((slot, abils))
-        })
-        .sorted_by(|a, b| a.0.cmp(&b.0))
-        // drop the slot
-        .map(|abil| abil.1)
-        .collect()
-    );
+                Some((slot, abils))
+            })
+            .sorted_by(|a, b| a.0.cmp(&b.0))
+            // drop the slot
+            .map(|abil| abil.1)
+            .collect()
+    });
 
     let upgrade_data = game_param_to_type!(ship_data, "ShipUpgradeInfo", HashMap<(), ()>);
     let upgrades: Vec<String> = upgrade_data

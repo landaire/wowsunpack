@@ -14,12 +14,7 @@ fn child_by_name<'a, 'b>(
     node: &roxmltree::Node<'a, 'b>,
     name: &str,
 ) -> Option<roxmltree::Node<'a, 'b>> {
-    for child in node.children() {
-        if child.tag_name().name() == name {
-            return Some(child);
-        }
-    }
-    None
+    node.children().find(|&child| child.tag_name().name() == name)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -204,8 +199,8 @@ impl<'argtype> serde::Serialize for ArgValue<'argtype> {
                 tup.serialize_element(z)?;
                 tup.end()
             }
-            Self::String(s) => serializer.serialize_bytes(&s),
-            Self::UnicodeString(s) => serializer.serialize_bytes(&s),
+            Self::String(s) => serializer.serialize_bytes(s),
+            Self::UnicodeString(s) => serializer.serialize_bytes(s),
             Self::Blob(blob) => {
                 // TODO: Determine when we can/can't pickle-decode this
                 // Also, make pickled::Value implement Serialize
@@ -216,7 +211,7 @@ impl<'argtype> serde::Serialize for ArgValue<'argtype> {
                         //let x: serde_json::Value = v.try_into().unwrap();
                         serializer.serialize_some(&v)
                     }
-                    Err(_) => serializer.serialize_bytes(&blob),
+                    Err(_) => serializer.serialize_bytes(blob),
                 }
             }
             Self::Array(a) => {
@@ -406,11 +401,8 @@ pub fn parse_type(arg: &roxmltree::Node, aliases: &HashMap<String, ArgType>) -> 
     } else if t == "FIXED_DICT" {
         let mut props = vec![];
         //println!("{:#?}", arg);
-        let allow_none = match child_by_name(&arg, "AllowNone") {
-            Some(_) => true, // TODO: Check if the text is actually "true"
-            None => false,
-        };
-        let properties = match child_by_name(&arg, "Properties") {
+        let allow_none = child_by_name(arg, "AllowNone").is_some();
+        let properties = match child_by_name(arg, "Properties") {
             Some(p) => p,
             None => {
                 return ArgType::FixedDict((allow_none, vec![]));
@@ -442,7 +434,7 @@ pub fn parse_type(arg: &roxmltree::Node, aliases: &HashMap<String, ArgType>) -> 
     } else if aliases.contains_key(t) {
         aliases.get(t).unwrap().clone()
     } else {
-        panic!("Unrecognized type {}", t);
+        panic!("Unrecognized type {t}");
     }
 }
 
@@ -530,7 +522,7 @@ mod test {
     #[test]
     fn test_argtype() {
         let doc = "<Arg> UINT8 </Arg>";
-        let doc = roxmltree::Document::parse(&doc).unwrap();
+        let doc = roxmltree::Document::parse(doc).unwrap();
         let root = doc.root();
         assert_eq!(
             parse_type(&root, &HashMap::new()),
@@ -541,7 +533,7 @@ mod test {
     #[test]
     fn test_int16() {
         let doc = "<Arg> INT16 </Arg>";
-        let doc = roxmltree::Document::parse(&doc).unwrap();
+        let doc = roxmltree::Document::parse(doc).unwrap();
         let root = doc.root();
         assert_eq!(
             parse_type(&root, &HashMap::new()),
@@ -559,7 +551,7 @@ mod test {
                 <bySmoke><Type>FLOAT</Type></bySmoke>
             </Properties>
         </Arg>";
-        let doc = roxmltree::Document::parse(&doc).unwrap();
+        let doc = roxmltree::Document::parse(doc).unwrap();
         let root = doc.root_element();
         let t = parse_type(&root, &HashMap::new());
         assert_eq!(
@@ -596,7 +588,7 @@ mod test {
             </Properties>
             <implementedBy>CrewModifiers.crewModifiersCompactParamsConverter</implementedBy>
         </CREW_MODIFIERS_COMPACT_PARAMS>";
-        let doc = roxmltree::Document::parse(&alias).unwrap();
+        let doc = roxmltree::Document::parse(alias).unwrap();
         let root = doc.root_element();
         let mut aliases = HashMap::new();
         aliases.insert("BOOL".to_string(), ArgType::Primitive(PrimitiveType::Uint8));
@@ -606,7 +598,7 @@ mod test {
         );
 
         let proptype = "<Type>CREW_MODIFIERS_COMPACT_PARAMS</Type>";
-        let doc = roxmltree::Document::parse(&proptype).unwrap();
+        let doc = roxmltree::Document::parse(proptype).unwrap();
         let root = doc.root();
         let t = parse_type(&root, &aliases);
         assert_eq!(t.sort_size(), 65535);
@@ -627,7 +619,7 @@ mod test {
             ArgType::Primitive(PrimitiveType::Uint32),
         );
 
-        let doc = roxmltree::Document::parse(&spec).unwrap();
+        let doc = roxmltree::Document::parse(spec).unwrap();
         let root = doc.root_element();
         let t = parse_type(&root, &aliases);
         //println!("{:#?}", t);
@@ -650,7 +642,7 @@ mod test {
     #[test]
     fn test_fixedsize_array() {
         let spec = "<Type>ARRAY<of>UINT16</of><size>2</size></Type>";
-        let doc = roxmltree::Document::parse(&spec).unwrap();
+        let doc = roxmltree::Document::parse(spec).unwrap();
         let root = doc.root_element();
         let aliases = HashMap::new();
         let t = parse_type(&root, &aliases);
@@ -667,7 +659,7 @@ mod test {
 
     #[test]
     fn test_unpacker_macro_single() {
-        let args = vec![ArgValue::Uint8(5)];
+        let args = [ArgValue::Uint8(5)];
         let (u8_arg,) = unpack_rpc_args!(args, u8);
         assert_eq!(u8_arg, 5);
     }
