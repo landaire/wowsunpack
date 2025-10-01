@@ -2,16 +2,12 @@ use eyre::{Result, WrapErr};
 
 use memmap::MmapOptions;
 use pickled::HashableValue;
+use thread_local::ThreadLocal;
 use std::{
-    collections::HashSet,
-    fs::{self, File},
-    io::{BufWriter, Cursor, Write, stdout},
-    path::{Path, PathBuf},
-    sync::{
+    cell::RefCell, collections::HashSet, fs::{self, File}, io::{BufWriter, Cursor, Write, stdout}, path::{Path, PathBuf}, sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
-    },
-    time::Instant,
+    }, time::Instant
 };
 use wowsunpack::{data::pkg::PkgFileLoader, game_params::convert::game_params_to_pickle};
 use wowsunpack::{
@@ -20,6 +16,7 @@ use wowsunpack::{
 };
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use indicatif::{ParallelProgressIterator, ProgressBar};
 use rayon::prelude::*;
 
 /// Utility for interacting with World of Warships game assets
@@ -121,6 +118,15 @@ enum Commands {
 
         #[clap(default_value = "GameParams.json")]
         out_file: PathBuf,
+    },
+    /// Grep files for the given regex. Only prints a binary match.
+    Grep {
+        /// Path filter
+        #[clap(long)]
+        path: Option<String>,
+
+        /// The pattern to look for
+        pattern: String,
     },
 }
 
@@ -461,6 +467,65 @@ fn run() -> Result<()> {
                     println!(" {} bytes", info.unpacked_size);
                 }
             }
+        }
+        Commands::Grep { pattern, path } => {
+            let Some(pkg_loader) = pkg_loader.as_mut() else {
+                return Err(eyre::eyre!(
+                    "Package file loader is unavailable. Check that the pkg_dir exists."
+                ));
+            };
+
+            let regex = regex::bytes::Regex::new(pattern.as_str())?;
+
+            let glob =
+                path.map(|glob| glob::Pattern::new(glob.as_str()).expect("invalid glob pattern"));
+
+            let files = file_tree.paths();
+
+            let mut buffer = ThreadLocal::<RefCell<Vec<u8>>>::new();
+
+            let mut bar = ProgressBar::new(files.iter().len() as u64);
+
+            let mut bar = files
+                .into_par_iter()
+                .progress_with(bar.clone())
+                .for_each(|(path, node)| {
+                    if let Some(glob) = &glob
+                        && !glob.matches_path(&*path)
+                    {
+                        return;
+                    }
+
+                    if path.is_dir() {
+                        return;
+                    }
+
+                    let buffer = buffer.get_or_default();
+                    let mut buffer = buffer.borrow_mut();
+
+                    buffer.clear();
+
+                    let Some(file_info) = node.file_info() else {
+                        return;
+                    };
+                    let bytes_needed =
+                        (file_info.unpacked_size as usize).saturating_sub(buffer.capacity());
+                    if bytes_needed > 0 {
+                        buffer.reserve(bytes_needed);
+                    }
+
+                    node.read_file(pkg_loader, &mut *buffer).expect("failed to read file");
+
+                    if let Some(matched) = regex.find(buffer.as_slice()) {
+                        let file_path = path.as_os_str().to_string_lossy();
+
+                        if let Ok(data) = std::str::from_utf8(matched.as_bytes()) {
+                            bar.println(format!("{} matched: {}", file_path, data));
+                        } else {
+                            bar.println(format!("{} matched", file_path));
+                        }
+                    }
+                });
         }
     }
 
