@@ -1,6 +1,7 @@
 use eyre::{Result, WrapErr};
 
 use memmap::MmapOptions;
+use pickled::HashableValue;
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -12,8 +13,11 @@ use std::{
     },
     time::Instant,
 };
-use wowsunpack::data::pkg::PkgFileLoader;
-use wowsunpack::data::{idx, serialization};
+use wowsunpack::{data::pkg::PkgFileLoader, game_params::convert::game_params_to_pickle};
+use wowsunpack::{
+    data::{idx, serialization},
+    game_params::convert::pickle_to_json,
+};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
@@ -25,15 +29,25 @@ struct Args {
     /// Game directory. This option can be used instead of pkg_dir / idx_files
     /// and will automatically use the latest version of the game. If none of these
     /// args are provided, the executable's directory is assumed to be the game dir.
+    ///
+    /// This option will use the latest build of WoWs in the `bin` directory, which
+    /// may not necessarily be the latest _playable_ version of the game e.g. when the
+    /// game launcher preps an update to the game which has not yet gone live.
+    ///
+    /// Overrides `--pkg-dir`, `--idx-files`, and `--bin-dir`
     #[clap(short, long)]
     game_dir: Option<PathBuf>,
 
     /// Directory where pkg files are located. If not provided, this will
     /// default relative to the given idx directory as "../../../../res_packages"
+    ///
+    /// Ignored if `--game-dir` is specified.
     #[clap(short, long)]
     pkg_dir: Option<PathBuf>,
 
-    /// .idx file(s) or their containing directory
+    /// .idx file(s) or their containing directory.
+    ///
+    /// Ignored if `--game-dir` is specified.
     #[clap(short, long)]
     idx_files: Vec<PathBuf>,
 
@@ -92,6 +106,19 @@ enum Commands {
         /// Don't pretty-print the JSON (may make serialization/deserialization faster)
         #[clap(short, long)]
         ugly: bool,
+
+        /// Dump the full GameParams file. This causes `--id` to be ignored.
+        #[clap(short, long)]
+        full: bool,
+
+        /// Print the top-level GameParams IDs to stdout.
+        #[clap(long)]
+        print_ids: bool,
+
+        /// Which GameParams identifier to dump
+        #[clap(long, default_value = "")]
+        id: String,
+
         #[clap(default_value = "GameParams.json")]
         out_file: PathBuf,
     },
@@ -113,8 +140,7 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
     Ok(idx::parse(&mut reader)?)
 }
 
-fn main() -> Result<()> {
-    let timestamp = Instant::now();
+fn run() -> Result<()> {
     let mut args = Args::parse();
 
     let mut game_dir = PathBuf::from(std::env::args().next().expect("failed to get first arg"))
@@ -320,15 +346,82 @@ fn main() -> Result<()> {
                 }
             };
         }
-        Commands::GameParams { out_file, ugly } => match pkg_loader.as_mut() {
+        Commands::GameParams {
+            out_file,
+            ugly,
+            id,
+            print_ids: ids,
+            full,
+        } => match pkg_loader.as_mut() {
             Some(pkg_loader) => {
+                let Ok(game_params_file) = file_tree.find("content/GameParams.data") else {
+                    return Err(eyre::eyre!(
+                        "Could not find GameParams.data in WoWs package"
+                    ));
+                };
+
+                let mut game_params_data: Vec<u8> = Vec::with_capacity(
+                    game_params_file.file_info().unwrap().unpacked_size as usize,
+                );
+
+                game_params_file
+                    .read_file(&pkg_loader, &mut game_params_data)
+                    .expect("failed to read GameParams");
+
+                let pickle = game_params_to_pickle(game_params_data)
+                    .expect("failed to deserialize GameParams");
+
+                let params_dict = if !full {
+                    match pickle {
+                        pickled::Value::Dict(mut params_dict) => {
+                            if ids {
+                                for key in params_dict.keys() {
+                                    if let HashableValue::String(s) = key {
+                                        if s.is_empty() {
+                                            println!("(empty string)");
+                                        } else {
+                                            println!("{}", s);
+                                        }
+                                    } else {
+                                        println!("Non-string Key: {:?}", key)
+                                    }
+                                }
+                                return Ok(());
+                            }
+
+                            let Some(dict) = params_dict.remove(&HashableValue::String(id.clone()))
+                            else {
+                                return Err(eyre::eyre!("Could not find GameParams ID {id:?}"));
+                            };
+
+                            dict
+                        }
+                        pickled::Value::List(mut params_list) => {
+                            if ids {
+                                println!("GameParams format does not have IDs");
+
+                                return Ok(());
+                            }
+                            params_list.remove(0)
+                        }
+                        _other => {
+                            panic!("Unexpected GameParams root element type");
+                        }
+                    }
+                } else {
+                    pickle
+                };
+
+                let json = pickle_to_json(params_dict);
+
                 let mut writer = BufWriter::new(File::create(&out_file)?);
-                wowsunpack::game_params::convert::read_game_params_as_json(
-                    !ugly,
-                    file_tree.clone(),
-                    pkg_loader,
-                    &mut writer,
-                )?;
+
+                if ugly {
+                    serde_json::to_writer(&mut writer, &json).expect("failed to write JSON data");
+                } else {
+                    serde_json::to_writer_pretty(&mut writer, &json)
+                        .expect("failed to write JSON data");
+                };
 
                 println!("GameParams written to {out_file:?}");
             }
@@ -368,6 +461,14 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let timestamp = Instant::now();
+
+    run()?;
 
     println!(
         "Finished in {} seconds",
