@@ -20,13 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.3
+        uses: rust-build/rust-build.action@v1.4.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           RUSTTARGET: ${{ matrix.target }}
           EXTRA_FILES: "README.md"
           ARCHIVE_TYPES: ${{ matrix.archive }}
+          TOOLCHAIN_VERSION: 1.90.0
   release_without_not_required:
     name: release ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -37,9 +38,10 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.3
+        uses: rust-build/rust-build.action@v1.4.5
         with:
           RUSTTARGET: ${{ matrix.target }}
           UPLOAD_MODE: none
+          TOOLCHAIN_VERSION: 1.90.0
       - name: Checkout output
         run: ls -laR
