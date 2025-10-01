@@ -1,5 +1,5 @@
 use crate::error::*;
-use nom::number::complete::{le_i16, le_i32, le_i64, le_i8, le_u64, le_u8};
+use nom::number::complete::{le_i8, le_i16, le_i32, le_i64, le_u8, le_u64};
 use nom::{
     bytes::complete::take, number::complete::le_f32, number::complete::le_f64,
     number::complete::le_u16, number::complete::le_u32,
@@ -14,7 +14,8 @@ fn child_by_name<'a, 'b>(
     node: &roxmltree::Node<'a, 'b>,
     name: &str,
 ) -> Option<roxmltree::Node<'a, 'b>> {
-    node.children().find(|&child| child.tag_name().name() == name)
+    node.children()
+        .find(|&child| child.tag_name().name() == name)
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -12,8 +12,8 @@ use std::{
 use binrw::{BinRead, NullString, PosValue};
 use thiserror::Error;
 
-use crate::data::pkg::PkgFileLoader;
 use crate::Rc;
+use crate::data::pkg::PkgFileLoader;
 
 use super::pkg::PkgError;
 
