@@ -30,22 +30,54 @@ Planned:
 ## Usage
 
 ```
-Usage: wowsunpack [OPTIONS] <COMMAND>
+$ wowsunpack --help
+
+Utility for interacting with World of Warships game assets
+
+Usage: wowsunpack.exe [OPTIONS] <COMMAND>
 
 Commands:
+  list         List files in a directory
   extract      Extract files to an output directory
   metadata     Write meta information about the game assets to the specified output file. This may be useful for diffing contents between builds at a glance. Output data includes file name, size, CRC32, unpacked size, compression info, and a flag indicating if the file is a directory
   game-params  Special command for directly reading the `content/GameParams.data` file, converting it to JSON, and writing to the specified output file path
+  grep         Grep files for the given regex. Only prints a binary match
   help         Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --pkg-dir <PKG_DIR>      Directory where pkg files are located. If not provided, this will default relative to the given idx directory as "../../../../res_packages"
-  -i, --idx-files <IDX_FILES>  .idx file(s) or their containing directory
-  -h, --help                   Print help
-  -V, --version                Print version
+  -g, --game-dir <GAME_DIR>
+          Game directory. This option can be used instead of pkg_dir / idx_files and will automatically use the latest version of the game. If none of these args are provided, the executable's directory is assumed to be the game dir.
+
+          This option will use the latest build of WoWs in the `bin` directory, which may not necessarily be the latest _playable_ version of the game e.g. when the game launcher preps an update to the game which has not yet gone live.
+
+          Overrides `--pkg-dir`, `--idx-files`, and `--bin-dir`
+
+  -p, --pkg-dir <PKG_DIR>
+          Directory where pkg files are located. If not provided, this will default relative to the given idx directory as "../../../../res_packages"
+
+          Ignored if `--game-dir` is specified.
+
+  -i, --idx-files <IDX_FILES>
+          .idx file(s) or their containing directory.
+
+          Ignored if `--game-dir` is specified.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 ### Examples
+
+#### Searching Files
+
+Allows for searching through game contents for a file whose content matches some regex without needing to dump all files to your local filesystem. File search operates in parallel and should saturate CPU cores. For 400k files this command takes about 42 seconds:
+
+```
+$ wowsunpack --game-dir E:\WoWs\World_of_Warships\ grep AaDamageConstantBubbles
+```
 
 #### Dumping FIles
 
