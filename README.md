@@ -45,6 +45,40 @@ Options:
   -V, --version                Print version
 ```
 
+### Examples
+
+#### Dumping FIles
+
+A specific file (results placed in `wowsunpack_extracted` dir):
+
+```
+$ wowsunpack --game-dir E:\WoWs\World_of_Warships\ extract gui\ship_dead_icons\PJSC819.png
+Wrote 1 files
+Finished in 1.1756742 seconds
+```
+
+All PNGs from a directory:
+
+```
+$ wowsunpack --game-dir E:\WoWs\World_of_Warships\ extract gui\ship_dead_icons\**\*.png
+Wrote 1143 files
+Finished in 1.396276 seconds
+```
+
+#### Dumping GameParams
+
+Dumping default params:
+
+```
+$ wowsunpack --game-dir E:\WoWs\World_of_Warships\ game-params
+```
+
+Dumping NA patches:
+
+```
+$ wowsunpack --game-dir E:\WoWs\World_of_Warships\ game-params --id NA GameParamsNA.json
+```
+
 ## Motivation
 
 World of Warships game files are packed in two custom file formats -- `.idx` files and `.pkg` files. `.idx` files contain serialized resource and volume (.pkg) metadata. There exists [an official utility](https://forum.worldofwarships.com/topic/183662-all-wows-unpack-tool-unpack-game-client-resources/) provided by the game developer, Wargaming, but has the following drawbacks compared to this utility:
