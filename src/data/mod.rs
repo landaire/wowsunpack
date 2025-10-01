@@ -8,10 +8,10 @@ pub mod serialization;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+use crate::Rc;
 use crate::error::ErrorKind;
 use crate::game_params::types::Param;
 use crate::rpc::entitydefs::EntitySpec;
-use crate::Rc;
 
 pub trait ResourceLoader {
     fn localized_name_from_param(&self, param: &Param) -> Option<&str>;
@@ -53,7 +53,9 @@ impl Version {
             true
         } else if self.minor < other.minor {
             false
-        } else { self.patch >= other.patch }
+        } else {
+            self.patch >= other.patch
+        }
     }
 }
 

@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
-    data::{idx::FileNode, pkg::PkgFileLoader, DataFileWithCallback, ResourceLoader},
+    Rc,
+    data::{DataFileWithCallback, ResourceLoader, idx::FileNode, pkg::PkgFileLoader},
     error::ErrorKind,
     game_params::convert::game_params_to_pickle,
-    rpc::entitydefs::{parse_scripts, EntitySpec},
-    Rc,
+    rpc::entitydefs::{EntitySpec, parse_scripts},
 };
 
 use super::types::*;

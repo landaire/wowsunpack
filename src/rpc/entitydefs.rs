@@ -1,7 +1,7 @@
 //use crate::script_type::TypeAliases;
 use crate::{
     data::DataFileLoader,
-    rpc::typedefs::{parse_aliases, parse_type, ArgType, TypeAliases},
+    rpc::typedefs::{ArgType, TypeAliases, parse_aliases, parse_type},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,11 +54,7 @@ pub struct Method {
 
 impl Method {
     fn sort_size(&self) -> usize {
-        let size = self
-            .args
-            .iter()
-            .map(|arg| arg.sort_size())
-            .sum::<usize>();
+        let size = self.args.iter().map(|arg| arg.sort_size()).sum::<usize>();
         if size >= 0xffff {
             0xffff + self.variable_length_header_size
         } else {
@@ -89,7 +85,8 @@ fn child_by_name<'a, 'b>(
     node: &roxmltree::Node<'a, 'b>,
     name: &str,
 ) -> Option<roxmltree::Node<'a, 'b>> {
-    node.children().find(|&child| child.tag_name().name() == name)
+    node.children()
+        .find(|&child| child.tag_name().name() == name)
 }
 
 fn parse_implements(ilist: &roxmltree::Node) -> Vec<String> {
@@ -151,13 +148,13 @@ fn parse_method(method: &roxmltree::Node, aliases: &TypeAliases) -> Method {
     let variable_length_header_size = match child_by_name(method, "VariableLengthHeaderSize") {
         Some(x) => {
             //println!("{}: {:#?}", method.tag_name().name(), x.first_child());
-            x
-                .first_child()
+            x.first_child()
                 .unwrap()
                 .text()
                 .unwrap()
                 .trim()
-                .parse::<usize>().unwrap_or(1)
+                .parse::<usize>()
+                .unwrap_or(1)
         }
         None => 1,
     };

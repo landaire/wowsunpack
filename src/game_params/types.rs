@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
-use crate::{data::ResourceLoader, Rc};
+use crate::{Rc, data::ResourceLoader};
 
 use super::provider::GameMetadataProvider;
 

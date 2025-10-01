@@ -5,11 +5,11 @@ use pickled::HashableValue;
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{stdout, BufWriter, Cursor, Write},
+    io::{BufWriter, Cursor, Write, stdout},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -191,7 +191,9 @@ fn run() -> Result<()> {
 
             eprintln!();
 
-            return Err(eyre::eyre!("Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"));
+            return Err(eyre::eyre!(
+                "Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"
+            ));
         }
     }
 
@@ -365,7 +367,7 @@ fn run() -> Result<()> {
                 );
 
                 game_params_file
-                    .read_file(&pkg_loader, &mut game_params_data)
+                    .read_file(pkg_loader, &mut game_params_data)
                     .expect("failed to read GameParams");
 
                 let pickle = game_params_to_pickle(game_params_data)
@@ -380,10 +382,10 @@ fn run() -> Result<()> {
                                         if s.is_empty() {
                                             println!("(empty string)");
                                         } else {
-                                            println!("{}", s);
+                                            println!("{s}");
                                         }
                                     } else {
-                                        println!("Non-string Key: {:?}", key)
+                                        println!("Non-string Key: {key:?}")
                                     }
                                 }
                                 return Ok(());
