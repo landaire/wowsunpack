@@ -240,7 +240,6 @@ fn build_skill_modifiers(
 
 fn build_crew_skills(
     skills: &BTreeMap<HashableValue, Value>,
-    default_skills: Option<&BTreeMap<HashableValue, Value>>,
 ) -> Result<Vec<CrewSkill>, CrewSkillBuilderError> {
     skills
         .iter()
@@ -251,13 +250,7 @@ fn build_crew_skills(
                 .to_owned();
 
             if skill_data.is_none() {
-                if let Some(default_skills) =
-                    default_skills.and_then(|skills| skills.get(hashable_skill_name))
-                {
-                    skill_data = default_skills
-                } else {
-                    return None;
-                }
+                return None;
             }
 
             let skill_data = skill_data.dict_ref().expect("skill data is not dictionary");
@@ -635,33 +628,6 @@ impl GameMetadataProvider {
                 .expect("First element of GameParams is not a dictionary")
         };
 
-        // Need to find the default captain because of 14.9.0
-        let default_captain = params_dict.values().find_map(|param| {
-            let param_data = param.dict_ref()?;
-
-            if !param_data
-                .get(&HashableValue::String("typeinfo".to_string()))
-                .and_then(|type_info| {
-                    type_info.dict_ref().and_then(|type_info| {
-                        let ty = type_info.get(&HashableValue::String("type".to_string()))?;
-
-                        Some(
-                            ParamType::from_str(ty.string_ref()?.as_str()).ok()? == ParamType::Crew,
-                        )
-                    })
-                })
-                .unwrap_or_default()
-            {
-                return None;
-            }
-
-            let skills = game_param_to_type!(param_data, "Skills", Option<HashMap<(), ()>>)?;
-
-            let valid_skills = skills.values().all(|value| !value.is_none());
-
-            if valid_skills { Some(skills) } else { None }
-        });
-
         let new_params = params_dict
                 .values()
                 .filter_map(|param| {
@@ -697,7 +663,7 @@ impl GameMetadataProvider {
                                         let crew_personality = build_crew_personality(personality).expect("failed to build crew personality");
 
                                         let skills = game_param_to_type!(param_data, "Skills", Option<HashMap<(), ()>>);
-                                        let skills = skills.or_else(|| default_captain).map(|skills| build_crew_skills(skills, default_captain).expect("failed to build crew skills"));
+                                        let skills = skills..map(|skills| build_crew_skills(skills).expect("failed to build crew skills"));
 
                                         CrewBuilder::default()
                                             .money_training_level(money_training_level)

@@ -671,9 +671,9 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 
 [[package]]
 name = "pickled"
-version = "1.2.0"
+version = "2.0.0-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c01521ef80e2ff9bc52e7142be1dd7664391168f076f620373eaaf913a9cd211"
+checksum = "d8b205ff9c6c4aa4d058c1336ec6a06806256ad6fd4f1cf137293d04c02623cd"
 dependencies = [
  "byteorder",
  "iter-read",
