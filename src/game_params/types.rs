@@ -158,7 +158,7 @@ impl Param {
     }
 }
 
-#[derive(Serialize, Deserialize, EnumString, Hash, Debug, Variantly)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
 pub enum ParamType {
     Ability,
     Achievement,
