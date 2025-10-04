@@ -2,7 +2,7 @@
 name = "wowsunpack"
 description = "Utility for interacting with World of Warships game assets"
 license = "MIT"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 exclude = [".github/", "./format_templates/"]
 repository = "https://github.com/landaire/wowsunpack"
@@ -35,7 +35,7 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", optional = true }
 csv = { version = "1.2", optional = true }
 glob = { version = "0.3", optional = true }
-pickled = { version = "2.0.0-alpha", features = ["variantly"] }
+pickled = { version = "2.0.0-alpha2", features = ["variantly"] }
 nom = "7.0.0"
 variantly = "0.4"
 strum = "0.25"
@@ -57,9 +57,20 @@ optional = true
 [features]
 arc = []
 json = ["dep:serde_json"]
-bin = ["dep:eyre", "dep:clap", "dep:csv", "dep:glob", "dep:rayon", "dep:regex", "dep:indicatif", "dep:thread_local", "arc", "json"]
+bin = [
+    "dep:eyre",
+    "dep:clap",
+    "dep:csv",
+    "dep:glob",
+    "dep:rayon",
+    "dep:regex",
+    "dep:indicatif",
+    "dep:thread_local",
+    "arc",
+    "json",
+]
 default = ["bin"]
 cbor = ["dep:serde_cbor"]
 
 [patch.crates-io]
-# pickled = { path = "../pickled" }
+#pickled = { path = "../pickled" }

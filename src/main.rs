@@ -2,6 +2,7 @@ use eyre::{Result, WrapErr};
 
 use memmap::MmapOptions;
 use pickled::HashableValue;
+use serde::Serialize;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
@@ -15,11 +16,8 @@ use std::{
     time::Instant,
 };
 use thread_local::ThreadLocal;
+use wowsunpack::data::{idx, serialization};
 use wowsunpack::{data::pkg::PkgFileLoader, game_params::convert::game_params_to_pickle};
-use wowsunpack::{
-    data::{idx, serialization},
-    game_params::convert::pickle_to_json,
-};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use indicatif::{ParallelProgressIterator, ProgressBar};
@@ -175,17 +173,16 @@ fn run() -> Result<()> {
                 .wrap_err("No index files were provided and could not enumerate `bin` directory")?;
             for path in paths {
                 let path = path.wrap_err("could not enumerate path")?;
-                if path.file_type()?.is_dir() {
-                    if let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
-                    {
-                        match latest_version {
-                            Some(other_version) => {
-                                if other_version < version {
-                                    latest_version = Some(version);
-                                }
+                if path.file_type()?.is_dir()
+                    && let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
+                {
+                    match latest_version {
+                        Some(other_version) => {
+                            if other_version < version {
+                                latest_version = Some(version);
                             }
-                            None => latest_version = Some(version),
                         }
+                        None => latest_version = Some(version),
                     }
                 }
             }
@@ -280,10 +277,10 @@ fn run() -> Result<()> {
                 }
 
                 // Also skip this path if its parent directory has already been extracted
-                if let Some(parent) = path.parent() {
-                    if extracted_paths.contains(parent) {
-                        continue;
-                    }
+                if let Some(parent) = path.parent()
+                    && extracted_paths.contains(parent)
+                {
+                    continue;
                 }
 
                 extracted_paths.insert((*path).as_ref());
@@ -390,6 +387,7 @@ fn run() -> Result<()> {
                 fn print_ids(params_dict: &BTreeMap<pickled::HashableValue, pickled::Value>) {
                     for key in params_dict.keys() {
                         if let HashableValue::String(s) = key {
+                            let s = s.inner();
                             if s.is_empty() {
                                 println!("(empty string)");
                             } else {
@@ -403,58 +401,28 @@ fn run() -> Result<()> {
 
                 let params_dict = if !full {
                     match pickle {
-                        pickled::Value::Shared(inner) => {
-                            let mut inner = inner.borrow_mut();
-                            match &mut *inner {
-                                pickled::Value::Dict(params_dict) => {
-                                    if ids {
-                                        print_ids(&params_dict);
-                                        return Ok(());
-                                    }
-
-                                    let Some(dict) =
-                                        params_dict.remove(&HashableValue::String(id.clone()))
-                                    else {
-                                        return Err(eyre::eyre!(
-                                            "Could not find GameParams ID {id:?}"
-                                        ));
-                                    };
-
-                                    dict
-                                }
-                                pickled::Value::List(params_list) => {
-                                    if ids {
-                                        println!("GameParams format does not have IDs");
-
-                                        return Ok(());
-                                    }
-                                    params_list.remove(0)
-                                }
-                                _other => {
-                                    panic!("Unexpected GameParams root element type");
-                                }
-                            }
-                        }
-                        pickled::Value::Dict(mut params_dict) => {
+                        pickled::Value::Dict(params_dict) => {
                             if ids {
-                                print_ids(&params_dict);
+                                print_ids(&params_dict.inner());
                                 return Ok(());
                             }
 
-                            let Some(dict) = params_dict.remove(&HashableValue::String(id.clone()))
+                            let params_dict = params_dict.inner();
+                            let Some(dict) =
+                                params_dict.get(&HashableValue::String(id.clone().into()))
                             else {
                                 return Err(eyre::eyre!("Could not find GameParams ID {id:?}"));
                             };
 
-                            dict
+                            dict.clone()
                         }
-                        pickled::Value::List(mut params_list) => {
+                        pickled::Value::List(params_list) => {
                             if ids {
                                 println!("GameParams format does not have IDs");
 
                                 return Ok(());
                             }
-                            params_list.remove(0)
+                            params_list.inner_mut().remove(0)
                         }
                         other => {
                             panic!("Unexpected GameParams root element type {}", other);
@@ -464,16 +432,14 @@ fn run() -> Result<()> {
                     pickle
                 };
 
-                let json = pickle_to_json(params_dict);
-
-                let mut writer = BufWriter::new(File::create(&out_file)?);
-
+                let writer = BufWriter::new(File::create(&out_file)?);
                 if ugly {
-                    serde_json::to_writer(&mut writer, &json).expect("failed to write JSON data");
+                    let mut serializer = serde_json::Serializer::new(writer);
+                    params_dict.serialize(&mut serializer)?;
                 } else {
-                    serde_json::to_writer_pretty(&mut writer, &json)
-                        .expect("failed to write JSON data");
-                };
+                    let mut serializer = serde_json::Serializer::pretty(writer);
+                    params_dict.serialize(&mut serializer)?;
+                }
 
                 println!("GameParams written to {out_file:?}");
             }
@@ -526,52 +492,51 @@ fn run() -> Result<()> {
 
             let files = file_tree.paths();
 
-            let mut buffer = ThreadLocal::<RefCell<Vec<u8>>>::new();
+            let buffer = ThreadLocal::<RefCell<Vec<u8>>>::new();
 
-            let mut bar = ProgressBar::new(files.iter().len() as u64);
+            let bar = ProgressBar::new(files.iter().len() as u64);
 
-            let mut bar =
-                files
-                    .into_par_iter()
-                    .progress_with(bar.clone())
-                    .for_each(|(path, node)| {
-                        if let Some(glob) = &glob
-                            && !glob.matches_path(&*path)
-                        {
-                            return;
+            files
+                .into_par_iter()
+                .progress_with(bar.clone())
+                .for_each(|(path, node)| {
+                    if let Some(glob) = &glob
+                        && !glob.matches_path(&path)
+                    {
+                        return;
+                    }
+
+                    if path.is_dir() {
+                        return;
+                    }
+
+                    let buffer = buffer.get_or_default();
+                    let mut buffer = buffer.borrow_mut();
+
+                    buffer.clear();
+
+                    let Some(file_info) = node.file_info() else {
+                        return;
+                    };
+                    let bytes_needed =
+                        (file_info.unpacked_size as usize).saturating_sub(buffer.capacity());
+                    if bytes_needed > 0 {
+                        buffer.reserve(bytes_needed);
+                    }
+
+                    node.read_file(pkg_loader, &mut *buffer)
+                        .expect("failed to read file");
+
+                    if let Some(matched) = regex.find(buffer.as_slice()) {
+                        let file_path = path.as_os_str().to_string_lossy();
+
+                        if let Ok(data) = std::str::from_utf8(matched.as_bytes()) {
+                            bar.println(format!("{} matched: {}", file_path, data));
+                        } else {
+                            bar.println(format!("{} matched", file_path));
                         }
-
-                        if path.is_dir() {
-                            return;
-                        }
-
-                        let buffer = buffer.get_or_default();
-                        let mut buffer = buffer.borrow_mut();
-
-                        buffer.clear();
-
-                        let Some(file_info) = node.file_info() else {
-                            return;
-                        };
-                        let bytes_needed =
-                            (file_info.unpacked_size as usize).saturating_sub(buffer.capacity());
-                        if bytes_needed > 0 {
-                            buffer.reserve(bytes_needed);
-                        }
-
-                        node.read_file(pkg_loader, &mut *buffer)
-                            .expect("failed to read file");
-
-                        if let Some(matched) = regex.find(buffer.as_slice()) {
-                            let file_path = path.as_os_str().to_string_lossy();
-
-                            if let Ok(data) = std::str::from_utf8(matched.as_bytes()) {
-                                bar.println(format!("{} matched: {}", file_path, data));
-                            } else {
-                                bar.println(format!("{} matched", file_path));
-                            }
-                        }
-                    });
+                    }
+                });
         }
     }
 

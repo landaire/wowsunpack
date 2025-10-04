@@ -74,7 +74,7 @@ impl ResourceLoader for GameMetadataProvider {
 
 macro_rules! game_param_to_type {
     ($params:ident, $key:expr, String) => {
-        game_param_to_type!($params, $key, string_ref, String).clone()
+        game_param_to_type!($params, $key, string_ref, String).inner().to_string()
     };
     ($params:ident, $key:expr, i8) => {
         game_param_to_type!($params, $key, i64) as i8
@@ -106,19 +106,41 @@ macro_rules! game_param_to_type {
     ($params:ident, $key:expr, f32) => {
         game_param_to_type!($params, $key, f64) as f32
     };
+
+    // The above matches in this macro will either expand to
+    // game_param_to_type!($params, $key, f64) as f32
+    // game_param_to_type!($params, $key, i64) as <PRIMITIVE_TYPE>
+    // game_param_to_type!($params, $key, bool)
+    //
+    // But the primitive types do not have an inner shared value,
+    // so we need to handle those specially here.
     ($params:ident, $key:expr, i64) => {
-        *game_param_to_type!($params, $key, i64_ref, i64)
+        *$params
+            .get(&HashableValue::String($key.to_string().into()))
+            .unwrap_or_else(|| panic!("could not get {}", $key))
+            .i64_ref()
+            .unwrap_or_else(|| panic!("{} is not an i64", $key))
     };
     ($params:ident, $key:expr, f64) => {
-        *game_param_to_type!($params, $key, f64_ref, f64)
+        *$params
+            .get(&HashableValue::String($key.to_string().into()))
+            .unwrap_or_else(|| panic!("could not get {}", $key))
+            .f64_ref()
+            .unwrap_or_else(|| panic!("{} is not a f64", $key))
     };
     ($params:ident, $key:expr, bool) => {
-        *game_param_to_type!($params, $key, bool_ref, bool)
+        *$params
+            .get(&HashableValue::String($key.to_string().into()))
+            .unwrap_or_else(|| panic!("could not get {}", $key))
+            .bool_ref()
+            .unwrap_or_else(|| panic!("{} is not a bool", $key))
     };
+
+    // Hashmaps that may fail to resolve
     ($params:ident, $key:expr, Option<HashMap<(), ()>>) => {
         if
         $params
-            .get(&HashableValue::String($key.to_string()))
+            .get(&HashableValue::String($key.to_string().into()))
             .unwrap_or_else(|| panic!("could not get {}", $key))
             .is_none() {
                 None
@@ -128,7 +150,7 @@ macro_rules! game_param_to_type {
     };
     ($params:ident, $key:expr, Option<$ty:tt>) => {
         $params
-            .get(&HashableValue::String($key.to_string()))
+            .get(&HashableValue::String($key.to_string().into()))
             .and_then(|value| {
                 if value.is_none() {
                     None
@@ -141,11 +163,11 @@ macro_rules! game_param_to_type {
         game_param_to_type!($params, $key, dict_ref, HashMap<(), ()>)
     };
     ($params:ident, $key:expr, &[()]) => {
-        game_param_to_type!($params, $key, list_ref, &[()]).as_slice()
+        game_param_to_type!($params, $key, list_ref, &[()])
     };
     ($args:ident, $key:expr, $conversion_func:ident, $ty:ty) => {
         $args
-            .get(&HashableValue::String($key.to_string()))
+            .get(&HashableValue::String($key.to_string().into()))
             .unwrap_or_else(|| panic!("could not get {}", $key))
             .$conversion_func()
             .unwrap_or_else(|| panic!("{} is not a {}", $key, stringify!($ty)))
@@ -164,6 +186,8 @@ fn build_skill_modifiers(
                 .string_ref()
                 .expect("modifier name is not a string")
                 .to_owned();
+
+            let modifier_name = modifier_name.inner();
 
             // TODO
             if matches!(
@@ -186,7 +210,7 @@ fn build_skill_modifiers(
                     .cruiser(common_value)
                     .destroyer(common_value)
                     .submarine(common_value)
-                    .name(modifier_name)
+                    .name(modifier_name.to_owned())
                     .build()
             } else if let Some(common_value) = modifier_data.f64_ref().cloned() {
                 let common_value = common_value as f32;
@@ -197,15 +221,17 @@ fn build_skill_modifiers(
                     .cruiser(common_value)
                     .destroyer(common_value)
                     .submarine(common_value)
-                    .name(modifier_name)
+                    .name(modifier_name.to_owned())
                     .build()
             } else {
                 let modifier_data = modifier_data
                     .dict_ref()
                     .expect("skill modifier data is not a dict");
 
+                let modifier_data = modifier_data.inner();
+
                 if modifier_data
-                    .get(&HashableValue::String("AirCarrier".to_owned()))
+                    .get(&HashableValue::String("AirCarrier".to_owned().into()))
                     .expect("could not get AirCarrier")
                     .is_i64()
                 {
@@ -218,7 +244,7 @@ fn build_skill_modifiers(
                         .cruiser(game_param_to_type!(modifier_data, "Cruiser", i64) as f32)
                         .destroyer(game_param_to_type!(modifier_data, "Destroyer", i64) as f32)
                         .submarine(game_param_to_type!(modifier_data, "Submarine", i64) as f32)
-                        .name(modifier_name)
+                        .name(modifier_name.to_owned())
                         .build()
                 } else {
                     CrewSkillModifierBuilder::default()
@@ -228,7 +254,7 @@ fn build_skill_modifiers(
                         .cruiser(game_param_to_type!(modifier_data, "Cruiser", f32))
                         .destroyer(game_param_to_type!(modifier_data, "Destroyer", f32))
                         .submarine(game_param_to_type!(modifier_data, "Submarine", f32))
-                        .name(modifier_name)
+                        .name(modifier_name.to_owned())
                         .build()
                 }
             };
@@ -243,17 +269,20 @@ fn build_crew_skills(
 ) -> Result<Vec<CrewSkill>, CrewSkillBuilderError> {
     skills
         .iter()
-        .filter_map(|(mut hashable_skill_name, mut skill_data)| {
+        .filter_map(|(hashable_skill_name, skill_data)| {
             let skill_name = hashable_skill_name
                 .string_ref()
                 .expect("hashable_skill_name is not a String")
                 .to_owned();
+
+            let skill_name = skill_name.inner();
 
             if skill_data.is_none() {
                 return None;
             }
 
             let skill_data = skill_data.dict_ref().expect("skill data is not dictionary");
+            let skill_data = skill_data.inner();
 
             let _logic_modifiers =
                 game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
@@ -265,7 +294,9 @@ fn build_crew_skills(
 
             let logic_trigger_data =
                 game_param_to_type!(skill_data, "LogicTrigger", Option<HashMap<(), ()>>);
+
             let logic_trigger = logic_trigger_data.map(|logic_trigger_data| {
+                let logic_trigger_data = logic_trigger_data.inner();
                 CrewSkillLogicTriggerBuilder::default()
                     .burn_count(game_param_to_type!(
                         logic_trigger_data,
@@ -330,6 +361,7 @@ fn build_crew_skills(
             // });
 
             let tier_data = game_param_to_type!(skill_data, "tier", HashMap<(), ()>);
+            let tier_data = tier_data.inner();
             let tier = CrewSkillTiersBuilder::default()
                 .aircraft_carrier(game_param_to_type!(tier_data, "AirCarrier", usize))
                 .auxiliary(game_param_to_type!(tier_data, "Auxiliary", usize))
@@ -342,7 +374,7 @@ fn build_crew_skills(
 
             Some(
                 CrewSkillBuilder::default()
-                    .internal_name(skill_name)
+                    .internal_name(skill_name.to_owned())
                     .can_be_learned(game_param_to_type!(skill_data, "canBeLearned", bool))
                     .is_epic(game_param_to_type!(skill_data, "isEpic", bool))
                     .skill_type(game_param_to_type!(skill_data, "skillType", usize))
@@ -360,47 +392,56 @@ fn build_crew_personality(
     personality: &BTreeMap<HashableValue, Value>,
 ) -> Result<CrewPersonality, CrewPersonalityBuilderError> {
     let ships = game_param_to_type!(personality, "ships", HashMap<(), ()>);
+    let ships = ships.inner();
     let ships = CrewPersonalityShipsBuilder::default()
         .groups(
             game_param_to_type!(ships, "groups", &[()])
+                .inner()
                 .iter()
                 .map(|value| {
                     value
                         .string_ref()
                         .expect("group entry is not a string")
+                        .inner()
                         .to_owned()
                 })
                 .collect(),
         )
         .nation(
             game_param_to_type!(ships, "nation", &[()])
+                .inner()
                 .iter()
                 .map(|value| {
                     value
                         .string_ref()
                         .expect("nation entry is not a string")
+                        .inner()
                         .to_owned()
                 })
                 .collect(),
         )
         .peculiarity(
             game_param_to_type!(ships, "peculiarity", &[()])
+                .inner()
                 .iter()
                 .map(|value| {
                     value
                         .string_ref()
                         .expect("peculiarity entry is not a string")
+                        .inner()
                         .to_owned()
                 })
                 .collect(),
         )
         .ships(
             game_param_to_type!(ships, "ships", &[()])
+                .inner()
                 .iter()
                 .map(|value| {
                     value
                         .string_ref()
                         .expect("ships entry is not a string")
+                        .inner()
                         .to_owned()
                 })
                 .collect(),
@@ -436,11 +477,13 @@ fn build_crew_personality(
         .subnation(game_param_to_type!(personality, "subnation", String))
         .tags(
             game_param_to_type!(personality, "tags", &[()])
+                .inner()
                 .iter()
                 .map(|value| {
                     value
                         .string_ref()
                         .expect("peculiarity entry is not a string")
+                        .inner()
                         .to_owned()
                 })
                 .collect(),
@@ -453,7 +496,7 @@ fn build_ability_category(
     category_data: &BTreeMap<HashableValue, Value>,
 ) -> Result<AbilityCategory, AbilityCategoryBuilderError> {
     let reload_time = if let Some(reload_time) =
-        category_data.get(&HashableValue::String("reloadTime".to_owned()))
+        category_data.get(&HashableValue::String("reloadTime".to_owned().into()))
     {
         if let Some(reload_time) = reload_time.i64_ref() {
             *reload_time as f32
@@ -464,16 +507,17 @@ fn build_ability_category(
         panic!("could not get reloadTime");
     };
 
-    let work_time =
-        if let Some(work_time) = category_data.get(&HashableValue::String("workTime".to_owned())) {
-            if let Some(work_time) = work_time.i64_ref() {
-                *work_time as f32
-            } else {
-                *work_time.f64_ref().expect("workTime is not a f64") as f32
-            }
+    let work_time = if let Some(work_time) =
+        category_data.get(&HashableValue::String("workTime".to_owned().into()))
+    {
+        if let Some(work_time) = work_time.i64_ref() {
+            *work_time as f32
         } else {
-            panic!("could not get reloadTime");
-        };
+            *work_time.f64_ref().expect("workTime is not a f64") as f32
+        }
+    } else {
+        panic!("could not get reloadTime");
+    };
 
     AbilityCategoryBuilder::default()
         .special_sound_id(game_param_to_type!(
@@ -496,18 +540,18 @@ fn build_ability_category(
 fn build_ability(
     ability_data: &BTreeMap<HashableValue, Value>,
 ) -> Result<Ability, AbilityBuilderError> {
-    let test_key = HashableValue::String("numConsumables".to_string());
-    let categories: HashMap<_, _> =
+    let test_key = HashableValue::String("numConsumables".to_string().into());
+    let categories: HashMap<String, AbilityCategory> =
         HashMap::from_iter(ability_data.iter().filter_map(|(key, value)| {
             if value.is_not_dict() {
                 return None;
             }
 
-            let value = value.dict_ref().unwrap();
+            let value = value.dict_ref().unwrap().inner();
             if value.contains_key(&test_key) {
                 Some((
-                    key.string_ref().unwrap().to_owned(),
-                    build_ability_category(value).expect("failed to build ability category"),
+                    key.string_ref().unwrap().inner().to_owned(),
+                    build_ability_category(&value).expect("failed to build ability category"),
                 ))
             } else {
                 None
@@ -527,6 +571,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
     let ability_data = game_param_to_type!(ship_data, "ShipAbilities", Option<HashMap<(), ()>>);
     let abilities: Option<Vec<Vec<(String, String)>>> = ability_data.map(|abilities_data| {
         abilities_data
+            .inner()
             .iter()
             .filter_map(|(slot_name, slot_data)| {
                 let _slot_name = slot_name
@@ -537,20 +582,28 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 }
 
                 let slot_data = slot_data.dict_ref().expect("slot data is not a dictionary");
+                let slot_data = slot_data.inner();
+
                 let slot = game_param_to_type!(slot_data, "slot", usize);
-                let abils = game_param_to_type!(slot_data, "abils", &[()]);
+                let abils = game_param_to_type!(slot_data, "abils", &[()]).inner();
                 let abils: Vec<(String, String)> = abils
                     .iter()
                     .map(|abil| {
-                        let abil = abil.list_ref().expect("ability is not a list");
+                        let abil = match abil {
+                            Value::Tuple(inner) | Value::List(inner) => inner,
+                            _ => panic!("abil is not a list/tuple"),
+                        };
+                        let abil = abil.inner();
                         (
                             abil[0]
                                 .string_ref()
                                 .expect("abil[0] is not a string")
+                                .inner()
                                 .clone(),
                             abil[1]
                                 .string_ref()
                                 .expect("abil[1] is not a string")
+                                .inner()
                                 .clone(),
                         )
                     })
@@ -566,11 +619,13 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
 
     let upgrade_data = game_param_to_type!(ship_data, "ShipUpgradeInfo", HashMap<(), ()>);
     let upgrades: Vec<String> = upgrade_data
+        .inner()
         .iter()
         .map(|(upgrade_name, upgrade_data)| {
             upgrade_name
                 .string_ref()
                 .expect("upgrade name is not a string")
+                .inner()
                 .to_owned()
         })
         .collect();
@@ -612,23 +667,28 @@ impl GameMetadataProvider {
         let pickled_params: Value = game_params_to_pickle(game_params_data)?;
 
         let params_dict = if let Some(params_dict) = pickled_params.dict_ref() {
+            let params_dict = params_dict.inner();
             params_dict
-                .get(&HashableValue::String("".to_string()))
+                .get(&HashableValue::String("".to_string().into()))
                 .expect("failed to get default game_params")
                 .dict_ref()
                 .expect("game params is not a dict")
+                .clone()
         } else {
             let params_list = pickled_params
                 .list_ref()
-                .expect("Root game params is not a list");
+                .expect("Root game params is not a list")
+                .inner();
 
             let params = &params_list[0];
             params
                 .dict_ref()
                 .expect("First element of GameParams is not a dictionary")
+                .clone()
         };
 
         let new_params = params_dict
+        .inner()
                 .values()
                 .filter_map(|param| {
                     if param.is_none() {
@@ -636,82 +696,90 @@ impl GameMetadataProvider {
                     }
 
                     let param_data = param.dict_ref().expect("Params root level dictionary values are not dictionaries");
+                    let param_data = param_data.inner();
 
                     param_data
-                        .get(&HashableValue::String("typeinfo".to_string()))
+                        .get(&HashableValue::String("typeinfo".to_string().into()))
                         .and_then(|type_info| {
-                            type_info.dict_ref().and_then(|type_info| {
-                                Some((
-                                    type_info.get(&HashableValue::String("nation".to_string()))?,
-                                    type_info.get(&HashableValue::String("species".to_string()))?,
-                                    type_info.get(&HashableValue::String("type".to_string()))?,
-                                ))
+                            type_info.dict_ref().and_then(|type_info_main| {
+                                let type_info = type_info_main.inner();
+                                let (nation, species, ty) = (
+                                    type_info.get(&HashableValue::String("nation".to_string().into()))?,
+                                    type_info.get(&HashableValue::String("species".to_string().into()))?,
+                                    type_info.get(&HashableValue::String("type".to_string().into()))?,
+                                );
+
+                                let (Value::String(nation), Value::String(ty)) = (nation, ty) else {
+                                    return None;
+                                };
+
+
+                                Some((nation.clone(), species.clone(), ty.clone()))
                             })
                         })
                         .and_then(|(nation, species, typ)| {
-                            if let (Value::String(nation), Value::String(typ)) = (nation, typ) {
-                                let param_type = ParamType::from_str(typ.as_str()).ok()?;
-                                let nation = nation.clone();
-                                let species = species.string_ref().and_then(|s| Species::from_str(s).ok());
+                            let param_type = ParamType::from_str(typ.inner().as_str()).ok()?;
+                            let nation = nation.inner().clone();
+                            let species = species.string_ref().and_then(|s| Species::from_str(s.inner().as_str()).ok());
 
-                                let parsed_param_data = match param_type {
-                                    ParamType::Ship => Some(build_ship(param_data).map(ParamData::Vehicle).expect("failed to build Vehicle")),
-                                    ParamType::Crew => {
-                                        let money_training_level = game_param_to_type!(param_data, "moneyTrainingLevel", usize);
+                            let parsed_param_data = match param_type {
+                                ParamType::Ship => Some(build_ship(&param_data).map(ParamData::Vehicle).expect("failed to build Vehicle")),
+                                ParamType::Crew => {
+                                    let money_training_level = game_param_to_type!(param_data, "moneyTrainingLevel", usize);
 
-                                        let personality = game_param_to_type!(param_data, "CrewPersonality", HashMap<(), ()>);
-                                        let crew_personality = build_crew_personality(personality).expect("failed to build crew personality");
+                                    let personality = game_param_to_type!(param_data, "CrewPersonality", HashMap<(), ()>);
+                                    let personality = personality.inner();
+                                    let crew_personality = build_crew_personality(&personality).expect("failed to build crew personality");
 
-                                        let skills = game_param_to_type!(param_data, "Skills", Option<HashMap<(), ()>>);
-                                        let skills = skills..map(|skills| build_crew_skills(skills).expect("failed to build crew skills"));
+                                    let skills = game_param_to_type!(param_data, "Skills", Option<HashMap<(), ()>>);
+                                    let skills = skills.map(|skills| build_crew_skills(&skills.inner()).expect("failed to build crew skills"));
 
-                                        CrewBuilder::default()
-                                            .money_training_level(money_training_level)
-                                            .personality(crew_personality)
-                                            .skills(skills)
-                                            .build()
-                                            .ok()
-                                            .map(ParamData::Crew)
-                                    }
-                                    ParamType::Ability => Some(build_ability(param_data).map(ParamData::Ability).expect("failed to build Ability")),
-                                    ParamType::Exterior => Some(ParamData::Exterior),
-                                    ParamType::Modernization => Some(ParamData::Modernization),
-                                    ParamType::Unit => Some(ParamData::Unit),
-                                    _ => None,
-                                }?;
+                                    CrewBuilder::default()
+                                        .money_training_level(money_training_level)
+                                        .personality(crew_personality)
+                                        .skills(skills)
+                                        .build()
+                                        .ok()
+                                        .map(ParamData::Crew)
+                                }
+                                ParamType::Ability => Some(build_ability(&param_data).map(ParamData::Ability).expect("failed to build Ability")),
+                                ParamType::Exterior => Some(ParamData::Exterior),
+                                ParamType::Modernization => Some(ParamData::Modernization),
+                                ParamType::Unit => Some(ParamData::Unit),
+                                _ => None,
+                            }?;
 
-                                let id = *param_data
-                                    .get(&HashableValue::String("id".to_string()))
-                                    .expect("param has no id field")
-                                    .i64_ref()
-                                    .expect("param id is not an i64") as u32;
+                            let id = *param_data
+                                .get(&HashableValue::String("id".to_string().into()))
+                                .expect("param has no id field")
+                                .i64_ref()
+                                .expect("param id is not an i64") as u32;
 
-                                let index = param_data
-                                    .get(&HashableValue::String("index".to_string()))
-                                    .expect("param has no index field")
-                                    .string_ref()
-                                    .cloned()
-                                    .expect("param index is not a string");
+                            let index = param_data
+                                .get(&HashableValue::String("index".to_string().into()))
+                                .expect("param has no index field")
+                                .string_ref()
+                                .expect("param index is not a string")
+                                .inner()
+                                .clone();
 
-                                let name = param_data
-                                    .get(&HashableValue::String("name".to_string()))
-                                    .expect("param has no name field")
-                                    .string_ref()
-                                    .cloned()
-                                    .expect("param name is not a string");
+                            let name = param_data
+                                .get(&HashableValue::String("name".to_string().into()))
+                                .expect("param has no name field")
+                                .string_ref()
+                                .expect("param name is not a string")
+                                .inner()
+                                .clone();
 
-                                ParamBuilder::default()
-                                    .id(id)
-                                    .index(index)
-                                    .name(name)
-                                    .species(species)
-                                    .nation(nation)
-                                    .data(parsed_param_data)
-                                    .build()
-                                    .ok()
-                            } else {
-                                None
-                            }
+                            ParamBuilder::default()
+                                .id(id)
+                                .index(index)
+                                .name(name)
+                                .species(species)
+                                .nation(nation)
+                                .data(parsed_param_data)
+                                .build()
+                                .ok()
                         })
                 })
                 .collect::<Vec<Param>>();

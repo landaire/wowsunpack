@@ -1,7 +1,4 @@
-use std::io::{Cursor, Write};
-
-use flate2::read::ZlibDecoder;
-use pickled::DeOptions;
+use std::io::Write;
 
 use crate::{
     data::{idx::FileNode, pkg::PkgFileLoader},
@@ -16,14 +13,20 @@ fn hashable_pickle_to_cbor(pickled: pickled::HashableValue) -> serde_cbor::Value
         pickled::HashableValue::I64(v) => serde_cbor::Value::Integer(v.into()),
         pickled::HashableValue::Int(_v) => todo!("Hashable int -> JSON"),
         pickled::HashableValue::F64(v) => serde_cbor::Value::Float(v),
-        pickled::HashableValue::Bytes(v) => serde_cbor::Value::Bytes(v),
-        pickled::HashableValue::String(v) => serde_cbor::Value::Text(v),
-        pickled::HashableValue::Tuple(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(hashable_pickle_to_cbor).collect())
-        }
-        pickled::HashableValue::FrozenSet(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(hashable_pickle_to_cbor).collect())
-        }
+        pickled::HashableValue::Bytes(v) => serde_cbor::Value::Bytes(v.into_raw_or_cloned()),
+        pickled::HashableValue::String(v) => serde_cbor::Value::Text(v.into_raw_or_cloned()),
+        pickled::HashableValue::Tuple(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_cbor)
+                .collect(),
+        ),
+        pickled::HashableValue::FrozenSet(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_cbor)
+                .collect(),
+        ),
     }
 }
 
@@ -37,22 +40,35 @@ pub fn pickle_to_cbor(pickled: pickled::Value) -> serde_cbor::Value {
         pickled::Value::I64(v) => serde_cbor::Value::Integer(v.into()),
         pickled::Value::Int(_v) => todo!("Int -> JSON"),
         pickled::Value::F64(v) => serde_cbor::Value::Float(v),
-        pickled::Value::Bytes(v) => serde_cbor::Value::Bytes(v),
-        pickled::Value::String(v) => serde_cbor::Value::Text(v),
-        pickled::Value::List(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(pickle_to_cbor).collect())
-        }
-        pickled::Value::Tuple(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(pickle_to_cbor).collect())
-        }
-        pickled::Value::Set(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(hashable_pickle_to_cbor).collect())
-        }
-        pickled::Value::FrozenSet(v) => {
-            serde_cbor::Value::Array(v.into_iter().map(hashable_pickle_to_cbor).collect())
-        }
+        pickled::Value::Bytes(v) => serde_cbor::Value::Bytes(v.into_raw_or_cloned()),
+        pickled::Value::String(v) => serde_cbor::Value::Text(v.into_raw_or_cloned()),
+        pickled::Value::List(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(pickle_to_cbor)
+                .collect(),
+        ),
+        pickled::Value::Tuple(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(pickle_to_cbor)
+                .collect(),
+        ),
+        pickled::Value::Set(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_cbor)
+                .collect(),
+        ),
+        pickled::Value::FrozenSet(v) => serde_cbor::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_cbor)
+                .collect(),
+        ),
         pickled::Value::Dict(v) => {
             let mut map = BTreeMap::new();
+            let v = v.into_raw_or_cloned();
             for (key, value) in &v {
                 let converted_key = hashable_pickle_to_cbor(key.clone());
                 let string_key = match converted_key {
@@ -92,7 +108,7 @@ pub fn read_game_params_as_cbor<W: Write>(
     let decoded = game_params_to_pickle(game_params_data)?;
 
     let converted = if let pickled::Value::List(list) = decoded {
-        pickle_to_cbor(list.into_iter().next().unwrap())
+        pickle_to_cbor(list.into_raw_or_cloned().into_iter().next().unwrap())
     } else {
         return Err(ErrorKind::InvalidGameParamsData);
     };
