@@ -14,24 +14,27 @@ fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value
         pickled::HashableValue::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
         pickled::HashableValue::Int(_v) => todo!("Hashable int -> JSON"),
         pickled::HashableValue::F64(v) => {
-                        serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
-            }
+            serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
+        }
         pickled::HashableValue::Bytes(v) => serde_json::Value::Array(
-                v.into_iter()
-                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
-                    .collect(),
-            ),
-        pickled::HashableValue::String(v) => serde_json::Value::String(v),
-        pickled::HashableValue::Tuple(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-        pickled::HashableValue::FrozenSet(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-        pickled::HashableValue::Shared(ref_cell) => {
-            let inner = ref_cell.borrow();
-            hashable_pickle_to_json(inner.clone())
-        },
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                .collect(),
+        ),
+        pickled::HashableValue::String(v) => serde_json::Value::String(v.into_raw_or_cloned()),
+        pickled::HashableValue::Tuple(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_json)
+                .collect(),
+        ),
+        pickled::HashableValue::FrozenSet(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_json)
+                .collect(),
+        ),
     }
 }
 
@@ -42,57 +45,66 @@ pub fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
         pickled::Value::I64(v) => serde_json::Value::Number(serde_json::Number::from(v)),
         pickled::Value::Int(_v) => todo!("Int -> JSON"),
         pickled::Value::F64(v) => {
-                        serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
-            }
+            serde_json::Value::Number(serde_json::Number::from_f64(v).expect("invalid f64"))
+        }
         pickled::Value::Bytes(v) => serde_json::Value::Array(
-                v.into_iter()
-                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
-                    .collect(),
-            ),
-        pickled::Value::String(v) => serde_json::Value::String(v),
-        pickled::Value::List(v) => {
-                serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
-            }
-        pickled::Value::Tuple(v) => {
-                serde_json::Value::Array(v.into_iter().map(pickle_to_json).collect())
-            }
-        pickled::Value::Set(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
-        pickled::Value::FrozenSet(v) => {
-                serde_json::Value::Array(v.into_iter().map(hashable_pickle_to_json).collect())
-            }
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                .collect(),
+        ),
+        pickled::Value::String(v) => serde_json::Value::String(v.into_raw_or_cloned()),
+        pickled::Value::List(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(pickle_to_json)
+                .collect(),
+        ),
+        pickled::Value::Tuple(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(pickle_to_json)
+                .collect(),
+        ),
+        pickled::Value::Set(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_json)
+                .collect(),
+        ),
+        pickled::Value::FrozenSet(v) => serde_json::Value::Array(
+            v.into_raw_or_cloned()
+                .into_iter()
+                .map(hashable_pickle_to_json)
+                .collect(),
+        ),
         pickled::Value::Dict(v) => {
-                let mut map = Map::new();
-                for (key, value) in &v {
-                    let converted_key = hashable_pickle_to_json(key.clone());
-                    let string_key = match converted_key {
-                        serde_json::Value::Number(num) => num.to_string(),
-                        serde_json::Value::String(s) => s.to_string(),
-                        _other => {
-                            continue;
-                            // panic!(
-                            //     "Unsupported key type: {:?} (original: {:#?}, {:#?})",
-                            //     other, key, v
-                            // );
-                        }
-                    };
+            let mut map = Map::new();
+            let v = v.into_raw_or_cloned();
+            for (key, value) in &v {
+                let converted_key = hashable_pickle_to_json(key.clone());
+                let string_key = match converted_key {
+                    serde_json::Value::Number(num) => num.to_string(),
+                    serde_json::Value::String(s) => s.to_string(),
+                    _other => {
+                        continue;
+                        // panic!(
+                        //     "Unsupported key type: {:?} (original: {:#?}, {:#?})",
+                        //     other, key, v
+                        // );
+                    }
+                };
 
-                    let converted_value = pickle_to_json(value.clone());
+                let converted_value = pickle_to_json(value.clone());
 
-                    map.insert(string_key, converted_value);
-                }
-
-                serde_json::Value::Object(map)
+                map.insert(string_key, converted_value);
             }
-        pickled::Value::Shared(ref_cell) => {
-            let inner = ref_cell.borrow();
-            pickle_to_json(inner.clone())
-        },
+
+            serde_json::Value::Object(map)
+        }
     }
 }
 
-#[cfg(feature = "json")]
 pub fn read_game_params_as_json<W: Write>(
     pretty_print: bool,
     file_tree: FileNode,
@@ -107,7 +119,7 @@ pub fn read_game_params_as_json<W: Write>(
     println!("decoded to pickle");
 
     let converted = if let pickled::Value::List(list) = decoded {
-        pickle_to_json(list.into_iter().next().unwrap())
+        pickle_to_json(list.into_raw_or_cloned().into_iter().next().unwrap())
     } else {
         return Err(ErrorKind::InvalidGameParamsData);
     };
