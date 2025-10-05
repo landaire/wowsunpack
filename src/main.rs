@@ -16,7 +16,10 @@ use std::{
     time::Instant,
 };
 use thread_local::ThreadLocal;
-use wowsunpack::data::{idx, serialization};
+use wowsunpack::data::{
+    idx::{self, FileNode},
+    serialization,
+};
 use wowsunpack::{data::pkg::PkgFileLoader, game_params::convert::game_params_to_pickle};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -132,6 +135,9 @@ enum Commands {
         /// The pattern to look for
         pattern: String,
     },
+    DiffDump {
+        out_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, ValueEnum)]
@@ -162,10 +168,11 @@ fn run() -> Result<()> {
         game_dir = game_dir_arg;
     }
 
+    let mut game_version = None;
+
     // If we didn't get any idx dirs/files passed to us, try auto-detecting the
     // WoWs directory
     if args.idx_files.is_empty() {
-        let mut latest_version = None;
         let bin_dir = game_dir.join("bin");
         if game_dir.join("WorldOfWarships.exe").exists() {
             // Maybe we are? Try enumerating the `bin` directory
@@ -176,26 +183,26 @@ fn run() -> Result<()> {
                 if path.file_type()?.is_dir()
                     && let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
                 {
-                    match latest_version {
+                    match game_version {
                         Some(other_version) => {
                             if other_version < version {
-                                latest_version = Some(version);
+                                game_version = Some(version);
                             }
                         }
-                        None => latest_version = Some(version),
+                        None => game_version = Some(version),
                     }
                 }
             }
         }
 
-        if let Some(latest_version) = latest_version {
+        if let Some(latest_version) = game_version {
             let latest_version_str = format!("{latest_version}");
 
             args.idx_files
                 .push(bin_dir.join(latest_version_str.as_str()).join("idx"));
         }
 
-        if latest_version.is_none() || !args.idx_files[0].exists() {
+        if game_version.is_none() || !args.idx_files[0].exists() {
             Args::command().print_help()?;
 
             eprintln!();
@@ -382,8 +389,6 @@ fn run() -> Result<()> {
                 let pickle = game_params_to_pickle(game_params_data)
                     .expect("failed to deserialize GameParams");
 
-                println!("pickle parsed");
-
                 fn print_ids(params_dict: &BTreeMap<pickled::HashableValue, pickled::Value>) {
                     for key in params_dict.keys() {
                         if let HashableValue::String(s) = key {
@@ -538,9 +543,200 @@ fn run() -> Result<()> {
                     }
                 });
         }
+        Commands::DiffDump { out_dir } => {
+            let game_version = game_version.expect("could not determine latest game version");
+            std::fs::write(out_dir.join("version.txt"), game_version.to_string())?;
+
+            let file_info_path = out_dir.join("pkg_files");
+
+            // Dump file info
+            for file in serialization::tree_to_serialized_files(file_tree.clone()) {
+                let mut dest = file_info_path.join(&file.path);
+                let mut new_name = dest.file_name().expect("file has no name?").to_os_string();
+                new_name.push(".txt");
+                dest.set_file_name(new_name);
+
+                if file.is_directory() {
+                    continue;
+                }
+
+                std::fs::create_dir_all(dest.parent().expect("file has no parent?"))
+                    .expect("failed to create parent dir");
+
+                let out_file = BufWriter::new(
+                    std::fs::File::create(dest).expect("failed to create file metadata file"),
+                );
+                serde_json::to_writer_pretty(out_file, &file)
+                    .expect("failed to serialize file metadata");
+            }
+
+            let game_params_path = out_dir.join("game_params");
+
+            // Dump params info
+            match pkg_loader.as_mut() {
+                Some(pkg_loader) => {
+                    let pickle = load_game_params(pkg_loader, &file_tree)?;
+
+                    // Dump the base params first
+                    let base_path = game_params_path.join("base");
+
+                    match pickle {
+                        pickled::Value::Dict(params_dict) => {
+                            let params_dict = params_dict.inner();
+
+                            let base_data = params_dict
+                                .get(&HashableValue::String("".to_string().into()))
+                                .expect("failed to find base GameParams");
+
+                            let base_data = base_data
+                                .dict_ref()
+                                .expect("params are not a dictionary")
+                                .inner();
+
+                            for (key, value) in base_data.iter() {
+                                let key = key.to_string_key().expect("key is not stringable");
+
+                                dump_param(key.as_ref(), value, base_path.to_owned());
+                            }
+
+                            for (region, params) in params_dict.iter().filter(|(key, _value)| {
+                                key.string_ref()
+                                    .map(|s| !s.inner().is_empty())
+                                    .unwrap_or_default()
+                            }) {
+                                let pickled::Value::Dict(params) = params else {
+                                    continue;
+                                };
+
+                                let region_key = region
+                                    .to_string_key()
+                                    .expect("could not convert region to string");
+                                let region_path = game_params_path.join(region_key.as_ref());
+
+                                let params = params.inner();
+                                for (key, value) in params.iter() {
+                                    let key_str =
+                                        key.to_string_key().expect("key is not stringable");
+
+                                    dump_param(&key_str, value, region_path.to_owned());
+                                }
+                            }
+                        }
+                        pickled::Value::List(params_list) => {
+                            let params = params_list.inner_mut().remove(0);
+
+                            let pickled::Value::Dict(params) = params else {
+                                return Err(eyre::eyre!("Params are not a dictionary"));
+                            };
+
+                            let region_path = out_dir.join("base");
+
+                            let params = params.inner();
+                            for (key, value) in params.iter() {
+                                let key_str = key.to_string_key().expect("key is not stringable");
+
+                                dump_param(&key_str, value, region_path.to_owned());
+                            }
+                        }
+                        other => {
+                            panic!("Unexpected GameParams root element type {}", other);
+                        }
+                    };
+                }
+                None => {
+                    return Err(eyre::eyre!(
+                        "Package file loader is unavailable. Check that the pkg_dir exists."
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn param_path(stem: &str, param: &pickled::Value, mut base: PathBuf) -> Option<PathBuf> {
+    let value = param.dict_ref()?;
+    let value = value.inner();
+    let type_info = value.get(&HashableValue::String("typeinfo".to_string().into()))?;
+    let type_info = type_info.dict_ref()?.inner();
+
+    let (nation, species, typ) = (
+        type_info.get(&HashableValue::String("nation".to_string().into()))?,
+        type_info.get(&HashableValue::String("species".to_string().into()))?,
+        type_info.get(&HashableValue::String("type".to_string().into()))?,
+    );
+    if let pickled::Value::String(typ) = typ {
+        base = base.join(typ.inner().as_str());
+    }
+    if let pickled::Value::String(nation) = nation {
+        base = base.join(nation.inner().as_str());
+    }
+    if let pickled::Value::String(species) = species {
+        base = base.join(species.inner().as_str());
+    }
+    base = base.join(format!("{stem}.json"));
+
+    Some(base)
+}
+
+fn dump_param(
+    file_stem: &str,
+    value: &pickled::Value,
+    mut out_path: PathBuf,
+) -> Option<()> {
+    out_path = param_path(file_stem, value, out_path)?;
+
+    // Dump this file
+    let parent = out_path.parent().expect("no parent dir?");
+    std::fs::create_dir_all(parent).expect("failed to create parent dir");
+
+    // Doesn't work well with vcs
+
+    // if let Some((base, path)) = &base
+    //     && *base == value
+    // {
+    //     if std::fs::symlink_metadata(&out_path).ok()?.is_symlink() {
+    //         symlink::remove_symlink_file(&out_path).ok()?;
+    //     } else if out_path.is_file() {
+    //         std::fs::remove_file(&out_path).ok()?;
+    //     }
+
+    //     // Create a symlink
+    //     symlink::symlink_file(path, &out_path)
+    //         .with_context(|| format!("path={path:?}, out_path={out_path:?}"))
+    //         .expect("failed to create symlink");
+    //     return None;
+    // } else
+
+    let file =
+        BufWriter::new(std::fs::File::create(out_path).expect("failed to create output file"));
+
+    let mut serializer = serde_json::Serializer::pretty(file);
+    value
+        .serialize(&mut serializer)
+        .expect("failed to serialize data");
+
+    None
+}
+
+fn load_game_params(pkg_loader: &PkgFileLoader, file_tree: &FileNode) -> Result<pickled::Value> {
+    let Ok(game_params_file) = file_tree.find("content/GameParams.data") else {
+        return Err(eyre::eyre!(
+            "Could not find GameParams.data in WoWs package"
+        ));
+    };
+
+    let mut game_params_data: Vec<u8> =
+        Vec::with_capacity(game_params_file.file_info().unwrap().unpacked_size as usize);
+
+    game_params_file
+        .read_file(pkg_loader, &mut game_params_data)
+        .expect("failed to read GameParams");
+
+    let pickle = game_params_to_pickle(game_params_data).expect("failed to deserialize GameParams");
+
+    Ok(pickle)
 }
 
 fn main() -> Result<()> {

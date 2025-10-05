@@ -13,6 +13,32 @@ pub struct SerializedFile {
     crc32: u32,
 }
 
+impl SerializedFile {
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.is_directory
+    }
+
+    pub fn compressed_size(&self) -> usize {
+        self.compressed_size
+    }
+
+    pub fn compression_info(&self) -> u64 {
+        self.compression_info
+    }
+
+    pub fn unpacked_size(&self) -> usize {
+        self.unpacked_size
+    }
+
+    pub fn crc32(&self) -> u32 {
+        self.crc32
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SerializedFileInfo {}
 
