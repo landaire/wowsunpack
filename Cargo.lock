@@ -680,9 +680,9 @@ checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
 
 [[package]]
 name = "pickled"
-version = "2.0.0-alpha2"
+version = "2.0.0-alpha3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84339c6cde90bb2b3f2ad5e0fe3067e21471ffc1dbaebe1c7cce7744308054c"
+checksum = "1b9397bd136a7f021c01a41b773756b65716e4b7da2ade9ee574e0dab118b477"
 dependencies = [
  "byteorder",
  "iter-read",
@@ -1185,7 +1185,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "wowsunpack"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "binrw",
  "byteorder",

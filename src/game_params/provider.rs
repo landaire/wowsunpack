@@ -589,23 +589,25 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 let abils: Vec<(String, String)> = abils
                     .iter()
                     .map(|abil| {
-                        let abil = match abil {
-                            Value::Tuple(inner) | Value::List(inner) => inner,
-                            _ => panic!("abil is not a list/tuple"),
+                        let map_abil = |abil: &Vec<Value>| {
+                            (
+                                abil[0]
+                                    .string_ref()
+                                    .expect("abil[0] is not a string")
+                                    .inner()
+                                    .clone(),
+                                abil[1]
+                                    .string_ref()
+                                    .expect("abil[1] is not a string")
+                                    .inner()
+                                    .clone(),
+                            )
                         };
-                        let abil = abil.inner();
-                        (
-                            abil[0]
-                                .string_ref()
-                                .expect("abil[0] is not a string")
-                                .inner()
-                                .clone(),
-                            abil[1]
-                                .string_ref()
-                                .expect("abil[1] is not a string")
-                                .inner()
-                                .clone(),
-                        )
+                        match abil {
+                            Value::Tuple(inner) => map_abil(inner.inner()),
+                            Value::List(inner) => map_abil(&inner.inner()),
+                            _ => panic!("abil is not a list/tuple"),
+                        }
                     })
                     .collect();
 
