@@ -643,13 +643,6 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
         .build()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedGameParams {
-    app_version: String,
-    game_version: usize,
-    params: Vec<Param>,
-}
-
 impl GameMetadataProvider {
     /// Loads game metadata directly from game files. This operation is fairly expensive
     /// considering `GameParams.data` must be deserialized and converted to a strongly-typed
