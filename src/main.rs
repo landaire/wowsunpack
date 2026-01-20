@@ -218,6 +218,13 @@ fn run() -> Result<()> {
 
     for path in args.idx_files {
         if path.is_dir() {
+            if let Some(parent) = path.parent()
+                && let Some(stem) = parent.file_stem().and_then(|stem| stem.to_str())
+                && let Some(version) = stem.parse::<u64>().ok()
+            {
+                game_version = Some(version);
+            }
+
             for path in fs::read_dir(path)? {
                 let path = path?;
                 if path.file_type()?.is_file() {
@@ -421,16 +428,24 @@ fn run() -> Result<()> {
 
                             dict.clone()
                         }
+                        pickled::Value::Tuple(params_tuple) => {
+                            if ids {
+                                println!("GameParams format does not have IDs");
+
+                                return Ok(());
+                            }
+                            params_tuple.inner().first().expect("params_list has no items?").clone()
+                        }
                         pickled::Value::List(params_list) => {
                             if ids {
                                 println!("GameParams format does not have IDs");
 
                                 return Ok(());
                             }
-                            params_list.inner_mut().remove(0)
+                            params_list.inner().first().expect("params_list has no items?").clone()
                         }
-                        other => {
-                            panic!("Unexpected GameParams root element type {}", other);
+                        _ => {
+                            panic!("Unexpected GameParams root element type");
                         }
                     }
                 } else {
@@ -580,6 +595,21 @@ fn run() -> Result<()> {
                     // Dump the base params first
                     let base_path = game_params_path.join("base");
 
+                    let handle_params_from_listish = |params: &pickled::Value| {
+                        let pickled::Value::Dict(params) = params else {
+                            return Err(eyre::eyre!("Params are not a dictionary"));
+                        };
+
+                        let params = params.inner();
+                        for (key, value) in params.iter() {
+                            let key_str = key.to_string_key().expect("key is not stringable");
+
+                            dump_param(&key_str, value, base_path.to_owned());
+                        }
+
+                        Ok(())
+                    };
+
                     match pickle {
                         pickled::Value::Dict(params_dict) => {
                             let params_dict = params_dict.inner();
@@ -622,24 +652,24 @@ fn run() -> Result<()> {
                                 }
                             }
                         }
-                        pickled::Value::List(params_list) => {
-                            let params = params_list.inner_mut().remove(0);
-
-                            let pickled::Value::Dict(params) = params else {
-                                return Err(eyre::eyre!("Params are not a dictionary"));
-                            };
-
-                            let region_path = out_dir.join("base");
-
-                            let params = params.inner();
-                            for (key, value) in params.iter() {
-                                let key_str = key.to_string_key().expect("key is not stringable");
-
-                                dump_param(&key_str, value, region_path.to_owned());
-                            }
+                        pickled::Value::Tuple(params_tuple) => {
+                            handle_params_from_listish(
+                                params_tuple
+                                    .inner()
+                                    .first()
+                                    .expect("params tuple does not have any items?"),
+                            )?;
                         }
-                        other => {
-                            panic!("Unexpected GameParams root element type {}", other);
+                        pickled::Value::List(params_list) => {
+                            let params = params_list.inner();
+                            let params = params
+                                .first()
+                                .expect("params list does not have any items?");
+
+                            handle_params_from_listish(params)?;
+                        }
+                        _ => {
+                            panic!("Unexpected GameParams root element type");
                         }
                     };
                 }
@@ -680,11 +710,7 @@ fn param_path(stem: &str, param: &pickled::Value, mut base: PathBuf) -> Option<P
     Some(base)
 }
 
-fn dump_param(
-    file_stem: &str,
-    value: &pickled::Value,
-    mut out_path: PathBuf,
-) -> Option<()> {
+fn dump_param(file_stem: &str, value: &pickled::Value, mut out_path: PathBuf) -> Option<()> {
     out_path = param_path(file_stem, value, out_path)?;
 
     // Dump this file
