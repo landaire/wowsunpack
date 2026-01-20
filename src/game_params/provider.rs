@@ -10,7 +10,6 @@ use gettext::Catalog;
 use itertools::Itertools;
 
 use pickled::{HashableValue, Value};
-use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{
