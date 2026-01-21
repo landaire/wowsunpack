@@ -508,11 +508,38 @@ impl Crew {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+pub struct Achievement {
+    is_group: bool,
+    one_per_battle: bool,
+    ui_type: String,
+    ui_name: String,
+}
+
+impl Achievement {
+    pub fn is_group(&self) -> bool {
+        self.is_group
+    }
+
+    pub fn one_per_battle(&self) -> bool {
+        self.one_per_battle
+    }
+
+    pub fn ui_type(&self) -> &str {
+        &self.ui_type
+    }
+
+    pub fn ui_name(&self) -> &str {
+        &self.ui_name
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Variantly)]
 pub enum ParamData {
     Vehicle(Vehicle),
     Crew(Crew),
     Ability(Ability),
+    Achievement(Achievement),
     Modernization,
     Exterior,
     Unit,
