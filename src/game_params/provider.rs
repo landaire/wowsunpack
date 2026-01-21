@@ -736,6 +736,21 @@ impl GameMetadataProvider {
                                         .ok()
                                         .map(ParamData::Crew)
                                 }
+                                ParamType::Achievement => {
+                                    let is_group = game_param_to_type!(param_data, "group", bool);
+                                    let one_per_battle = game_param_to_type!(param_data, "onePerBattle", bool);
+                                    let ui_type = game_param_to_type!(param_data, "uiType", String);
+                                    let ui_name = game_param_to_type!(param_data, "uiName", String);
+
+                                    AchievementBuilder::default()
+                                        .is_group(is_group)
+                                        .one_per_battle(one_per_battle)
+                                        .ui_type(ui_type)
+                                        .ui_name(ui_name)
+                                        .build()
+                                        .ok()
+                                        .map(ParamData::Achievement)
+                                }
                                 ParamType::Ability => Some(build_ability(&param_data).map(ParamData::Ability).expect("failed to build Ability")),
                                 ParamType::Exterior => Some(ParamData::Exterior),
                                 ParamType::Modernization => Some(ParamData::Modernization),
