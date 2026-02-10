@@ -38,8 +38,8 @@ impl GameParamProvider for GameMetadataProvider {
         self.params.game_param_by_index(index)
     }
 
-    fn game_param_by_name(&self, _name: &str) -> Option<Rc<Param>> {
-        todo!()
+    fn game_param_by_name(&self, name: &str) -> Option<Rc<Param>> {
+        self.params.game_param_by_name(name)
     }
 
     fn params(&self) -> &[Rc<Param>] {
@@ -755,6 +755,47 @@ impl GameMetadataProvider {
                                 ParamType::Exterior => Some(ParamData::Exterior),
                                 ParamType::Modernization => Some(ParamData::Modernization),
                                 ParamType::Unit => Some(ParamData::Unit),
+                                ParamType::Aircraft => {
+                                    let subtypes: Vec<String> = param_data
+                                        .get(&HashableValue::String("planeSubtype".to_string().into()))
+                                        .and_then(|v| v.list_ref())
+                                        .map(|list| {
+                                            list.inner().iter().filter_map(|item| {
+                                                item.string_ref().map(|s| s.inner().to_string())
+                                            }).collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let category = if subtypes.iter().any(|s| s == "airsupport") {
+                                        PlaneCategory::Airsupport
+                                    } else if subtypes.iter().any(|s| s == "consumable") {
+                                        PlaneCategory::Consumable
+                                    } else {
+                                        PlaneCategory::Controllable
+                                    };
+                                    // Resolve ammo type: bombName -> projectile dict -> ammoType
+                                    let ammo_type = param_data
+                                        .get(&HashableValue::String("bombName".to_string().into()))
+                                        .and_then(|v| v.string_ref())
+                                        .filter(|s| !s.inner().is_empty())
+                                        .and_then(|bomb_name| {
+                                            params_dict.inner()
+                                                .get(&HashableValue::String(bomb_name.clone()))
+                                                .and_then(|proj| proj.dict_ref())
+                                                .and_then(|proj_dict| {
+                                                    proj_dict.inner()
+                                                        .get(&HashableValue::String("ammoType".to_string().into()))
+                                                        .and_then(|v| v.string_ref())
+                                                        .map(|s| s.inner().to_string())
+                                                })
+                                        })
+                                        .unwrap_or_default();
+                                    AircraftBuilder::default()
+                                        .category(category)
+                                        .ammo_type(ammo_type)
+                                        .build()
+                                        .ok()
+                                        .map(ParamData::Aircraft)
+                                },
                                 _ => None,
                             }?;
 
