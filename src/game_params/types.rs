@@ -156,6 +156,14 @@ impl Param {
     pub fn data(&self) -> &ParamData {
         &self.data
     }
+
+    /// Returns the Aircraft data if this param is an Aircraft type.
+    pub fn aircraft(&self) -> Option<&Aircraft> {
+        match &self.data {
+            ParamData::Aircraft(a) => Some(a),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
@@ -534,6 +542,36 @@ impl Achievement {
     }
 }
 
+/// Which icon directory a plane's icon should be loaded from.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub enum PlaneCategory {
+    /// Catapult fighters, spotter planes
+    Consumable,
+    /// ASW depth-charge planes, mine-laying planes
+    Airsupport,
+    /// CV-controlled squadrons (default)
+    #[default]
+    Controllable,
+}
+
+#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+pub struct Aircraft {
+    #[serde(default)]
+    category: PlaneCategory,
+    #[serde(default)]
+    ammo_type: String,
+}
+
+impl Aircraft {
+    pub fn category(&self) -> &PlaneCategory {
+        &self.category
+    }
+
+    pub fn ammo_type(&self) -> &str {
+        &self.ammo_type
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Variantly)]
 pub enum ParamData {
     Vehicle(Vehicle),
@@ -543,6 +581,7 @@ pub enum ParamData {
     Modernization,
     Exterior,
     Unit,
+    Aircraft(Aircraft),
 }
 
 pub trait GameParamProvider {

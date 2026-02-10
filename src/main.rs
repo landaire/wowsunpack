@@ -434,7 +434,11 @@ fn run() -> Result<()> {
 
                                 return Ok(());
                             }
-                            params_tuple.inner().first().expect("params_list has no items?").clone()
+                            params_tuple
+                                .inner()
+                                .first()
+                                .expect("params_list has no items?")
+                                .clone()
                         }
                         pickled::Value::List(params_list) => {
                             if ids {
@@ -442,7 +446,11 @@ fn run() -> Result<()> {
 
                                 return Ok(());
                             }
-                            params_list.inner().first().expect("params_list has no items?").clone()
+                            params_list
+                                .inner()
+                                .first()
+                                .expect("params_list has no items?")
+                                .clone()
                         }
                         _ => {
                             panic!("Unexpected GameParams root element type");
