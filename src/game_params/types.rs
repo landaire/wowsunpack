@@ -164,6 +164,22 @@ impl Param {
             _ => None,
         }
     }
+
+    /// Returns the Vehicle data if this param is a Vehicle (ship) type.
+    pub fn vehicle(&self) -> Option<&Vehicle> {
+        match &self.data {
+            ParamData::Vehicle(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Returns the Ability data if this param is an Ability (consumable) type.
+    pub fn ability(&self) -> Option<&Ability> {
+        match &self.data {
+            ParamData::Ability(a) => Some(a),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
@@ -248,6 +264,41 @@ pub struct AbilityCategory {
     reload_time: f32,
     title_id: String,
     work_time: f32,
+    /// Detection radius for ships (radar, hydro, sublocator). BigWorld units (same as world coordinates).
+    #[serde(default)]
+    #[builder(default)]
+    dist_ship: Option<f32>,
+    /// Detection radius for torpedoes (hydro only). BigWorld units (same as world coordinates).
+    #[serde(default)]
+    #[builder(default)]
+    dist_torpedo: Option<f32>,
+    /// Hydrophone wave radius in meters (already in world units).
+    #[serde(default)]
+    #[builder(default)]
+    hydrophone_wave_radius: Option<f32>,
+}
+
+impl AbilityCategory {
+    pub fn consumable_type(&self) -> &str {
+        &self.consumable_type
+    }
+
+    pub fn icon_id(&self) -> &str {
+        &self.icon_id
+    }
+
+    pub fn work_time(&self) -> f32 {
+        self.work_time
+    }
+
+    /// Detection radius in BigWorld units.
+    ///
+    /// Returns hydrophone_wave_radius if present, otherwise dist_ship directly.
+    /// Returns None if this consumable has no detection radius.
+    pub fn detection_radius(&self) -> Option<f32> {
+        self.hydrophone_wave_radius
+            .or(self.dist_ship)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Builder, Debug)]
@@ -257,6 +308,16 @@ pub struct Ability {
     cost_gold: isize,
     is_free: bool,
     categories: HashMap<String, AbilityCategory>,
+}
+
+impl Ability {
+    pub fn categories(&self) -> &HashMap<String, AbilityCategory> {
+        &self.categories
+    }
+
+    pub fn get_category(&self, name: &str) -> Option<&AbilityCategory> {
+        self.categories.get(name)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Builder, Debug)]
