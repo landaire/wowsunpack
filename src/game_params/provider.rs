@@ -518,6 +518,27 @@ fn build_ability_category(
         panic!("could not get reloadTime");
     };
 
+    // Extract detection radius fields from "logic" sub-object
+    let logic = category_data
+        .get(&HashableValue::String("logic".to_owned().into()))
+        .and_then(|v| v.dict_ref())
+        .map(|d| d.inner());
+
+    let dist_ship = logic.as_ref().and_then(|l| {
+        l.get(&HashableValue::String("distShip".to_owned().into()))
+            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+    });
+
+    let dist_torpedo = logic.as_ref().and_then(|l| {
+        l.get(&HashableValue::String("distTorpedo".to_owned().into()))
+            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+    });
+
+    let hydrophone_wave_radius = logic.as_ref().and_then(|l| {
+        l.get(&HashableValue::String("hydrophoneWaveRadius".to_owned().into()))
+            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+    });
+
     AbilityCategoryBuilder::default()
         .special_sound_id(game_param_to_type!(
             category_data,
@@ -533,6 +554,9 @@ fn build_ability_category(
         .reload_time(reload_time)
         .title_id(game_param_to_type!(category_data, "titleIDs", String))
         .work_time(work_time)
+        .dist_ship(dist_ship)
+        .dist_torpedo(dist_torpedo)
+        .hydrophone_wave_radius(hydrophone_wave_radius)
         .build()
 }
 
