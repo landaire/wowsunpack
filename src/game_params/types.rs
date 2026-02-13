@@ -4,7 +4,7 @@ use derive_builder::Builder;
 use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
-use crate::{Rc, data::ResourceLoader};
+use crate::{Rc, data::ResourceLoader, game_types::GameParamId};
 
 use super::provider::GameMetadataProvider;
 
@@ -122,7 +122,7 @@ impl Species {
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct Param {
-    id: u32,
+    id: GameParamId,
     index: String,
     name: String,
     species: Option<Species>,
@@ -131,7 +131,7 @@ pub struct Param {
 }
 
 impl Param {
-    pub fn id(&self) -> u32 {
+    pub fn id(&self) -> GameParamId {
         self.id
     }
 
@@ -202,6 +202,14 @@ impl Param {
             _ => None,
         }
     }
+
+    /// Returns the Drop data if this param is a Drop type.
+    pub fn drop_data(&self) -> Option<&BuffDrop> {
+        match &self.data {
+            ParamData::Drop(d) => Some(d),
+            _ => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
@@ -225,6 +233,7 @@ pub enum ParamType {
     Crew,
     Director,
     DogTag,
+    Drop,
     EventTrigger,
     Exterior,
     Finder,
@@ -879,6 +888,7 @@ impl Aircraft {
     }
 }
 
+
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -895,6 +905,46 @@ impl Projectile {
         &self.ammo_type
     }
 }
+
+#[derive(Clone, Debug, Builder)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct BuffDrop {
+    #[cfg_attr(feature = "serde", serde(default))]
+    marker_name_active: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    marker_name_inactive: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    sorting: i64,
+}
+
+impl BuffDrop {
+    pub fn marker_name_active(&self) -> &str {
+        &self.marker_name_active
+    }
+
+    pub fn marker_name_inactive(&self) -> &str {
+        &self.marker_name_inactive
+    }
+
+    pub fn sorting(&self) -> i64 {
+        self.sorting
+    }
+
+    /// Returns the game asset path for the active icon.
+    pub fn active_icon_path(&self) -> String {
+        format!("gui/powerups/drops/icon_marker_{}.png", self.marker_name_active)
+    }
+
+    /// Returns the game asset path for the inactive icon.
+    pub fn inactive_icon_path(&self) -> String {
+        format!("gui/powerups/drops/icon_marker_{}.png", self.marker_name_inactive)
+    }
+}
+
 
 
 #[derive(Clone, Debug)]
@@ -932,10 +982,11 @@ pub enum ParamData {
     Unit,
     Aircraft(Aircraft),
     Projectile(Projectile),
+    Drop(BuffDrop),
 }
 
 pub trait GameParamProvider {
-    fn game_param_by_id(&self, id: u32) -> Option<Rc<Param>>;
+    fn game_param_by_id(&self, id: GameParamId) -> Option<Rc<Param>>;
     fn game_param_by_index(&self, index: &str) -> Option<Rc<Param>>;
     fn game_param_by_name(&self, name: &str) -> Option<Rc<Param>>;
     fn params(&self) -> &[Rc<Param>];
@@ -951,7 +1002,7 @@ pub struct GameParams {
     params: Vec<Rc<Param>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
-    id_to_params: HashMap<u32, Rc<Param>>,
+    id_to_params: HashMap<GameParamId, Rc<Param>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     index_to_params: HashMap<String, Rc<Param>>,
@@ -961,7 +1012,7 @@ pub struct GameParams {
 }
 
 impl GameParamProvider for GameParams {
-    fn game_param_by_id(&self, id: u32) -> Option<Rc<Param>> {
+    fn game_param_by_id(&self, id: GameParamId) -> Option<Rc<Param>> {
         self.id_to_params.get(&id).cloned()
     }
 
@@ -981,7 +1032,7 @@ impl GameParamProvider for GameParams {
 fn build_param_lookups(
     params: &[Rc<Param>],
 ) -> (
-    HashMap<u32, Rc<Param>>,
+    HashMap<GameParamId, Rc<Param>>,
     HashMap<String, Rc<Param>>,
     HashMap<String, Rc<Param>>,
 ) {

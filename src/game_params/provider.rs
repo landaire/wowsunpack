@@ -12,7 +12,7 @@ use itertools::Itertools;
 use pickled::{HashableValue, Value};
 use tracing::debug;
 
-use crate::{
+use crate::{game_types::GameParamId,
     Rc,
     data::{DataFileWithCallback, ResourceLoader, idx::FileNode, pkg::PkgFileLoader},
     error::ErrorKind,
@@ -24,13 +24,13 @@ use super::types::*;
 
 pub struct GameMetadataProvider {
     params: GameParams,
-    param_id_to_translation_id: HashMap<u32, String>,
+    param_id_to_translation_id: HashMap<GameParamId, String>,
     translations: Option<Catalog>,
     specs: Arc<Vec<EntitySpec>>,
 }
 
 impl GameParamProvider for GameMetadataProvider {
-    fn game_param_by_id(&self, id: u32) -> Option<Rc<Param>> {
+    fn game_param_by_id(&self, id: GameParamId) -> Option<Rc<Param>> {
         self.params.game_param_by_id(id)
     }
 
@@ -62,7 +62,7 @@ impl ResourceLoader for GameMetadataProvider {
             .map(move |catalog| catalog.gettext(id).to_string())
     }
 
-    fn game_param_by_id(&self, id: u32) -> Option<Rc<Param>> {
+    fn game_param_by_id(&self, id: GameParamId) -> Option<Rc<Param>> {
         self.params.game_param_by_id(id)
     }
 
@@ -876,6 +876,30 @@ impl GameMetadataProvider {
                                     Some(ParamData::Modernization(super::types::Modernization::new(modifiers)))
                                 }
                                 ParamType::Unit => Some(ParamData::Unit),
+                                ParamType::Drop => {
+                                    let marker_name_active = param_data
+                                        .get(&HashableValue::String("markerNameActive".to_string().into()))
+                                        .and_then(|v| v.string_ref())
+                                        .map(|s| s.inner().to_string())
+                                        .unwrap_or_default();
+                                    let marker_name_inactive = param_data
+                                        .get(&HashableValue::String("markerNameInactive".to_string().into()))
+                                        .and_then(|v| v.string_ref())
+                                        .map(|s| s.inner().to_string())
+                                        .unwrap_or_default();
+                                    let sorting = param_data
+                                        .get(&HashableValue::String("sorting".to_string().into()))
+                                        .and_then(|v| v.i64_ref())
+                                        .copied()
+                                        .unwrap_or(0);
+                                    super::types::BuffDropBuilder::default()
+                                        .marker_name_active(marker_name_active)
+                                        .marker_name_inactive(marker_name_inactive)
+                                        .sorting(sorting)
+                                        .build()
+                                        .ok()
+                                        .map(ParamData::Drop)
+                                },
                                 ParamType::Aircraft => {
                                     let subtypes: Vec<String> = param_data
                                         .get(&HashableValue::String("planeSubtype".to_string().into()))
@@ -929,14 +953,43 @@ impl GameMetadataProvider {
                                         .ok()
                                         .map(ParamData::Projectile)
                                 },
-                                _ => None,
+                                _ => {
+                                    // Some params (e.g. Drops) have typeinfo.type = "Other"
+                                    // but contain Drop-specific fields
+                                    if param_data.contains_key(&HashableValue::String("markerNameActive".to_string().into())) {
+                                        let marker_name_active = param_data
+                                            .get(&HashableValue::String("markerNameActive".to_string().into()))
+                                            .and_then(|v| v.string_ref())
+                                            .map(|s| s.inner().to_string())
+                                            .unwrap_or_default();
+                                        let marker_name_inactive = param_data
+                                            .get(&HashableValue::String("markerNameInactive".to_string().into()))
+                                            .and_then(|v| v.string_ref())
+                                            .map(|s| s.inner().to_string())
+                                            .unwrap_or_default();
+                                        let sorting = param_data
+                                            .get(&HashableValue::String("sorting".to_string().into()))
+                                            .and_then(|v| v.i64_ref())
+                                            .copied()
+                                            .unwrap_or(0);
+                                        super::types::BuffDropBuilder::default()
+                                            .marker_name_active(marker_name_active)
+                                            .marker_name_inactive(marker_name_inactive)
+                                            .sorting(sorting)
+                                            .build()
+                                            .ok()
+                                            .map(ParamData::Drop)
+                                    } else {
+                                        None
+                                    }
+                                },
                             }?;
 
-                            let id = *param_data
+                            let id = GameParamId::from(*param_data
                                 .get(&HashableValue::String("id".to_string().into()))
                                 .expect("param has no id field")
                                 .i64_ref()
-                                .expect("param id is not an i64") as u32;
+                                .expect("param id is not an i64"));
 
                             let index = param_data
                                 .get(&HashableValue::String("index".to_string().into()))
@@ -1031,7 +1084,7 @@ impl GameMetadataProvider {
         self.translations = Some(catalog);
     }
 
-    pub fn param_localization_id(&self, ship_id: u32) -> Option<&str> {
+    pub fn param_localization_id(&self, ship_id: GameParamId) -> Option<&str> {
         self.param_id_to_translation_id
             .get(&ship_id)
             .map(|s| s.as_str())
