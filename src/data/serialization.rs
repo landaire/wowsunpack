@@ -1,9 +1,8 @@
 use std::{path::PathBuf, rc::Rc};
 
 use crate::data::idx::FileNode;
-use serde::Serialize;
-
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SerializedFile {
     pub path: PathBuf,
     is_directory: bool,
@@ -39,7 +38,8 @@ impl SerializedFile {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SerializedFileInfo {}
 
 pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {

@@ -127,6 +127,7 @@ impl std::convert::From<std::string::FromUtf8Error> for Error {
     }
 }
 
+#[cfg(feature = "json")]
 impl std::convert::From<serde_json::Error> for Error {
     fn from(x: serde_json::Error) -> Error {
         Error {

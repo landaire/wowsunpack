@@ -4,6 +4,7 @@ use nom::{
     bytes::complete::take, number::complete::le_f32, number::complete::le_f64,
     number::complete::le_u16, number::complete::le_u32,
 };
+#[cfg(feature = "serde")]
 use serde::ser::{SerializeMap, SerializeSeq, SerializeTuple};
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -173,6 +174,7 @@ pub enum ArgValue<'argtype> {
     Tuple(Vec<ArgValue<'argtype>>),
 }
 
+#[cfg(feature = "serde")]
 impl<'argtype> serde::Serialize for ArgValue<'argtype> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         //serializer.serialize_i32(5)
@@ -205,14 +207,18 @@ impl<'argtype> serde::Serialize for ArgValue<'argtype> {
             Self::Blob(blob) => {
                 // TODO: Determine when we can/can't pickle-decode this
                 // Also, make pickled::Value implement Serialize
-                let decoded: Result<serde_json::Value, _> =
-                    pickled::from_slice(blob, pickled::de::DeOptions::new());
-                match decoded {
-                    Ok(v) => {
-                        //let x: serde_json::Value = v.try_into().unwrap();
-                        serializer.serialize_some(&v)
+                #[cfg(feature = "json")]
+                {
+                    let decoded: Result<serde_json::Value, _> =
+                        pickled::from_slice(blob, pickled::de::DeOptions::new());
+                    match decoded {
+                        Ok(v) => serializer.serialize_some(&v),
+                        Err(_) => serializer.serialize_bytes(blob),
                     }
-                    Err(_) => serializer.serialize_bytes(blob),
+                }
+                #[cfg(not(feature = "json"))]
+                {
+                    serializer.serialize_bytes(blob)
                 }
             }
             Self::Array(a) => {

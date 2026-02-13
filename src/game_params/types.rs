@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use derive_builder::Builder;
-use serde::{Deserialize, Serialize};
 use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
@@ -10,18 +9,12 @@ use crate::{Rc, data::ResourceLoader};
 use super::provider::GameMetadataProvider;
 
 #[derive(
-    Serialize,
-    Deserialize,
-    EnumString,
-    Clone,
-    Debug,
-    Variantly,
-    IntoStaticStr,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
+    EnumString, Clone, Debug, Variantly, IntoStaticStr, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub enum Species {
     AAircraft,
@@ -122,7 +115,12 @@ impl Species {
     }
 }
 
-#[derive(Serialize, Deserialize, Builder, Debug, Clone)]
+#[derive(Builder, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Param {
     id: u32,
     index: String,
@@ -182,7 +180,12 @@ impl Param {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
+#[derive(PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum ParamType {
     Ability,
     Achievement,
@@ -225,12 +228,17 @@ pub enum ParamType {
 
 // }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Vehicle {
     level: u32,
     group: String,
     abilities: Option<Vec<Vec<(String, String)>>>,
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     upgrades: Vec<String>,
 }
 
@@ -252,7 +260,12 @@ impl Vehicle {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct AbilityCategory {
     special_sound_id: Option<String>,
     consumable_type: String,
@@ -265,15 +278,15 @@ pub struct AbilityCategory {
     title_id: String,
     work_time: f32,
     /// Detection radius for ships (radar, hydro, sublocator). BigWorld units (same as world coordinates).
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
     dist_ship: Option<f32>,
     /// Detection radius for torpedoes (hydro only). BigWorld units (same as world coordinates).
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
     dist_torpedo: Option<f32>,
     /// Hydrophone wave radius in meters (already in world units).
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
     hydrophone_wave_radius: Option<f32>,
 }
@@ -296,12 +309,16 @@ impl AbilityCategory {
     /// Returns hydrophone_wave_radius if present, otherwise dist_ship directly.
     /// Returns None if this consumable has no detection radius.
     pub fn detection_radius(&self) -> Option<f32> {
-        self.hydrophone_wave_radius
-            .or(self.dist_ship)
+        self.hydrophone_wave_radius.or(self.dist_ship)
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Ability {
     can_buy: bool,
     cost_credits: isize,
@@ -320,7 +337,12 @@ impl Ability {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewPersonalityShips {
     groups: Vec<String>,
     nation: Vec<String>,
@@ -328,7 +350,12 @@ pub struct CrewPersonalityShips {
     ships: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewPersonality {
     can_reset_skills_for_free: bool,
     cost_credits: usize,
@@ -352,7 +379,12 @@ pub struct CrewPersonality {
     tags: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ConsumableReloadTimeModifier {
     aircraft_carrier: f32,
     auxiliary: f32,
@@ -400,7 +432,12 @@ impl ConsumableReloadTimeModifier {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewSkillModifier {
     name: String,
     aircraft_carrier: f32,
@@ -411,7 +448,12 @@ pub struct CrewSkillModifier {
     submarine: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewSkillLogicTrigger {
     /// Sometimes this field isn't present?
     burn_count: Option<usize>,
@@ -433,7 +475,12 @@ pub struct CrewSkillLogicTrigger {
     trigger_type: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewSkillTiers {
     aircraft_carrier: usize,
     auxiliary: usize,
@@ -481,7 +528,12 @@ impl CrewSkillTiers {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CrewSkill {
     internal_name: String,
     logic_trigger: Option<CrewSkillLogicTrigger>,
@@ -558,7 +610,12 @@ impl CrewSkill {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Crew {
     money_training_level: usize,
     personality: CrewPersonality,
@@ -577,7 +634,12 @@ impl Crew {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Achievement {
     is_group: bool,
     one_per_battle: bool,
@@ -604,7 +666,12 @@ impl Achievement {
 }
 
 /// Which icon directory a plane's icon should be loaded from.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum PlaneCategory {
     /// Catapult fighters, spotter planes
     Consumable,
@@ -615,11 +682,16 @@ pub enum PlaneCategory {
     Controllable,
 }
 
-#[derive(Serialize, Deserialize, Clone, Builder, Debug)]
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Aircraft {
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     category: PlaneCategory,
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     ammo_type: String,
 }
 
@@ -633,7 +705,12 @@ impl Aircraft {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Variantly)]
+#[derive(Clone, Debug, Variantly)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum ParamData {
     Vehicle(Vehicle),
     Crew(Crew),
@@ -652,14 +729,22 @@ pub trait GameParamProvider {
     fn params(&self) -> &[Rc<Param>];
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct GameParams {
     params: Vec<Rc<Param>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     id_to_params: HashMap<u32, Rc<Param>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     index_to_params: HashMap<String, Rc<Param>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     name_to_params: HashMap<String, Rc<Param>>,
 }
 

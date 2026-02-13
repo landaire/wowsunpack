@@ -5,7 +5,6 @@ pub mod pkg;
 // File tree serialization utilities
 pub mod serialization;
 
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 use crate::Rc;
@@ -20,7 +19,12 @@ pub trait ResourceLoader {
     fn entity_specs(&self) -> &[EntitySpec];
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
