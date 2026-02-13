@@ -178,6 +178,14 @@ impl Param {
             _ => None,
         }
     }
+
+    /// Returns the Projectile data if this param is a Projectile type.
+    pub fn projectile(&self) -> Option<&Projectile> {
+        match &self.data {
+            ParamData::Projectile(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
@@ -705,6 +713,23 @@ impl Aircraft {
     }
 }
 
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Projectile {
+    #[cfg_attr(feature = "serde", serde(default))]
+    ammo_type: String,
+}
+
+impl Projectile {
+    pub fn ammo_type(&self) -> &str {
+        &self.ammo_type
+    }
+}
+
 #[derive(Clone, Debug, Variantly)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -720,6 +745,7 @@ pub enum ParamData {
     Exterior,
     Unit,
     Aircraft(Aircraft),
+    Projectile(Projectile),
 }
 
 pub trait GameParamProvider {

@@ -820,6 +820,18 @@ impl GameMetadataProvider {
                                         .ok()
                                         .map(ParamData::Aircraft)
                                 },
+                                ParamType::Projectile => {
+                                    let ammo_type = param_data
+                                        .get(&HashableValue::String("ammoType".to_string().into()))
+                                        .and_then(|v| v.string_ref())
+                                        .map(|s| s.inner().to_string())
+                                        .unwrap_or_default();
+                                    ProjectileBuilder::default()
+                                        .ammo_type(ammo_type)
+                                        .build()
+                                        .ok()
+                                        .map(ParamData::Projectile)
+                                },
                                 _ => None,
                             }?;
 
