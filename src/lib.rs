@@ -8,6 +8,8 @@ pub mod game_params;
 pub mod rpc;
 /// Constants parsed from the game's XML files in `res/gui/data/constants/`
 pub mod game_constants;
+/// Game concept types (entities, positions, enums) useful across WoWS tools.
+pub mod game_types;
 /// Utilities for loading game resources from a WoWS installation directory.
 pub mod game_data;
 
