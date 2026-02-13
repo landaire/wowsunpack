@@ -236,6 +236,36 @@ pub enum ParamType {
 
 // }
 
+/// Per-hull configuration data extracted from GameParams.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct HullConfig {
+    /// Sea detection range in km.
+    pub visibility_factor: f32,
+    /// Air detection range in km.
+    pub visibility_factor_by_plane: f32,
+}
+
+/// Ship configuration data extracted from GameParams for each component variant.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ShipConfigData {
+    /// Hull configs keyed by component name (e.g. "A_Hull", "B_Hull").
+    pub hulls: Vec<(String, HullConfig)>,
+    /// Artillery max range in meters, keyed by component name (e.g. "A_Artillery").
+    pub artillery_ranges: Vec<(String, f32)>,
+    /// Secondary battery (ATBA) max range in meters (usually only one entry).
+    pub atba_range: Option<f32>,
+}
+
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -248,6 +278,9 @@ pub struct Vehicle {
     abilities: Option<Vec<Vec<(String, String)>>>,
     #[cfg_attr(feature = "serde", serde(default))]
     upgrades: Vec<String>,
+    #[builder(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    config_data: Option<ShipConfigData>,
 }
 
 impl Vehicle {
@@ -265,6 +298,10 @@ impl Vehicle {
 
     pub fn upgrades(&self) -> &[String] {
         self.upgrades.as_slice()
+    }
+
+    pub fn config_data(&self) -> Option<&ShipConfigData> {
+        self.config_data.as_ref()
     }
 }
 
@@ -300,8 +337,12 @@ pub struct AbilityCategory {
 }
 
 impl AbilityCategory {
-    pub fn consumable_type(&self) -> &str {
+    pub fn consumable_type_raw(&self) -> &str {
         &self.consumable_type
+    }
+
+    pub fn consumable_type(&self) -> Option<crate::game_types::Consumable> {
+        crate::game_types::Consumable::from_consumable_type(&self.consumable_type)
     }
 
     pub fn icon_id(&self) -> &str {
