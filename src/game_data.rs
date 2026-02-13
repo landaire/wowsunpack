@@ -14,17 +14,10 @@ use crate::data::{DataFileWithCallback, Version};
 use crate::error::ErrorKind;
 use crate::rpc::entitydefs::{EntitySpec, parse_scripts};
 
-/// Find the build directory in the game directory that matches the replay's version.
-///
-/// The game directory has a `bin/` folder containing numbered build directories
-/// (e.g. `bin/11791718/`). The replay's `clientVersionFromExe` field encodes the
-/// build number as the fourth component (e.g. `"15,0,0,11791718"`).
-///
-/// Returns the matching build number, or an error listing available builds.
-pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<u32, ErrorKind> {
+/// List all available build numbers in the game directory's `bin/` folder, sorted ascending.
+pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
     let bin_dir = game_dir.join("bin");
-    let mut available_builds: Vec<u32> = Vec::new();
-
+    let mut builds: Vec<u32> = Vec::new();
     for entry in read_dir(&bin_dir)? {
         let entry = entry?;
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -33,12 +26,23 @@ pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<
                 .to_str()
                 .and_then(|name| name.parse::<u32>().ok())
             {
-                available_builds.push(build_num);
+                builds.push(build_num);
             }
         }
     }
+    builds.sort();
+    Ok(builds)
+}
 
-    available_builds.sort();
+/// Find the build directory in the game directory that matches the replay's version.
+///
+/// The game directory has a `bin/` folder containing numbered build directories
+/// (e.g. `bin/11791718/`). The replay's `clientVersionFromExe` field encodes the
+/// build number as the fourth component (e.g. `"15,0,0,11791718"`).
+///
+/// Returns the matching build number, or an error listing available builds.
+pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<u32, ErrorKind> {
+    let available_builds = list_available_builds(game_dir)?;
 
     if available_builds.contains(&replay_version.build) {
         Ok(replay_version.build)
