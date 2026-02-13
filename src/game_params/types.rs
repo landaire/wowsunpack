@@ -236,21 +236,32 @@ pub enum ParamType {
 
 // }
 
-/// Per-hull configuration data extracted from GameParams.
+/// All range data associated with a specific hull upgrade.
+///
+/// Each hull upgrade in `ShipUpgradeInfo` (ucType = "_Hull") references specific
+/// hull, artillery, and ATBA components. This struct captures the resolved range
+/// data from those components.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct HullConfig {
+pub struct HullUpgradeConfig {
     /// Sea detection range in km.
-    pub visibility_factor: f32,
+    pub detection_km: f32,
     /// Air detection range in km.
-    pub visibility_factor_by_plane: f32,
+    pub air_detection_km: f32,
+    /// Main battery max range in meters (from the artillery component tied to this hull).
+    pub main_battery_m: Option<f32>,
+    /// Secondary battery max range in meters (from the ATBA component tied to this hull).
+    pub secondary_battery_m: Option<f32>,
 }
 
-/// Ship configuration data extracted from GameParams for each component variant.
+/// Ship configuration data extracted from GameParams.
+///
+/// Hull configs are keyed by the hull upgrade's GameParam ID so the renderer
+/// can look up the player's equipped hull directly from `ShipConfig::hull()`.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -258,13 +269,30 @@ pub struct HullConfig {
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct ShipConfigData {
-    /// Hull configs keyed by component name (e.g. "A_Hull", "B_Hull").
-    pub hulls: Vec<(String, HullConfig)>,
-    /// Artillery max range in meters, keyed by component name (e.g. "A_Artillery").
-    pub artillery_ranges: Vec<(String, f32)>,
-    /// Secondary battery (ATBA) max range in meters (usually only one entry).
-    pub atba_range: Option<f32>,
+    /// Hull upgrade configs keyed by upgrade GameParam name (e.g. "PAUH442_New_York_1934").
+    pub hull_upgrades: HashMap<String, HullUpgradeConfig>,
 }
+
+
+/// Resolved ship range values in real-world units.
+/// Detection is in km, all weapon/consumable ranges are in meters.
+#[derive(Clone, Debug, Default)]
+pub struct ShipRanges {
+    /// Sea detection range in km.
+    pub detection_km: Option<f32>,
+    /// Air detection range in km.
+    pub air_detection_km: Option<f32>,
+    /// Main battery max range in meters.
+    pub main_battery_m: Option<f32>,
+    /// Secondary battery max range in meters.
+    pub secondary_battery_m: Option<f32>,
+    /// Radar detection range in meters (converted from BigWorld units).
+    pub radar_m: Option<f32>,
+    /// Hydro detection range in meters (converted from BigWorld units).
+    pub hydro_m: Option<f32>,
+}
+
+
 
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -302,6 +330,69 @@ impl Vehicle {
 
     pub fn config_data(&self) -> Option<&ShipConfigData> {
         self.config_data.as_ref()
+    }
+
+    /// Resolve the ship's ranges for a specific hull upgrade.
+    ///
+    /// `hull_name` is the GameParam name of the equipped hull upgrade.
+    /// Look it up from the hull ID via `GameParamProvider::game_param_by_id()`.
+    /// If `None`, the first available hull config is used as a fallback.
+    ///
+    /// Radar and hydro ranges are looked up from the ship's ability slots via
+    /// `game_params`. Pass `None` to skip consumable range resolution.
+    pub fn resolve_ranges(
+        &self,
+        game_params: Option<&dyn GameParamProvider>,
+        hull_name: Option<&str>,
+    ) -> ShipRanges {
+        let mut ranges = ShipRanges::default();
+
+        if let Some(config) = &self.config_data {
+            let hull_config = hull_name
+                .and_then(|name| config.hull_upgrades.get(name))
+                .or_else(|| config.hull_upgrades.values().next());
+            if let Some(hc) = hull_config {
+                ranges.detection_km = Some(hc.detection_km);
+                ranges.air_detection_km = Some(hc.air_detection_km);
+                ranges.main_battery_m = hc.main_battery_m;
+                ranges.secondary_battery_m = hc.secondary_battery_m;
+            }
+        }
+
+        // Radar and hydro from consumable abilities
+        if let (Some(game_params), Some(abilities)) = (game_params, &self.abilities) {
+            for slot in abilities {
+                for (ability_name, variant_name) in slot {
+                    let param = match game_params.game_param_by_name(ability_name) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let ability = match param.ability() {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let cat = match ability.get_category(variant_name) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    match cat.consumable_type() {
+                        Some(crate::game_types::Consumable::Radar) => {
+                            if let Some(dist) = cat.detection_radius() {
+                                ranges.radar_m = Some(dist * 30.0 / 2.0);
+                            }
+                        }
+                        Some(crate::game_types::Consumable::HydroacousticSearch) => {
+                            if let Some(dist) = cat.detection_radius() {
+                                ranges.hydro_m = Some(dist * 30.0 / 2.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        ranges
     }
 }
 

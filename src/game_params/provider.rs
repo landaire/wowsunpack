@@ -658,64 +658,103 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
     let level = game_param_to_type!(ship_data, "level", u32);
     let group = game_param_to_type!(ship_data, "group", String);
 
-    // Extract hull/artillery/ATBA config data from ship_data sub-objects
-    let mut hulls = Vec::new();
-    let mut artillery_ranges = Vec::new();
-    let mut atba_range = None;
+    // Extract hull config data using ShipUpgradeInfo for proper type identification.
+    // Each _Hull upgrade in ShipUpgradeInfo maps to specific hull, artillery, and ATBA
+    // components. We build a HullUpgradeConfig for each, keyed by upgrade name.
+    let mut hull_upgrades = HashMap::new();
 
-    for (key, value) in ship_data.iter() {
-        let key_str = match key.string_ref() {
-            Some(s) => s.inner().clone(),
-            None => continue,
-        };
-        let sub_dict = match value.dict_ref() {
-            Some(d) => d.inner(),
-            None => continue,
-        };
+    // Helper: read a float from a pickled dict, accepting both f64 and i64
+    let read_float = |dict: &BTreeMap<HashableValue, Value>, key: &str| -> Option<f32> {
+        dict.get(&HashableValue::String(key.to_string().into()))
+            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+    };
 
-        if key_str.ends_with("_Hull") {
-            let vis = sub_dict
-                .get(&HashableValue::String("visibilityFactor".to_string().into()))
-                .and_then(|v| v.f64_ref().map(|f| *f as f32))
-                .unwrap_or(0.0);
-            let vis_plane = sub_dict
-                .get(&HashableValue::String("visibilityFactorByPlane".to_string().into()))
-                .and_then(|v| v.f64_ref().map(|f| *f as f32))
-                .unwrap_or(0.0);
-            if vis > 0.0 {
-                hulls.push((key_str, crate::game_params::types::HullConfig {
-                    visibility_factor: vis,
-                    visibility_factor_by_plane: vis_plane,
-                }));
+    // Helper: extract first string from a pickled list value
+    let read_first_string = |val: &Value| -> Option<String> {
+        let list = val.list_ref()?;
+        let inner = list.inner();
+        inner.first()
+            .and_then(|v| v.string_ref().map(|s| s.inner().clone()))
+    };
+
+    for (upgrade_name_val, upgrade_value) in upgrade_data.inner().iter() {
+        let Some(upgrade_name) = upgrade_name_val.string_ref().map(|s| s.inner().clone()) else { continue };
+        let Some(upgrade_dict) = upgrade_value.dict_ref() else { continue };
+        let upgrade_dict = upgrade_dict.inner();
+
+        // Only process _Hull upgrades -- they define the complete config for a hull loadout
+        let Some(uc_type) = upgrade_dict
+            .get(&HashableValue::String("ucType".to_string().into()))
+            .and_then(|v| v.string_ref().map(|s| s.inner().clone()))
+        else {
+            continue;
+        };
+        if uc_type != "_Hull" {
+            continue;
+        }
+
+        let Some(components) = upgrade_dict
+            .get(&HashableValue::String("components".to_string().into()))
+            .and_then(|v| v.dict_ref())
+        else {
+            continue;
+        };
+        let components = components.inner();
+
+        let mut config = crate::game_params::types::HullUpgradeConfig::default();
+
+        // Read hull detection data
+        if let Some(hull_comp) = components
+            .get(&HashableValue::String("hull".to_string().into()))
+            .and_then(|v| read_first_string(v))
+        {
+            if let Some(hull_data) = ship_data
+                .get(&HashableValue::String(hull_comp.into()))
+                .and_then(|v| v.dict_ref())
+            {
+                let hull_data = hull_data.inner();
+                config.detection_km = read_float(&*hull_data, "visibilityFactor").unwrap_or(0.0);
+                config.air_detection_km = read_float(&*hull_data, "visibilityFactorByPlane").unwrap_or(0.0);
             }
-        } else if key_str.ends_with("_Artillery") {
-            let max_dist = sub_dict
-                .get(&HashableValue::String("maxDist".to_string().into()))
-                .and_then(|v| v.f64_ref().map(|f| *f as f32));
-            if let Some(d) = max_dist {
-                artillery_ranges.push((key_str, d));
+        }
+
+        // Read artillery max range
+        if let Some(art_comp) = components
+            .get(&HashableValue::String("artillery".to_string().into()))
+            .and_then(|v| read_first_string(v))
+        {
+            if let Some(art_data) = ship_data
+                .get(&HashableValue::String(art_comp.into()))
+                .and_then(|v| v.dict_ref())
+            {
+                config.main_battery_m = read_float(&*art_data.inner(), "maxDist");
             }
-        } else if key_str.contains("ATBA") {
-            let max_dist = sub_dict
-                .get(&HashableValue::String("maxDist".to_string().into()))
-                .and_then(|v| v.f64_ref().map(|f| *f as f32));
-            if let Some(d) = max_dist {
-                atba_range = Some(d);
+        }
+
+        // Read ATBA (secondary) max range
+        if let Some(atba_comp) = components
+            .get(&HashableValue::String("atba".to_string().into()))
+            .and_then(|v| read_first_string(v))
+        {
+            if let Some(atba_data) = ship_data
+                .get(&HashableValue::String(atba_comp.into()))
+                .and_then(|v| v.dict_ref())
+            {
+                config.secondary_battery_m = read_float(&*atba_data.inner(), "maxDist");
             }
+        }
+
+        // Only store if we got meaningful data
+        if config.detection_km > 0.0 {
+            hull_upgrades.insert(upgrade_name, config);
         }
     }
 
-    // Sort by component name so last entry = best upgrade
-    hulls.sort_by(|a, b| a.0.cmp(&b.0));
-    artillery_ranges.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let config_data = if hulls.is_empty() && artillery_ranges.is_empty() && atba_range.is_none() {
+    let config_data = if hull_upgrades.is_empty() {
         None
     } else {
         Some(crate::game_params::types::ShipConfigData {
-            hulls,
-            artillery_ranges,
-            atba_range,
+            hull_upgrades,
         })
     };
 
