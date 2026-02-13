@@ -186,6 +186,22 @@ impl Param {
             _ => None,
         }
     }
+
+    /// Returns the Crew data if this param is a Crew type.
+    pub fn crew(&self) -> Option<&Crew> {
+        match &self.data {
+            ParamData::Crew(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Returns the Modernization data if this param is a Modernization type.
+    pub fn modernization(&self) -> Option<&Modernization> {
+        match &self.data {
+            ParamData::Modernization(m) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
@@ -378,12 +394,12 @@ impl Vehicle {
                     match cat.consumable_type() {
                         Some(crate::game_types::Consumable::Radar) => {
                             if let Some(dist) = cat.detection_radius() {
-                                ranges.radar_m = Some(dist * 30.0 / 2.0);
+                                ranges.radar_m = Some(dist * 30.0);
                             }
                         }
                         Some(crate::game_types::Consumable::HydroacousticSearch) => {
                             if let Some(dist) = cat.detection_radius() {
-                                ranges.hydro_m = Some(dist * 30.0 / 2.0);
+                                ranges.hydro_m = Some(dist * 30.0);
                             }
                         }
                         _ => {}
@@ -586,6 +602,24 @@ pub struct CrewSkillModifier {
     cruiser: f32,
     destroyer: f32,
     submarine: f32,
+}
+
+impl CrewSkillModifier {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn get_for_species(&self, species: &Species) -> f32 {
+        match species {
+            Species::AirCarrier => self.aircraft_carrier,
+            Species::Battleship => self.battleship,
+            Species::Cruiser => self.cruiser,
+            Species::Destroyer => self.destroyer,
+            Species::Submarine => self.submarine,
+            Species::Auxiliary => self.auxiliary,
+            _ => 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Builder, Debug)]
@@ -862,6 +896,26 @@ impl Projectile {
     }
 }
 
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Modernization {
+    modifiers: Vec<CrewSkillModifier>,
+}
+
+impl Modernization {
+    pub fn new(modifiers: Vec<CrewSkillModifier>) -> Self {
+        Self { modifiers }
+    }
+
+    pub fn modifiers(&self) -> &[CrewSkillModifier] {
+        &self.modifiers
+    }
+}
 #[derive(Clone, Debug, Variantly)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -873,7 +927,7 @@ pub enum ParamData {
     Crew(Crew),
     Ability(Ability),
     Achievement(Achievement),
-    Modernization,
+    Modernization(Modernization),
     Exterior,
     Unit,
     Aircraft(Aircraft),

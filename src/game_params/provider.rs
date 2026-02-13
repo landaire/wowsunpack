@@ -188,18 +188,6 @@ fn build_skill_modifiers(
 
             let modifier_name = modifier_name.inner();
 
-            // TODO
-            if matches!(
-                modifier_name.as_ref(),
-                "excludedConsumables"
-                    | "fireResistanceEnabled"
-                    | "priorityTargetEnabled"
-                    | "artilleryAlertEnabled"
-                    | "nearEnemyIntuitionEnabled"
-                    | "GMRotationSpeed"
-            ) {
-                return None;
-            }
             let modifier = if let Some(common_value) = modifier_data.i64_ref().cloned() {
                 let common_value = common_value as f32;
                 CrewSkillModifierBuilder::default()
@@ -222,40 +210,39 @@ fn build_skill_modifiers(
                     .submarine(common_value)
                     .name(modifier_name.to_owned())
                     .build()
-            } else {
-                let modifier_data = modifier_data
-                    .dict_ref()
-                    .expect("skill modifier data is not a dict");
-
+            } else if let Some(modifier_data) = modifier_data.dict_ref() {
                 let modifier_data = modifier_data.inner();
 
-                if modifier_data
+                // Skip dicts that aren't per-species modifier dicts
+                let Some(_) = modifier_data
                     .get(&HashableValue::String("AirCarrier".to_owned().into()))
-                    .expect("could not get AirCarrier")
-                    .is_i64()
-                {
-                    CrewSkillModifierBuilder::default()
-                        .aircraft_carrier(
-                            game_param_to_type!(modifier_data, "AirCarrier", i64) as f32
-                        )
-                        .auxiliary(game_param_to_type!(modifier_data, "Auxiliary", i64) as f32)
-                        .battleship(game_param_to_type!(modifier_data, "Battleship", i64) as f32)
-                        .cruiser(game_param_to_type!(modifier_data, "Cruiser", i64) as f32)
-                        .destroyer(game_param_to_type!(modifier_data, "Destroyer", i64) as f32)
-                        .submarine(game_param_to_type!(modifier_data, "Submarine", i64) as f32)
-                        .name(modifier_name.to_owned())
-                        .build()
-                } else {
-                    CrewSkillModifierBuilder::default()
-                        .aircraft_carrier(game_param_to_type!(modifier_data, "AirCarrier", f32))
-                        .auxiliary(game_param_to_type!(modifier_data, "Auxiliary", f32))
-                        .battleship(game_param_to_type!(modifier_data, "Battleship", f32))
-                        .cruiser(game_param_to_type!(modifier_data, "Cruiser", f32))
-                        .destroyer(game_param_to_type!(modifier_data, "Destroyer", f32))
-                        .submarine(game_param_to_type!(modifier_data, "Submarine", f32))
-                        .name(modifier_name.to_owned())
-                        .build()
-                }
+                else {
+                    return None;
+                };
+
+                let read_species = |key: &str| -> f32 {
+                    modifier_data
+                        .get(&HashableValue::String(key.to_owned().into()))
+                        .and_then(|v| {
+                            v.f64_ref()
+                                .map(|f| *f as f32)
+                                .or_else(|| v.i64_ref().map(|i| *i as f32))
+                        })
+                        .unwrap_or(1.0)
+                };
+
+                CrewSkillModifierBuilder::default()
+                    .aircraft_carrier(read_species("AirCarrier"))
+                    .auxiliary(read_species("Auxiliary"))
+                    .battleship(read_species("Battleship"))
+                    .cruiser(read_species("Cruiser"))
+                    .destroyer(read_species("Destroyer"))
+                    .submarine(read_species("Submarine"))
+                    .name(modifier_name.to_owned())
+                    .build()
+            } else {
+                // Skip non-numeric, non-dict modifiers (bools, arrays, etc.)
+                return None;
             };
 
             Some(modifier)
@@ -283,13 +270,12 @@ fn build_crew_skills(
             let skill_data = skill_data.dict_ref().expect("skill data is not dictionary");
             let skill_data = skill_data.inner();
 
-            let _logic_modifiers =
+            let logic_modifiers =
                 game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
 
-            let logic_modifiers = None;
-            // logic_modifiers.map(|modifiers| {
-            //     build_skill_modifiers(modifiers).expect("failed to build logic modifiers")
-            // });
+            let logic_modifiers = logic_modifiers.map(|modifiers| {
+                build_skill_modifiers(&modifiers.inner()).expect("failed to build logic modifiers")
+            });
 
             let logic_trigger_data =
                 game_param_to_type!(skill_data, "LogicTrigger", Option<HashMap<(), ()>>);
@@ -352,12 +338,11 @@ fn build_crew_skills(
                     .expect("failed to build logic trigger")
             });
 
-            let _modifiers = game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
-            let modifiers = None;
+            let modifiers = game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
 
-            // modifiers.map(|modifiers| {
-            //     build_skill_modifiers(modifiers).expect("failed to build skill modifiers")
-            // });
+            let modifiers = modifiers.map(|modifiers| {
+                build_skill_modifiers(&modifiers.inner()).expect("failed to build skill modifiers")
+            });
 
             let tier_data = game_param_to_type!(skill_data, "tier", HashMap<(), ()>);
             let tier_data = tier_data.inner();
@@ -693,6 +678,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
             continue;
         }
 
+
         let Some(components) = upgrade_dict
             .get(&HashableValue::String("components".to_string().into()))
             .and_then(|v| v.dict_ref())
@@ -878,7 +864,17 @@ impl GameMetadataProvider {
                                 }
                                 ParamType::Ability => Some(build_ability(&param_data).map(ParamData::Ability).expect("failed to build Ability")),
                                 ParamType::Exterior => Some(ParamData::Exterior),
-                                ParamType::Modernization => Some(ParamData::Modernization),
+                                ParamType::Modernization => {
+                                    let modifiers = param_data
+                                        .get(&HashableValue::String("modifiers".to_owned().into()))
+                                        .and_then(|v| v.dict_ref())
+                                        .map(|d| build_skill_modifiers(&d.inner()))
+                                        .transpose()
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_default();
+                                    Some(ParamData::Modernization(super::types::Modernization::new(modifiers)))
+                                }
                                 ParamType::Unit => Some(ParamData::Unit),
                                 ParamType::Aircraft => {
                                     let subtypes: Vec<String> = param_data
