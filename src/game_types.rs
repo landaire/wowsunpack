@@ -18,7 +18,7 @@ use std::fmt;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct EntityId(pub u32);
+pub struct EntityId(u32);
 
 impl EntityId {
     pub fn raw(self) -> u32 {
@@ -98,10 +98,10 @@ impl From<i64> for AccountId {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct GameParamId(pub u32);
+pub struct GameParamId(u64);
 
 impl GameParamId {
-    pub fn raw(self) -> u32 {
+    pub fn raw(self) -> u64 {
         self.0
     }
 }
@@ -114,19 +114,19 @@ impl fmt::Display for GameParamId {
 
 impl From<u32> for GameParamId {
     fn from(v: u32) -> Self {
-        GameParamId(v)
+        GameParamId(v as u64)
     }
 }
 
 impl From<u64> for GameParamId {
     fn from(v: u64) -> Self {
-        GameParamId(v as u32)
+        GameParamId(v)
     }
 }
 
 impl From<i64> for GameParamId {
     fn from(v: i64) -> Self {
-        GameParamId(v as u32)
+        GameParamId(v as u64)
     }
 }
 
@@ -196,7 +196,7 @@ impl From<u32> for Relation {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct PlaneId(pub u64);
+pub struct PlaneId(u64);
 
 impl PlaneId {
     pub fn owner_id(self) -> EntityId {
