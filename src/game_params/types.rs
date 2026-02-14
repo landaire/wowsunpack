@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::{Add, Mul, Sub};
 
-use derive_builder::Builder;
+use bon::Builder;
 use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
@@ -514,7 +514,6 @@ pub struct ShipConfigData {
     pub hull_upgrades: HashMap<String, HullUpgradeConfig>,
 }
 
-
 /// Resolved ship range values in real-world units.
 /// Detection is in km, all weapon/consumable ranges are in meters.
 #[derive(Clone, Debug, Default)]
@@ -533,8 +532,6 @@ pub struct ShipRanges {
     pub hydro_m: Option<Meters>,
 }
 
-
-
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -547,7 +544,6 @@ pub struct Vehicle {
     abilities: Option<Vec<Vec<(String, String)>>>,
     #[cfg_attr(feature = "serde", serde(default))]
     upgrades: Vec<String>,
-    #[builder(default)]
     #[cfg_attr(feature = "serde", serde(default))]
     config_data: Option<ShipConfigData>,
 }
@@ -652,19 +648,15 @@ pub struct AbilityCategory {
     work_time: f32,
     /// Detection radius for ships (radar, hydro, sublocator). BigWorld units.
     #[cfg_attr(feature = "serde", serde(default))]
-    #[builder(default)]
     dist_ship: Option<BigWorldDistance>,
     /// Detection radius for torpedoes (hydro only). BigWorld units.
     #[cfg_attr(feature = "serde", serde(default))]
-    #[builder(default)]
     dist_torpedo: Option<BigWorldDistance>,
     /// Hydrophone wave radius in meters.
     #[cfg_attr(feature = "serde", serde(default))]
-    #[builder(default)]
     hydrophone_wave_radius: Option<Meters>,
     /// Fighter patrol radius. BigWorld units.
     #[cfg_attr(feature = "serde", serde(default))]
-    #[builder(default)]
     patrol_radius: Option<BigWorldDistance>,
 }
 
@@ -1116,7 +1108,6 @@ impl Aircraft {
     }
 }
 
-
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -1164,16 +1155,20 @@ impl BuffDrop {
 
     /// Returns the game asset path for the active icon.
     pub fn active_icon_path(&self) -> String {
-        format!("gui/powerups/drops/icon_marker_{}.png", self.marker_name_active)
+        format!(
+            "gui/powerups/drops/icon_marker_{}.png",
+            self.marker_name_active
+        )
     }
 
     /// Returns the game asset path for the inactive icon.
     pub fn inactive_icon_path(&self) -> String {
-        format!("gui/powerups/drops/icon_marker_{}.png", self.marker_name_inactive)
+        format!(
+            "gui/powerups/drops/icon_marker_{}.png",
+            self.marker_name_inactive
+        )
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -568,8 +568,7 @@ impl WeaponsConstants {
 
         let defaults = Self::defaults();
         Self {
-            gun_states: parse_integer_enum(xml_str, "GUN_STATE")
-                .unwrap_or(defaults.gun_states),
+            gun_states: parse_integer_enum(xml_str, "GUN_STATE").unwrap_or(defaults.gun_states),
         }
     }
 
@@ -602,6 +601,7 @@ impl WeaponsConstants {
 pub struct CommonConstants {
     plane_ammo_types: HashMap<i32, String>,
     torpedo_types: HashMap<i32, String>,
+    consumable_types: Option<HashMap<i32, crate::game_types::Consumable>>,
 }
 
 impl CommonConstants {
@@ -631,6 +631,7 @@ impl CommonConstants {
                 .unwrap_or(defaults.plane_ammo_types),
             torpedo_types: parse_integer_enum(xml_str, "TORPEDO_TYPE")
                 .unwrap_or(defaults.torpedo_types),
+            consumable_types: None,
         }
     }
 
@@ -656,6 +657,7 @@ impl CommonConstants {
                 (1, "SUBMARINE".into()),
                 (2, "PHOTON".into()),
             ]),
+            consumable_types: None,
         }
     }
 
@@ -665,6 +667,14 @@ impl CommonConstants {
 
     pub fn torpedo_type(&self, id: i32) -> Option<&str> {
         self.torpedo_types.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn set_consumable_types(&mut self, map: HashMap<i32, crate::game_types::Consumable>) {
+        self.consumable_types = Some(map);
+    }
+
+    pub fn consumable_type(&self, id: i32) -> Option<&crate::game_types::Consumable> {
+        self.consumable_types.as_ref()?.get(&id)
     }
 }
 
@@ -756,11 +766,7 @@ fn parse_integer_enum(xml: &str, enum_name: &str) -> Option<HashMap<i32, String>
         }
     }
 
-    if map.is_empty() {
-        None
-    } else {
-        Some(map)
-    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Parse an `<enum type="String">` block from XML (positional indexing).
@@ -781,11 +787,7 @@ fn parse_positional_enum(xml: &str, enum_name: &str) -> Option<HashMap<i32, Stri
         }
     }
 
-    if map.is_empty() {
-        None
-    } else {
-        Some(map)
-    }
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// The file path within the game's `res/` directory for battle constants.
