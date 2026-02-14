@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul, Sub};
 
 use bon::Builder;
-use strum_macros::{EnumString, IntoStaticStr};
 use variantly::Variantly;
 
 use crate::{Rc, data::ResourceLoader, game_types::GameParamId};
@@ -224,9 +223,7 @@ impl Sub<Meters> for Km {
     }
 }
 
-#[derive(
-    EnumString, Clone, Debug, Variantly, IntoStaticStr, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
+#[derive(Clone, Copy, Debug, Variantly, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -272,7 +269,6 @@ pub enum Species {
     Fake,
     Fighter,
     FighterTypeUnit,
-    #[strum(serialize = "Fire control")]
     FireControl,
     Flags,
     FlightControlUnit,
@@ -319,15 +315,196 @@ pub enum Species {
     TorpedoesUnit,
     Upgrade,
     Wave,
-    #[strum(serialize = "null")]
     Null,
-    Unknown(String),
 }
 
 impl Species {
+    pub fn from_name(name: &str) -> crate::recognized::Recognized<Self> {
+        use crate::recognized::Recognized;
+        match name {
+            "AAircraft" => Recognized::Known(Self::AAircraft),
+            "AbilitiesUnit" => Recognized::Known(Self::AbilitiesUnit),
+            "AirBase" => Recognized::Known(Self::AirBase),
+            "AirCarrier" => Recognized::Known(Self::AirCarrier),
+            "Airship" => Recognized::Known(Self::Airship),
+            "AntiAircraft" => Recognized::Known(Self::AntiAircraft),
+            "Artillery" => Recognized::Known(Self::Artillery),
+            "ArtilleryUnit" => Recognized::Known(Self::ArtilleryUnit),
+            "Auxiliary" => Recognized::Known(Self::Auxiliary),
+            "Battleship" => Recognized::Known(Self::Battleship),
+            "Bomb" => Recognized::Known(Self::Bomb),
+            "Bomber" => Recognized::Known(Self::Bomber),
+            "BuildingType" => Recognized::Known(Self::BuildingType),
+            "Camoboost" => Recognized::Known(Self::Camoboost),
+            "Camouflage" => Recognized::Known(Self::Camouflage),
+            "Campaign" => Recognized::Known(Self::Campaign),
+            "CoastalArtillery" => Recognized::Known(Self::CoastalArtillery),
+            "CollectionAlbum" => Recognized::Known(Self::CollectionAlbum),
+            "CollectionCard" => Recognized::Known(Self::CollectionCard),
+            "Complex" => Recognized::Known(Self::Complex),
+            "Cruiser" => Recognized::Known(Self::Cruiser),
+            "DCharge" => Recognized::Known(Self::DCharge),
+            "DeathSettings" => Recognized::Known(Self::DeathSettings),
+            "DepthCharge" => Recognized::Known(Self::DepthCharge),
+            "Destroyer" => Recognized::Known(Self::Destroyer),
+            "Dive" => Recognized::Known(Self::Dive),
+            "DiveBomberTypeUnit" => Recognized::Known(Self::DiveBomberTypeUnit),
+            "DogTagDoll" => Recognized::Known(Self::DogTagDoll),
+            "DogTagItem" => Recognized::Known(Self::DogTagItem),
+            "DogTagSlotsScheme" => Recognized::Known(Self::DogTagSlotsScheme),
+            "DogTagUnique" => Recognized::Known(Self::DogTagUnique),
+            "Drop" => Recognized::Known(Self::Drop),
+            "DropVisual" => Recognized::Known(Self::DropVisual),
+            "EngineUnit" => Recognized::Known(Self::EngineUnit),
+            "Ensign" => Recognized::Known(Self::Ensign),
+            "Event" => Recognized::Known(Self::Event),
+            "Fake" => Recognized::Known(Self::Fake),
+            "Fighter" => Recognized::Known(Self::Fighter),
+            "FighterTypeUnit" => Recognized::Known(Self::FighterTypeUnit),
+            "Fire control" | "FireControl" => Recognized::Known(Self::FireControl),
+            "Flags" => Recognized::Known(Self::Flags),
+            "FlightControlUnit" => Recognized::Known(Self::FlightControlUnit),
+            "Generator" => Recognized::Known(Self::Generator),
+            "GlobalWeather" => Recognized::Known(Self::GlobalWeather),
+            "Globalboost" => Recognized::Known(Self::Globalboost),
+            "Hull" => Recognized::Known(Self::Hull),
+            "HullUnit" => Recognized::Known(Self::HullUnit),
+            "IndividualTask" => Recognized::Known(Self::IndividualTask),
+            "Laser" => Recognized::Known(Self::Laser),
+            "LocalWeather" => Recognized::Known(Self::LocalWeather),
+            "MSkin" => Recognized::Known(Self::MSkin),
+            "Main" => Recognized::Known(Self::Main),
+            "MapBorder" => Recognized::Known(Self::MapBorder),
+            "Military" => Recognized::Known(Self::Military),
+            "Mine" => Recognized::Known(Self::Mine),
+            "Mission" => Recognized::Known(Self::Mission),
+            "Modifier" => Recognized::Known(Self::Modifier),
+            "Multiboost" => Recognized::Known(Self::Multiboost),
+            "NewbieQuest" => Recognized::Known(Self::NewbieQuest),
+            "Operation" => Recognized::Known(Self::Operation),
+            "Permoflage" => Recognized::Known(Self::Permoflage),
+            "PlaneTracer" => Recognized::Known(Self::PlaneTracer),
+            "PrimaryWeaponsUnit" => Recognized::Known(Self::PrimaryWeaponsUnit),
+            "RayTower" => Recognized::Known(Self::RayTower),
+            "Rocket" => Recognized::Known(Self::Rocket),
+            "Scout" => Recognized::Known(Self::Scout),
+            "Search" => Recognized::Known(Self::Search),
+            "Secondary" => Recognized::Known(Self::Secondary),
+            "SecondaryWeaponsUnit" => Recognized::Known(Self::SecondaryWeaponsUnit),
+            "SensorTower" => Recognized::Known(Self::SensorTower),
+            "Sinking" => Recognized::Known(Self::Sinking),
+            "Skin" => Recognized::Known(Self::Skin),
+            "Skip" => Recognized::Known(Self::Skip),
+            "SkipBomb" => Recognized::Known(Self::SkipBomb),
+            "SkipBomberTypeUnit" => Recognized::Known(Self::SkipBomberTypeUnit),
+            "SonarUnit" => Recognized::Known(Self::SonarUnit),
+            "SpaceStation" => Recognized::Known(Self::SpaceStation),
+            "Submarine" => Recognized::Known(Self::Submarine),
+            "SuoUnit" => Recognized::Known(Self::SuoUnit),
+            "Task" => Recognized::Known(Self::Task),
+            "Torpedo" => Recognized::Known(Self::Torpedo),
+            "TorpedoBomberTypeUnit" => Recognized::Known(Self::TorpedoBomberTypeUnit),
+            "TorpedoesUnit" => Recognized::Known(Self::TorpedoesUnit),
+            "Upgrade" => Recognized::Known(Self::Upgrade),
+            "Wave" => Recognized::Known(Self::Wave),
+            "null" => Recognized::Known(Self::Null),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::AAircraft => "AAircraft",
+            Self::AbilitiesUnit => "AbilitiesUnit",
+            Self::AirBase => "AirBase",
+            Self::AirCarrier => "AirCarrier",
+            Self::Airship => "Airship",
+            Self::AntiAircraft => "AntiAircraft",
+            Self::Artillery => "Artillery",
+            Self::ArtilleryUnit => "ArtilleryUnit",
+            Self::Auxiliary => "Auxiliary",
+            Self::Battleship => "Battleship",
+            Self::Bomb => "Bomb",
+            Self::Bomber => "Bomber",
+            Self::BuildingType => "BuildingType",
+            Self::Camoboost => "Camoboost",
+            Self::Camouflage => "Camouflage",
+            Self::Campaign => "Campaign",
+            Self::CoastalArtillery => "CoastalArtillery",
+            Self::CollectionAlbum => "CollectionAlbum",
+            Self::CollectionCard => "CollectionCard",
+            Self::Complex => "Complex",
+            Self::Cruiser => "Cruiser",
+            Self::DCharge => "DCharge",
+            Self::DeathSettings => "DeathSettings",
+            Self::DepthCharge => "DepthCharge",
+            Self::Destroyer => "Destroyer",
+            Self::Dive => "Dive",
+            Self::DiveBomberTypeUnit => "DiveBomberTypeUnit",
+            Self::DogTagDoll => "DogTagDoll",
+            Self::DogTagItem => "DogTagItem",
+            Self::DogTagSlotsScheme => "DogTagSlotsScheme",
+            Self::DogTagUnique => "DogTagUnique",
+            Self::Drop => "Drop",
+            Self::DropVisual => "DropVisual",
+            Self::EngineUnit => "EngineUnit",
+            Self::Ensign => "Ensign",
+            Self::Event => "Event",
+            Self::Fake => "Fake",
+            Self::Fighter => "Fighter",
+            Self::FighterTypeUnit => "FighterTypeUnit",
+            Self::FireControl => "Fire control",
+            Self::Flags => "Flags",
+            Self::FlightControlUnit => "FlightControlUnit",
+            Self::Generator => "Generator",
+            Self::GlobalWeather => "GlobalWeather",
+            Self::Globalboost => "Globalboost",
+            Self::Hull => "Hull",
+            Self::HullUnit => "HullUnit",
+            Self::IndividualTask => "IndividualTask",
+            Self::Laser => "Laser",
+            Self::LocalWeather => "LocalWeather",
+            Self::MSkin => "MSkin",
+            Self::Main => "Main",
+            Self::MapBorder => "MapBorder",
+            Self::Military => "Military",
+            Self::Mine => "Mine",
+            Self::Mission => "Mission",
+            Self::Modifier => "Modifier",
+            Self::Multiboost => "Multiboost",
+            Self::NewbieQuest => "NewbieQuest",
+            Self::Operation => "Operation",
+            Self::Permoflage => "Permoflage",
+            Self::PlaneTracer => "PlaneTracer",
+            Self::PrimaryWeaponsUnit => "PrimaryWeaponsUnit",
+            Self::RayTower => "RayTower",
+            Self::Rocket => "Rocket",
+            Self::Scout => "Scout",
+            Self::Search => "Search",
+            Self::Secondary => "Secondary",
+            Self::SecondaryWeaponsUnit => "SecondaryWeaponsUnit",
+            Self::SensorTower => "SensorTower",
+            Self::Sinking => "Sinking",
+            Self::Skin => "Skin",
+            Self::Skip => "Skip",
+            Self::SkipBomb => "SkipBomb",
+            Self::SkipBomberTypeUnit => "SkipBomberTypeUnit",
+            Self::SonarUnit => "SonarUnit",
+            Self::SpaceStation => "SpaceStation",
+            Self::Submarine => "Submarine",
+            Self::SuoUnit => "SuoUnit",
+            Self::Task => "Task",
+            Self::Torpedo => "Torpedo",
+            Self::TorpedoBomberTypeUnit => "TorpedoBomberTypeUnit",
+            Self::TorpedoesUnit => "TorpedoesUnit",
+            Self::Upgrade => "Upgrade",
+            Self::Wave => "Wave",
+            Self::Null => "null",
+        }
+    }
+
     pub fn translation_id(&self) -> String {
-        let name: &'static str = self.into();
-        format!("IDS_{name}")
+        format!("IDS_{}", self.name())
     }
 }
 
@@ -341,7 +518,7 @@ pub struct Param {
     id: GameParamId,
     index: String,
     name: String,
-    species: Option<Species>,
+    species: Option<crate::recognized::Recognized<Species>>,
     nation: String,
     data: ParamData,
 }
@@ -359,8 +536,8 @@ impl Param {
         self.name.as_ref()
     }
 
-    pub fn species(&self) -> Option<Species> {
-        self.species.clone()
+    pub fn species(&self) -> Option<&crate::recognized::Recognized<Species>> {
+        self.species.as_ref()
     }
 
     pub fn nation(&self) -> &str {
@@ -428,7 +605,7 @@ impl Param {
     }
 }
 
-#[derive(PartialEq, Eq, EnumString, Hash, Debug, Variantly)]
+#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy, Variantly)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -469,6 +646,48 @@ pub enum ParamType {
     ToggleTriggerAction,
     Unit,
     VisibilityChangedActivator,
+}
+
+impl ParamType {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Ability" => Some(Self::Ability),
+            "Achievement" => Some(Self::Achievement),
+            "AdjustmentShotActivator" => Some(Self::AdjustmentShotActivator),
+            "Aircraft" => Some(Self::Aircraft),
+            "BattleScript" => Some(Self::BattleScript),
+            "Building" => Some(Self::Building),
+            "Campaign" => Some(Self::Campaign),
+            "Catapult" => Some(Self::Catapult),
+            "ClanSupply" => Some(Self::ClanSupply),
+            "Collection" => Some(Self::Collection),
+            "Component" => Some(Self::Component),
+            "Crew" => Some(Self::Crew),
+            "Director" => Some(Self::Director),
+            "DogTag" => Some(Self::DogTag),
+            "Drop" => Some(Self::Drop),
+            "EventTrigger" => Some(Self::EventTrigger),
+            "Exterior" => Some(Self::Exterior),
+            "Finder" => Some(Self::Finder),
+            "Gun" => Some(Self::Gun),
+            "Modernization" => Some(Self::Modernization),
+            "Other" => Some(Self::Other),
+            "Projectile" => Some(Self::Projectile),
+            "Radar" => Some(Self::Radar),
+            "RageModeProgressAction" => Some(Self::RageModeProgressAction),
+            "Reward" => Some(Self::Reward),
+            "RibbonActivator" => Some(Self::RibbonActivator),
+            "Sfx" => Some(Self::Sfx),
+            "Ship" => Some(Self::Ship),
+            "SwitchTrigger" => Some(Self::SwitchTrigger),
+            "SwitchVehicleVisualStateAction" => Some(Self::SwitchVehicleVisualStateAction),
+            "TimerActivator" => Some(Self::TimerActivator),
+            "ToggleTriggerAction" => Some(Self::ToggleTriggerAction),
+            "Unit" => Some(Self::Unit),
+            "VisibilityChangedActivator" => Some(Self::VisibilityChangedActivator),
+            _ => None,
+        }
+    }
 }
 
 // #[derive(Serialize, Deserialize, Clone, Builder, Debug)]
@@ -581,6 +800,7 @@ impl Vehicle {
         &self,
         game_params: Option<&dyn GameParamProvider>,
         hull_name: Option<&str>,
+        version: crate::data::Version,
     ) -> ShipRanges {
         let mut ranges = ShipRanges::default();
 
@@ -612,11 +832,11 @@ impl Vehicle {
                         Some(c) => c,
                         None => continue,
                     };
-                    match cat.consumable_type() {
-                        Some(crate::game_types::Consumable::Radar) => {
+                    match cat.consumable_type(version).known() {
+                        Some(&crate::game_types::Consumable::Radar) => {
                             ranges.radar_m = cat.detection_radius();
                         }
-                        Some(crate::game_types::Consumable::HydroacousticSearch) => {
+                        Some(&crate::game_types::Consumable::HydroacousticSearch) => {
                             ranges.hydro_m = cat.detection_radius();
                         }
                         _ => {}
@@ -665,8 +885,11 @@ impl AbilityCategory {
         &self.consumable_type
     }
 
-    pub fn consumable_type(&self) -> Option<crate::game_types::Consumable> {
-        crate::game_types::Consumable::from_consumable_type(&self.consumable_type)
+    pub fn consumable_type(
+        &self,
+        version: crate::data::Version,
+    ) -> crate::recognized::Recognized<crate::game_types::Consumable> {
+        crate::game_types::Consumable::from_consumable_type(&self.consumable_type, version)
     }
 
     pub fn icon_id(&self) -> &str {

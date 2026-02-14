@@ -5,6 +5,10 @@
 
 use std::fmt;
 
+use crate::data::Version;
+use crate::game_constants::{BattleConstants, CommonConstants, ShipsConstants};
+use crate::recognized::Recognized;
+
 // =============================================================================
 // Identity Types
 // =============================================================================
@@ -430,7 +434,7 @@ pub enum Ribbon {
 }
 
 /// Cause of a ship's destruction.
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -473,50 +477,99 @@ pub enum DeathCause {
     Event5,
     Event6,
     Missile,
-    Unknown(u32),
-    UnknownName(String),
 }
 
 impl DeathCause {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .death_reason(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "NONE" => DeathCause::None,
-            "ARTILLERY" => DeathCause::Artillery,
-            "ATBA" => DeathCause::Secondaries,
-            "TORPEDO" => DeathCause::Torpedo,
-            "BOMB" => DeathCause::DiveBomber,
-            "TBOMB" => DeathCause::AerialTorpedo,
-            "BURNING" => DeathCause::Fire,
-            "RAM" => DeathCause::Ramming,
-            "TERRAIN" => DeathCause::Terrain,
-            "FLOOD" => DeathCause::Flooding,
-            "MIRROR" => DeathCause::Mirror,
-            "SEA_MINE" => DeathCause::SeaMine,
-            "SPECIAL" => DeathCause::Special,
-            "DBOMB" => DeathCause::DepthCharge,
-            "ROCKET" => DeathCause::AerialRocket,
-            "DETONATE" => DeathCause::Detonation,
-            "HEALTH" => DeathCause::Health,
-            "AP_SHELL" => DeathCause::ApShell,
-            "HE_SHELL" => DeathCause::HeShell,
-            "CS_SHELL" => DeathCause::CsShell,
-            "FEL" => DeathCause::Fel,
-            "PORTAL" => DeathCause::Portal,
-            "SKIP_BOMB" => DeathCause::SkipBombs,
-            "SECTOR_WAVE" => DeathCause::SectorWave,
-            "ACID" => DeathCause::Acid,
-            "LASER" => DeathCause::Laser,
-            "MATCH" => DeathCause::Match,
-            "TIMER" => DeathCause::Timer,
-            "ADBOMB" => DeathCause::AerialDepthCharge,
-            "EVENT_1" => DeathCause::Event1,
-            "EVENT_2" => DeathCause::Event2,
-            "EVENT_3" => DeathCause::Event3,
-            "EVENT_4" => DeathCause::Event4,
-            "EVENT_5" => DeathCause::Event5,
-            "EVENT_6" => DeathCause::Event6,
-            "MISSILE" => DeathCause::Missile,
-            other => DeathCause::UnknownName(other.to_string()),
+            "NONE" => Recognized::Known(DeathCause::None),
+            "ARTILLERY" => Recognized::Known(DeathCause::Artillery),
+            "ATBA" => Recognized::Known(DeathCause::Secondaries),
+            "TORPEDO" => Recognized::Known(DeathCause::Torpedo),
+            "BOMB" => Recognized::Known(DeathCause::DiveBomber),
+            "TBOMB" => Recognized::Known(DeathCause::AerialTorpedo),
+            "BURNING" => Recognized::Known(DeathCause::Fire),
+            "RAM" => Recognized::Known(DeathCause::Ramming),
+            "TERRAIN" => Recognized::Known(DeathCause::Terrain),
+            "FLOOD" => Recognized::Known(DeathCause::Flooding),
+            "MIRROR" => Recognized::Known(DeathCause::Mirror),
+            "SEA_MINE" => Recognized::Known(DeathCause::SeaMine),
+            "SPECIAL" => Recognized::Known(DeathCause::Special),
+            "DBOMB" => Recognized::Known(DeathCause::DepthCharge),
+            "ROCKET" => Recognized::Known(DeathCause::AerialRocket),
+            "DETONATE" => Recognized::Known(DeathCause::Detonation),
+            "HEALTH" => Recognized::Known(DeathCause::Health),
+            "AP_SHELL" => Recognized::Known(DeathCause::ApShell),
+            "HE_SHELL" => Recognized::Known(DeathCause::HeShell),
+            "CS_SHELL" => Recognized::Known(DeathCause::CsShell),
+            "FEL" => Recognized::Known(DeathCause::Fel),
+            "PORTAL" => Recognized::Known(DeathCause::Portal),
+            "SKIP_BOMB" => Recognized::Known(DeathCause::SkipBombs),
+            "SECTOR_WAVE" => Recognized::Known(DeathCause::SectorWave),
+            "ACID" => Recognized::Known(DeathCause::Acid),
+            "LASER" => Recognized::Known(DeathCause::Laser),
+            "MATCH" => Recognized::Known(DeathCause::Match),
+            "TIMER" => Recognized::Known(DeathCause::Timer),
+            "ADBOMB" => Recognized::Known(DeathCause::AerialDepthCharge),
+            "EVENT_1" => Recognized::Known(DeathCause::Event1),
+            "EVENT_2" => Recognized::Known(DeathCause::Event2),
+            "EVENT_3" => Recognized::Known(DeathCause::Event3),
+            "EVENT_4" => Recognized::Known(DeathCause::Event4),
+            "EVENT_5" => Recognized::Known(DeathCause::Event5),
+            "EVENT_6" => Recognized::Known(DeathCause::Event6),
+            "MISSILE" => Recognized::Known(DeathCause::Missile),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            DeathCause::None => "NONE",
+            DeathCause::Artillery => "ARTILLERY",
+            DeathCause::Secondaries => "ATBA",
+            DeathCause::Torpedo => "TORPEDO",
+            DeathCause::DiveBomber => "BOMB",
+            DeathCause::AerialTorpedo => "TBOMB",
+            DeathCause::Fire => "BURNING",
+            DeathCause::Ramming => "RAM",
+            DeathCause::Terrain => "TERRAIN",
+            DeathCause::Flooding => "FLOOD",
+            DeathCause::Mirror => "MIRROR",
+            DeathCause::SeaMine => "SEA_MINE",
+            DeathCause::Special => "SPECIAL",
+            DeathCause::DepthCharge => "DBOMB",
+            DeathCause::AerialRocket => "ROCKET",
+            DeathCause::Detonation => "DETONATE",
+            DeathCause::Health => "HEALTH",
+            DeathCause::ApShell => "AP_SHELL",
+            DeathCause::HeShell => "HE_SHELL",
+            DeathCause::CsShell => "CS_SHELL",
+            DeathCause::Fel => "FEL",
+            DeathCause::Portal => "PORTAL",
+            DeathCause::SkipBombs => "SKIP_BOMB",
+            DeathCause::SectorWave => "SECTOR_WAVE",
+            DeathCause::Acid => "ACID",
+            DeathCause::Laser => "LASER",
+            DeathCause::Match => "MATCH",
+            DeathCause::Timer => "TIMER",
+            DeathCause::AerialDepthCharge => "ADBOMB",
+            DeathCause::Event1 => "EVENT_1",
+            DeathCause::Event2 => "EVENT_2",
+            DeathCause::Event3 => "EVENT_3",
+            DeathCause::Event4 => "EVENT_4",
+            DeathCause::Event5 => "EVENT_5",
+            DeathCause::Event6 => "EVENT_6",
+            DeathCause::Missile => "MISSILE",
         }
     }
 
@@ -576,50 +629,196 @@ pub enum Consumable {
     HydroacousticSearch,
     TorpedoReloadBooster,
     Radar,
+    Trigger1,
+    Trigger2,
+    Trigger3,
+    Trigger4,
+    Trigger5,
+    Trigger6,
     Invulnerable,
     HealForsage,
     CallFighters,
     RegenerateHealth,
+    SubsOxygenRegen,
+    SubsWaveGunBoost,
+    SubsFourthState,
     DepthCharges,
+    Trigger7,
+    Trigger8,
+    Trigger9,
+    Buff,
+    BuffsShift,
+    CircleWave,
+    GoDeep,
     WeaponReloadBooster,
     Hydrophone,
     EnhancedRudders,
     ReserveBattery,
+    GroupAuraBuff,
+    AffectedBuffAura,
+    InvisibilityExtraBuff,
     SubmarineSurveillance,
-    Unknown(i8),
+    PlaneSmokeGenerator,
+    Minefield,
+    TacticalTrigger1,
+    TacticalTrigger2,
+    TacticalTrigger3,
+    TacticalTrigger4,
+    TacticalTrigger5,
+    TacticalTrigger6,
+    ReconnaissanceSquad,
+    SmokePlane,
+    TacticalBuff,
+    PlaneTrigger1,
+    PlaneTrigger2,
+    PlaneTrigger3,
+    PlaneBuff,
+    Any,
+    All,
+    Special,
 }
 
 impl Consumable {
-    pub fn from_consumable_type(s: &str) -> Option<Self> {
+    pub fn from_id(
+        id: i32,
+        constants: &CommonConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .consumable_type(id)
+            .map(|name| Self::from_consumable_type(name, version))
+    }
+
+    pub fn from_consumable_type(s: &str, _version: Version) -> Recognized<Self> {
         match s {
-            "crashCrew" => Some(Self::DamageControl),
-            "scout" => Some(Self::SpottingAircraft),
-            "airDefenseDisp" => Some(Self::DefensiveAntiAircraft),
-            "speedBoosters" => Some(Self::SpeedBoost),
-            "artilleryBoosters" => Some(Self::MainBatteryReloadBooster),
-            "smokeGenerator" => Some(Self::Smoke),
-            "regenCrew" => Some(Self::RepairParty),
-            "fighter" => Some(Self::CatapultFighter),
-            "sonar" => Some(Self::HydroacousticSearch),
-            "torpedoReloader" => Some(Self::TorpedoReloadBooster),
-            "rls" => Some(Self::Radar),
-            "invulnerable" => Some(Self::Invulnerable),
-            "healForsage" => Some(Self::HealForsage),
-            "callFighters" => Some(Self::CallFighters),
-            "regenerateHealth" => Some(Self::RegenerateHealth),
-            "depthCharges" => Some(Self::DepthCharges),
-            "weaponReloadBooster" => Some(Self::WeaponReloadBooster),
-            "hydrophone" => Some(Self::Hydrophone),
-            "fastRudders" => Some(Self::EnhancedRudders),
-            "subsEnergyFreeze" => Some(Self::ReserveBattery),
-            "submarineLocator" => Some(Self::SubmarineSurveillance),
-            _ => None,
+            "crashCrew" => Recognized::Known(Self::DamageControl),
+            "scout" => Recognized::Known(Self::SpottingAircraft),
+            "airDefenseDisp" => Recognized::Known(Self::DefensiveAntiAircraft),
+            "speedBoosters" => Recognized::Known(Self::SpeedBoost),
+            "artilleryBoosters" => Recognized::Known(Self::MainBatteryReloadBooster),
+            "smokeGenerator" => Recognized::Known(Self::Smoke),
+            "regenCrew" => Recognized::Known(Self::RepairParty),
+            "fighter" => Recognized::Known(Self::CatapultFighter),
+            "sonar" => Recognized::Known(Self::HydroacousticSearch),
+            "torpedoReloader" => Recognized::Known(Self::TorpedoReloadBooster),
+            "rls" => Recognized::Known(Self::Radar),
+            "trigger1" => Recognized::Known(Self::Trigger1),
+            "trigger2" => Recognized::Known(Self::Trigger2),
+            "trigger3" => Recognized::Known(Self::Trigger3),
+            "trigger4" => Recognized::Known(Self::Trigger4),
+            "trigger5" => Recognized::Known(Self::Trigger5),
+            "trigger6" => Recognized::Known(Self::Trigger6),
+            "invulnerable" => Recognized::Known(Self::Invulnerable),
+            "healForsage" => Recognized::Known(Self::HealForsage),
+            "callFighters" => Recognized::Known(Self::CallFighters),
+            "regenerateHealth" => Recognized::Known(Self::RegenerateHealth),
+            "subsOxygenRegen" => Recognized::Known(Self::SubsOxygenRegen),
+            "subsWaveGunBoost" => Recognized::Known(Self::SubsWaveGunBoost),
+            "subsFourthState" => Recognized::Known(Self::SubsFourthState),
+            "depthCharges" => Recognized::Known(Self::DepthCharges),
+            "trigger7" => Recognized::Known(Self::Trigger7),
+            "trigger8" => Recognized::Known(Self::Trigger8),
+            "trigger9" => Recognized::Known(Self::Trigger9),
+            "buff" => Recognized::Known(Self::Buff),
+            "buffsShift" => Recognized::Known(Self::BuffsShift),
+            "circleWave" => Recognized::Known(Self::CircleWave),
+            "goDeep" => Recognized::Known(Self::GoDeep),
+            "weaponReloadBooster" => Recognized::Known(Self::WeaponReloadBooster),
+            "hydrophone" => Recognized::Known(Self::Hydrophone),
+            "fastRudders" => Recognized::Known(Self::EnhancedRudders),
+            "subsEnergyFreeze" => Recognized::Known(Self::ReserveBattery),
+            "groupAuraBuff" => Recognized::Known(Self::GroupAuraBuff),
+            "affectedBuffAura" => Recognized::Known(Self::AffectedBuffAura),
+            "invisibilityExtraBuffConsumable" => Recognized::Known(Self::InvisibilityExtraBuff),
+            "submarineLocator" => Recognized::Known(Self::SubmarineSurveillance),
+            "planeSmokeGenerator" => Recognized::Known(Self::PlaneSmokeGenerator),
+            "minefield" => Recognized::Known(Self::Minefield),
+            "tacticalTrigger1" => Recognized::Known(Self::TacticalTrigger1),
+            "tacticalTrigger2" => Recognized::Known(Self::TacticalTrigger2),
+            "tacticalTrigger3" => Recognized::Known(Self::TacticalTrigger3),
+            "tacticalTrigger4" => Recognized::Known(Self::TacticalTrigger4),
+            "tacticalTrigger5" => Recognized::Known(Self::TacticalTrigger5),
+            "tacticalTrigger6" => Recognized::Known(Self::TacticalTrigger6),
+            "reconnaissanceSquad" => Recognized::Known(Self::ReconnaissanceSquad),
+            "smokePlane" => Recognized::Known(Self::SmokePlane),
+            "tacticalBuff" => Recognized::Known(Self::TacticalBuff),
+            "planeTrigger1" => Recognized::Known(Self::PlaneTrigger1),
+            "planeTrigger2" => Recognized::Known(Self::PlaneTrigger2),
+            "planeTrigger3" => Recognized::Known(Self::PlaneTrigger3),
+            "planeBuff" => Recognized::Known(Self::PlaneBuff),
+            "Any" => Recognized::Known(Self::Any),
+            "All" => Recognized::Known(Self::All),
+            "Special" => Recognized::Known(Self::Special),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::DamageControl => "crashCrew",
+            Self::SpottingAircraft => "scout",
+            Self::DefensiveAntiAircraft => "airDefenseDisp",
+            Self::SpeedBoost => "speedBoosters",
+            Self::MainBatteryReloadBooster => "artilleryBoosters",
+            Self::Smoke => "smokeGenerator",
+            Self::RepairParty => "regenCrew",
+            Self::CatapultFighter => "fighter",
+            Self::HydroacousticSearch => "sonar",
+            Self::TorpedoReloadBooster => "torpedoReloader",
+            Self::Radar => "rls",
+            Self::Trigger1 => "trigger1",
+            Self::Trigger2 => "trigger2",
+            Self::Trigger3 => "trigger3",
+            Self::Trigger4 => "trigger4",
+            Self::Trigger5 => "trigger5",
+            Self::Trigger6 => "trigger6",
+            Self::Invulnerable => "invulnerable",
+            Self::HealForsage => "healForsage",
+            Self::CallFighters => "callFighters",
+            Self::RegenerateHealth => "regenerateHealth",
+            Self::SubsOxygenRegen => "subsOxygenRegen",
+            Self::SubsWaveGunBoost => "subsWaveGunBoost",
+            Self::SubsFourthState => "subsFourthState",
+            Self::DepthCharges => "depthCharges",
+            Self::Trigger7 => "trigger7",
+            Self::Trigger8 => "trigger8",
+            Self::Trigger9 => "trigger9",
+            Self::Buff => "buff",
+            Self::BuffsShift => "buffsShift",
+            Self::CircleWave => "circleWave",
+            Self::GoDeep => "goDeep",
+            Self::WeaponReloadBooster => "weaponReloadBooster",
+            Self::Hydrophone => "hydrophone",
+            Self::EnhancedRudders => "fastRudders",
+            Self::ReserveBattery => "subsEnergyFreeze",
+            Self::GroupAuraBuff => "groupAuraBuff",
+            Self::AffectedBuffAura => "affectedBuffAura",
+            Self::InvisibilityExtraBuff => "invisibilityExtraBuffConsumable",
+            Self::SubmarineSurveillance => "submarineLocator",
+            Self::PlaneSmokeGenerator => "planeSmokeGenerator",
+            Self::Minefield => "minefield",
+            Self::TacticalTrigger1 => "tacticalTrigger1",
+            Self::TacticalTrigger2 => "tacticalTrigger2",
+            Self::TacticalTrigger3 => "tacticalTrigger3",
+            Self::TacticalTrigger4 => "tacticalTrigger4",
+            Self::TacticalTrigger5 => "tacticalTrigger5",
+            Self::TacticalTrigger6 => "tacticalTrigger6",
+            Self::ReconnaissanceSquad => "reconnaissanceSquad",
+            Self::SmokePlane => "smokePlane",
+            Self::TacticalBuff => "tacticalBuff",
+            Self::PlaneTrigger1 => "planeTrigger1",
+            Self::PlaneTrigger2 => "planeTrigger2",
+            Self::PlaneTrigger3 => "planeTrigger3",
+            Self::PlaneBuff => "planeBuff",
+            Self::Any => "Any",
+            Self::All => "All",
+            Self::Special => "Special",
         }
     }
 }
 
 /// Camera view mode, from `CAMERA_MODES` in game constants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -644,32 +843,126 @@ pub enum CameraMode {
     DockLootbox,
     DockNavalFlag,
     IdleGame,
-    Unknown(u32),
-    UnknownName(String),
 }
 
 impl CameraMode {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .camera_mode(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "AIRPLANES" => CameraMode::Airplanes,
-            "DOCK" => CameraMode::Dock,
-            "TACTICALMAP" => CameraMode::OverheadMap,
-            "DEVFREE" => CameraMode::DevFree,
-            "SHELLTRACKER" => CameraMode::FollowingShells,
-            "PLANETRACKER" => CameraMode::FollowingPlanes,
-            "DOCKMODULE" => CameraMode::DockModule,
-            "SNAKETAIL" => CameraMode::FollowingShip,
-            "SPECTATOR" => CameraMode::FreeFlying,
-            "REPLAY_FPC" => CameraMode::ReplayFpc,
-            "UNDERWATER" => CameraMode::FollowingSubmarine,
-            "TACTICAL_CONSUMABLES" => CameraMode::TacticalConsumables,
-            "RESPAWN_MAP" => CameraMode::RespawnMap,
-            "DOCKFLAGS" => CameraMode::DockFlags,
-            "DOCKENSIGN" => CameraMode::DockEnsign,
-            "DOCKLOOTBOX" => CameraMode::DockLootbox,
-            "DOCKNAVALFLAG" => CameraMode::DockNavalFlag,
-            "IDLEGAME" => CameraMode::IdleGame,
-            other => CameraMode::UnknownName(other.to_string()),
+            "AIRPLANES" => Recognized::Known(CameraMode::Airplanes),
+            "DOCK" => Recognized::Known(CameraMode::Dock),
+            "TACTICALMAP" => Recognized::Known(CameraMode::OverheadMap),
+            "DEVFREE" => Recognized::Known(CameraMode::DevFree),
+            "SHELLTRACKER" => Recognized::Known(CameraMode::FollowingShells),
+            "PLANETRACKER" => Recognized::Known(CameraMode::FollowingPlanes),
+            "DOCKMODULE" => Recognized::Known(CameraMode::DockModule),
+            "SNAKETAIL" => Recognized::Known(CameraMode::FollowingShip),
+            "SPECTATOR" => Recognized::Known(CameraMode::FreeFlying),
+            "REPLAY_FPC" => Recognized::Known(CameraMode::ReplayFpc),
+            "UNDERWATER" => Recognized::Known(CameraMode::FollowingSubmarine),
+            "TACTICAL_CONSUMABLES" => Recognized::Known(CameraMode::TacticalConsumables),
+            "RESPAWN_MAP" => Recognized::Known(CameraMode::RespawnMap),
+            "DOCKFLAGS" => Recognized::Known(CameraMode::DockFlags),
+            "DOCKENSIGN" => Recognized::Known(CameraMode::DockEnsign),
+            "DOCKLOOTBOX" => Recognized::Known(CameraMode::DockLootbox),
+            "DOCKNAVALFLAG" => Recognized::Known(CameraMode::DockNavalFlag),
+            "IDLEGAME" => Recognized::Known(CameraMode::IdleGame),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            CameraMode::Airplanes => "AIRPLANES",
+            CameraMode::Dock => "DOCK",
+            CameraMode::OverheadMap => "TACTICALMAP",
+            CameraMode::DevFree => "DEVFREE",
+            CameraMode::FollowingShells => "SHELLTRACKER",
+            CameraMode::FollowingPlanes => "PLANETRACKER",
+            CameraMode::DockModule => "DOCKMODULE",
+            CameraMode::FollowingShip => "SNAKETAIL",
+            CameraMode::FreeFlying => "SPECTATOR",
+            CameraMode::ReplayFpc => "REPLAY_FPC",
+            CameraMode::FollowingSubmarine => "UNDERWATER",
+            CameraMode::TacticalConsumables => "TACTICAL_CONSUMABLES",
+            CameraMode::RespawnMap => "RESPAWN_MAP",
+            CameraMode::DockFlags => "DOCKFLAGS",
+            CameraMode::DockEnsign => "DOCKENSIGN",
+            CameraMode::DockLootbox => "DOCKLOOTBOX",
+            CameraMode::DockNavalFlag => "DOCKNAVALFLAG",
+            CameraMode::IdleGame => "IDLEGAME",
+        }
+    }
+}
+
+/// What stage a battle is in
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum BattleStage {
+    Waiting,
+    Battle,
+    Ended,
+    Results,
+    Finishing,
+}
+
+impl BattleStage {
+    pub fn is_not_started(&self) -> bool {
+        matches!(self, Self::Waiting)
+    }
+
+    pub fn is_not_ended(&self) -> bool {
+        matches!(
+            self,
+            Self::Waiting | Self::Battle | Self::Results | Self::Finishing
+        )
+    }
+
+    pub fn is_in_battle(&self) -> bool {
+        matches!(self, Self::Battle | Self::Results)
+    }
+
+    pub fn is_not_finished(&self) -> bool {
+        matches!(self, Self::Waiting | Self::Battle | Self::Results)
+    }
+
+    pub fn is_without_results(&self) -> bool {
+        matches!(self, Self::Waiting | Self::Battle)
+    }
+}
+
+impl BattleStage {
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
+        match name {
+            "WAITING" => Recognized::Known(Self::Waiting),
+            "BATTLE" => Recognized::Known(Self::Battle),
+            "RESULTS" => Recognized::Known(Self::Results),
+            "FINISHING" => Recognized::Known(Self::Finishing),
+            "ENDED" => Recognized::Known(Self::Ended),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            BattleStage::Waiting => "WAITING",
+            BattleStage::Battle => "BATTLE",
+            BattleStage::Results => "RESULTS",
+            BattleStage::Finishing => "FINISHING",
+            BattleStage::Ended => "ENDED",
         }
     }
 }
@@ -694,47 +987,55 @@ pub enum FinishType {
     PveMainTaskFailed,
     ScoreZero,
     ScoreExcess,
-    Other(u8),
 }
 
 impl FinishType {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .finish_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "UNKNOWN" => FinishType::Unknown,
-            "EXTERMINATION" => FinishType::Extermination,
-            "BASE" => FinishType::BaseCaptured,
-            "TIMEOUT" => FinishType::Timeout,
-            "FAILURE" => FinishType::Failure,
-            "TECHNICAL" => FinishType::Technical,
-            "SCORE" => FinishType::Score,
-            "SCORE_ON_TIMEOUT" => FinishType::ScoreOnTimeout,
-            "PVE_MAIN_TASK_SUCCEEDED" => FinishType::PveMainTaskSucceeded,
-            "PVE_MAIN_TASK_FAILED" => FinishType::PveMainTaskFailed,
-            "SCORE_ZERO" => FinishType::ScoreZero,
-            "SCORE_EXCESS" => FinishType::ScoreExcess,
-            _ => FinishType::Unknown,
+            "UNKNOWN" => Recognized::Known(FinishType::Unknown),
+            "EXTERMINATION" => Recognized::Known(FinishType::Extermination),
+            "BASE" => Recognized::Known(FinishType::BaseCaptured),
+            "TIMEOUT" => Recognized::Known(FinishType::Timeout),
+            "FAILURE" => Recognized::Known(FinishType::Failure),
+            "TECHNICAL" => Recognized::Known(FinishType::Technical),
+            "SCORE" => Recognized::Known(FinishType::Score),
+            "SCORE_ON_TIMEOUT" => Recognized::Known(FinishType::ScoreOnTimeout),
+            "PVE_MAIN_TASK_SUCCEEDED" => Recognized::Known(FinishType::PveMainTaskSucceeded),
+            "PVE_MAIN_TASK_FAILED" => Recognized::Known(FinishType::PveMainTaskFailed),
+            "SCORE_ZERO" => Recognized::Known(FinishType::ScoreZero),
+            "SCORE_EXCESS" => Recognized::Known(FinishType::ScoreExcess),
+            other => Recognized::Unknown(other.to_string()),
         }
     }
 
-    pub fn from_id(id: u8) -> Self {
-        match id {
-            0 => FinishType::Unknown,
-            1 => FinishType::Extermination,
-            2 => FinishType::BaseCaptured,
-            3 => FinishType::Timeout,
-            4 => FinishType::Failure,
-            5 => FinishType::Technical,
-            8 => FinishType::Score,
-            9 => FinishType::ScoreOnTimeout,
-            10 => FinishType::PveMainTaskSucceeded,
-            11 => FinishType::PveMainTaskFailed,
-            12 => FinishType::ScoreZero,
-            13 => FinishType::ScoreExcess,
-            other => FinishType::Other(other),
+    pub const fn name(&self) -> &'static str {
+        match self {
+            FinishType::Unknown => "UNKNOWN",
+            FinishType::Extermination => "EXTERMINATION",
+            FinishType::BaseCaptured => "BASE",
+            FinishType::Timeout => "TIMEOUT",
+            FinishType::Failure => "FAILURE",
+            FinishType::Technical => "TECHNICAL",
+            FinishType::Score => "SCORE",
+            FinishType::ScoreOnTimeout => "SCORE_ON_TIMEOUT",
+            FinishType::PveMainTaskSucceeded => "PVE_MAIN_TASK_SUCCEEDED",
+            FinishType::PveMainTaskFailed => "PVE_MAIN_TASK_FAILED",
+            FinishType::ScoreZero => "SCORE_ZERO",
+            FinishType::ScoreExcess => "SCORE_EXCESS",
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             FinishType::Unknown => "Unknown",
             FinishType::Extermination => "Extermination",
@@ -748,14 +1049,13 @@ impl FinishType {
             FinishType::PveMainTaskFailed => "PvE Main Task Failed",
             FinishType::ScoreZero => "Score Zero",
             FinishType::ScoreExcess => "Score Excess",
-            FinishType::Other(_) => "Other",
         }
     }
 }
 
 impl fmt::Display for FinishType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.description())
     }
 }
 
@@ -772,40 +1072,47 @@ pub enum DepthState {
     Periscope,
     Working,
     Invulnerable,
-    Other(u8),
 }
 
 impl DepthState {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .depth_state(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "INVALID_STATE" => DepthState::Invalid,
-            "SURFACE" => DepthState::Surface,
-            "PERISCOPE" => DepthState::Periscope,
-            "WORKING" => DepthState::Working,
-            "INVULNERABLE" => DepthState::Invulnerable,
-            _ => DepthState::Other(0),
+            "INVALID_STATE" => Recognized::Known(DepthState::Invalid),
+            "SURFACE" => Recognized::Known(DepthState::Surface),
+            "PERISCOPE" => Recognized::Known(DepthState::Periscope),
+            "WORKING" => Recognized::Known(DepthState::Working),
+            "INVULNERABLE" => Recognized::Known(DepthState::Invulnerable),
+            other => Recognized::Unknown(other.to_string()),
         }
     }
 
-    pub fn from_id(id: u8) -> Self {
-        match id {
-            0 => DepthState::Surface,
-            1 => DepthState::Periscope,
-            2 => DepthState::Working,
-            3 => DepthState::Invulnerable,
-            0xFF => DepthState::Invalid,
-            other => DepthState::Other(other),
+    pub const fn name(&self) -> &'static str {
+        match self {
+            DepthState::Invalid => "INVALID_STATE",
+            DepthState::Surface => "SURFACE",
+            DepthState::Periscope => "PERISCOPE",
+            DepthState::Working => "WORKING",
+            DepthState::Invulnerable => "INVULNERABLE",
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             DepthState::Invalid => "Invalid",
             DepthState::Surface => "Surface",
             DepthState::Periscope => "Periscope",
             DepthState::Working => "Operating Depth",
             DepthState::Invulnerable => "Deep Dive",
-            DepthState::Other(_) => "Other",
         }
     }
 }
@@ -818,7 +1125,7 @@ impl Default for DepthState {
 
 impl fmt::Display for DepthState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.description())
     }
 }
 
@@ -835,40 +1142,47 @@ pub enum WeaponType {
     Torpedoes,
     Planes,
     Pinger,
-    Other(u32),
 }
 
 impl WeaponType {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &ShipsConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .weapon_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "ARTILLERY" => WeaponType::Artillery,
-            "ATBA" => WeaponType::Secondaries,
-            "TORPEDO" => WeaponType::Torpedoes,
-            "AIRPLANES" => WeaponType::Planes,
-            "PINGER" => WeaponType::Pinger,
-            _ => WeaponType::Other(0),
+            "ARTILLERY" => Recognized::Known(WeaponType::Artillery),
+            "ATBA" => Recognized::Known(WeaponType::Secondaries),
+            "TORPEDO" => Recognized::Known(WeaponType::Torpedoes),
+            "AIRPLANES" => Recognized::Known(WeaponType::Planes),
+            "PINGER" => Recognized::Known(WeaponType::Pinger),
+            other => Recognized::Unknown(other.to_string()),
         }
     }
 
-    pub fn from_id(id: u32) -> Self {
-        match id {
-            0 => WeaponType::Artillery,
-            1 => WeaponType::Secondaries,
-            2 => WeaponType::Torpedoes,
-            3 => WeaponType::Planes,
-            4 => WeaponType::Pinger,
-            other => WeaponType::Other(other),
+    pub const fn name(&self) -> &'static str {
+        match self {
+            WeaponType::Artillery => "ARTILLERY",
+            WeaponType::Secondaries => "ATBA",
+            WeaponType::Torpedoes => "TORPEDO",
+            WeaponType::Planes => "AIRPLANES",
+            WeaponType::Pinger => "PINGER",
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             WeaponType::Artillery => "Main Battery",
             WeaponType::Secondaries => "Secondaries",
             WeaponType::Torpedoes => "Torpedoes",
             WeaponType::Planes => "Planes",
             WeaponType::Pinger => "Sonar",
-            WeaponType::Other(_) => "Other",
         }
     }
 }
@@ -881,7 +1195,7 @@ impl Default for WeaponType {
 
 impl fmt::Display for WeaponType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.description())
     }
 }
 
@@ -901,39 +1215,47 @@ pub enum BatteryState {
     BrokenIdle,
     Regeneration,
     Empty,
-    Other(u8),
 }
 
 impl BatteryState {
-    pub fn from_name(name: &str) -> Self {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .battery_state(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "IDLE" => BatteryState::Idle,
-            "CHARGING" => BatteryState::Charging,
-            "DISCHARGING" => BatteryState::Discharging,
-            "CRITICAL_DISCHARGING" => BatteryState::CriticalDischarging,
-            "BROKEN_CHARGING" => BatteryState::BrokenCharging,
-            "BROKEN_IDLE" => BatteryState::BrokenIdle,
-            "REGENERATION" => BatteryState::Regeneration,
-            "EMPTY" => BatteryState::Empty,
-            _ => BatteryState::Other(0),
+            "IDLE" => Recognized::Known(BatteryState::Idle),
+            "CHARGING" => Recognized::Known(BatteryState::Charging),
+            "DISCHARGING" => Recognized::Known(BatteryState::Discharging),
+            "CRITICAL_DISCHARGING" => Recognized::Known(BatteryState::CriticalDischarging),
+            "BROKEN_CHARGING" => Recognized::Known(BatteryState::BrokenCharging),
+            "BROKEN_IDLE" => Recognized::Known(BatteryState::BrokenIdle),
+            "REGENERATION" => Recognized::Known(BatteryState::Regeneration),
+            "EMPTY" => Recognized::Known(BatteryState::Empty),
+            other => Recognized::Unknown(other.to_string()),
         }
     }
 
-    pub fn from_id(id: u8) -> Self {
-        match id {
-            0 => BatteryState::Idle,
-            1 => BatteryState::Charging,
-            2 => BatteryState::Discharging,
-            3 => BatteryState::CriticalDischarging,
-            4 => BatteryState::BrokenCharging,
-            5 => BatteryState::BrokenIdle,
-            6 => BatteryState::Regeneration,
-            7 => BatteryState::Empty,
-            other => BatteryState::Other(other),
+    pub const fn name(&self) -> &'static str {
+        match self {
+            BatteryState::Idle => "IDLE",
+            BatteryState::Charging => "CHARGING",
+            BatteryState::Discharging => "DISCHARGING",
+            BatteryState::CriticalDischarging => "CRITICAL_DISCHARGING",
+            BatteryState::BrokenCharging => "BROKEN_CHARGING",
+            BatteryState::BrokenIdle => "BROKEN_IDLE",
+            BatteryState::Regeneration => "REGENERATION",
+            BatteryState::Empty => "EMPTY",
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub const fn description(&self) -> &'static str {
         match self {
             BatteryState::Idle => "Idle",
             BatteryState::Charging => "Charging",
@@ -943,7 +1265,6 @@ impl BatteryState {
             BatteryState::BrokenIdle => "Broken Idle",
             BatteryState::Regeneration => "Regeneration",
             BatteryState::Empty => "Empty",
-            BatteryState::Other(_) => "Other",
         }
     }
 }
@@ -956,7 +1277,7 @@ impl Default for BatteryState {
 
 impl fmt::Display for BatteryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.description())
     }
 }
 
@@ -983,28 +1304,27 @@ pub enum BattleType {
     Clan,
     Event,
     Brawl,
-    Unknown,
 }
 
 impl BattleType {
     /// Parse from the string value in replay metadata (e.g. `"RandomBattle"`).
-    pub fn from_value(s: &str) -> Self {
+    pub fn from_value(s: &str, _version: Version) -> Recognized<Self> {
         match s {
-            "StandartBattle" => Self::Standard,
-            "SingleBattle" => Self::Single,
-            "Study" => Self::Study,
-            "RandomBattle" => Self::Random,
-            "TrainingBattle" => Self::Training,
-            "CooperativeBattle" => Self::Cooperative,
-            "RankedBattle" => Self::Ranked,
-            "OldRankedBattle" => Self::OldRanked,
-            "TutorialBattle" => Self::IntroMission,
-            "ClubBattle" => Self::Club,
-            "PVEBattle" => Self::Pve,
-            "ClanBattle" => Self::Clan,
-            "EventBattle" => Self::Event,
-            "BrawlBattle" => Self::Brawl,
-            _ => Self::Unknown,
+            "StandartBattle" => Recognized::Known(Self::Standard),
+            "SingleBattle" => Recognized::Known(Self::Single),
+            "Study" => Recognized::Known(Self::Study),
+            "RandomBattle" => Recognized::Known(Self::Random),
+            "TrainingBattle" => Recognized::Known(Self::Training),
+            "CooperativeBattle" => Recognized::Known(Self::Cooperative),
+            "RankedBattle" => Recognized::Known(Self::Ranked),
+            "OldRankedBattle" => Recognized::Known(Self::OldRanked),
+            "TutorialBattle" => Recognized::Known(Self::IntroMission),
+            "ClubBattle" => Recognized::Known(Self::Club),
+            "PVEBattle" => Recognized::Known(Self::Pve),
+            "ClanBattle" => Recognized::Known(Self::Clan),
+            "EventBattle" => Recognized::Known(Self::Event),
+            "BrawlBattle" => Recognized::Known(Self::Brawl),
+            other => Recognized::Unknown(other.to_string()),
         }
     }
 
@@ -1013,30 +1333,28 @@ impl BattleType {
         matches!(self, Self::Clan)
     }
 
-    /// Human-readable name for display.
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            Self::Standard => "Standard",
-            Self::Single => "Single",
+            Self::Standard => "StandartBattle",
+            Self::Single => "SingleBattle",
             Self::Study => "Study",
-            Self::Random => "Random",
-            Self::Training => "Training",
-            Self::Cooperative => "Co-op",
-            Self::Ranked => "Ranked",
-            Self::OldRanked => "Ranked (Legacy)",
-            Self::IntroMission => "Intro Mission",
-            Self::Club => "Club",
-            Self::Pve => "PvE",
-            Self::Clan => "Clan Battle",
-            Self::Event => "Event",
-            Self::Brawl => "Brawl",
-            Self::Unknown => "Unknown",
+            Self::Random => "RandomBattle",
+            Self::Training => "TrainingBattle",
+            Self::Cooperative => "CooperativeBattle",
+            Self::Ranked => "RankedBattle",
+            Self::OldRanked => "OldRankedBattle",
+            Self::IntroMission => "TutorialBattle",
+            Self::Club => "ClubBattle",
+            Self::Pve => "PVEBattle",
+            Self::Clan => "ClanBattle",
+            Self::Event => "EventBattle",
+            Self::Brawl => "BrawlBattle",
         }
     }
 }
 
 impl fmt::Display for BattleType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.name())
     }
 }

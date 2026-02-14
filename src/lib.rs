@@ -2,16 +2,18 @@
 pub mod data;
 /// Error definitions
 pub mod error;
-/// Utilities for interacting with the `content/GameParams.data` file
-pub mod game_params;
-/// Utilities involving the game's RPC functions -- useful for parsing entity defs and RPC definitions.
-pub mod rpc;
 /// Constants parsed from the game's XML files in `res/gui/data/constants/`
 pub mod game_constants;
-/// Game concept types (entities, positions, enums) useful across WoWS tools.
-pub mod game_types;
 /// Utilities for loading game resources from a WoWS installation directory.
 pub mod game_data;
+/// Utilities for interacting with the `content/GameParams.data` file
+pub mod game_params;
+/// Game concept types (entities, positions, enums) useful across WoWS tools.
+pub mod game_types;
+/// Generic wrapper for values that may or may not match a known variant.
+pub mod recognized;
+/// Utilities involving the game's RPC functions -- useful for parsing entity defs and RPC definitions.
+pub mod rpc;
 
 #[cfg(feature = "arc")]
 pub type Rc<T> = std::sync::Arc<T>;

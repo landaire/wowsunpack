@@ -38,8 +38,6 @@ glob = { version = "0.3", optional = true }
 pickled = { version = "2.0.0-alpha3", features = ["variantly"] }
 nom = "7.0.0"
 variantly = "0.4"
-strum = "0.25"
-strum_macros = "0.25"
 roxmltree = "0.19"
 tracing = "0.1.40"
 itertools = "0.13.0"

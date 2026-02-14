@@ -70,7 +70,10 @@ pub struct RibbonTranslation {
 ///
 /// Tries `IDS_RIBBON_{key}` first, then falls back to `IDS_RIBBON_SUB{key}`.
 /// Returns `None` if no translation is found.
-pub fn translate_ribbon(key: &str, resource_loader: &dyn ResourceLoader) -> Option<RibbonTranslation> {
+pub fn translate_ribbon(
+    key: &str,
+    resource_loader: &dyn ResourceLoader,
+) -> Option<RibbonTranslation> {
     let primary_id = format!("IDS_RIBBON_{key}");
     let (display_name, is_subribbon) = resource_loader
         .localized_name_from_id(&primary_id)
@@ -136,10 +139,7 @@ pub fn translate_consumable(
     game_params_name: &str,
     resource_loader: &dyn ResourceLoader,
 ) -> Option<String> {
-    let id = format!(
-        "IDS_DOCK_CONSUME_TITLE_{}",
-        game_params_name.to_uppercase()
-    );
+    let id = format!("IDS_DOCK_CONSUME_TITLE_{}", game_params_name.to_uppercase());
     resource_loader.localized_name_from_id(&id)
 }
 
@@ -151,10 +151,9 @@ pub fn translate_consumable(
 ///
 /// e.g. `"gui/fla/minimap/ship_icons/minimap_destroyer.svg"`
 pub fn ship_class_icon_path(species: &crate::game_params::types::Species) -> String {
-    let name: &'static str = species.into();
     format!(
         "gui/fla/minimap/ship_icons/minimap_{}.svg",
-        name.to_ascii_lowercase()
+        species.name().to_ascii_lowercase()
     )
 }
 
