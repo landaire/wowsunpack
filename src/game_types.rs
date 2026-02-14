@@ -959,3 +959,84 @@ impl fmt::Display for BatteryState {
         write!(f, "{}", self.name())
     }
 }
+
+/// Battle type, mapped from `gameType` in replay metadata.
+/// Values come from the BATTLE_TYPES enum in `gui/data/constants/common.xml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum BattleType {
+    Standard,
+    Single,
+    Study,
+    Random,
+    Training,
+    Cooperative,
+    Ranked,
+    OldRanked,
+    IntroMission,
+    Club,
+    Pve,
+    Clan,
+    Event,
+    Brawl,
+    Unknown,
+}
+
+impl BattleType {
+    /// Parse from the string value in replay metadata (e.g. `"RandomBattle"`).
+    pub fn from_value(s: &str) -> Self {
+        match s {
+            "StandartBattle" => Self::Standard,
+            "SingleBattle" => Self::Single,
+            "Study" => Self::Study,
+            "RandomBattle" => Self::Random,
+            "TrainingBattle" => Self::Training,
+            "CooperativeBattle" => Self::Cooperative,
+            "RankedBattle" => Self::Ranked,
+            "OldRankedBattle" => Self::OldRanked,
+            "TutorialBattle" => Self::IntroMission,
+            "ClubBattle" => Self::Club,
+            "PVEBattle" => Self::Pve,
+            "ClanBattle" => Self::Clan,
+            "EventBattle" => Self::Event,
+            "BrawlBattle" => Self::Brawl,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether this battle type uses full-team divisions (no individual div coloring).
+    pub fn is_clan_battle(&self) -> bool {
+        matches!(self, Self::Clan)
+    }
+
+    /// Human-readable name for display.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Single => "Single",
+            Self::Study => "Study",
+            Self::Random => "Random",
+            Self::Training => "Training",
+            Self::Cooperative => "Co-op",
+            Self::Ranked => "Ranked",
+            Self::OldRanked => "Ranked (Legacy)",
+            Self::IntroMission => "Intro Mission",
+            Self::Club => "Club",
+            Self::Pve => "PvE",
+            Self::Clan => "Clan Battle",
+            Self::Event => "Event",
+            Self::Brawl => "Brawl",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl fmt::Display for BattleType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
