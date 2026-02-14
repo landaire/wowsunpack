@@ -2,7 +2,6 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
     path::Path,
-    str::FromStr,
     sync::Arc,
 };
 
@@ -845,9 +844,9 @@ impl GameMetadataProvider {
                             })
                         })
                         .and_then(|(nation, species, typ)| {
-                            let param_type = ParamType::from_str(typ.inner().as_str()).ok()?;
+                            let param_type = ParamType::from_name(typ.inner().as_str())?;
                             let nation = nation.inner().clone();
-                            let species = species.string_ref().and_then(|s| Species::from_str(s.inner().as_str()).ok());
+                            let species = species.string_ref().map(|s| Species::from_name(s.inner().as_str()));
 
                             let parsed_param_data = match param_type {
                                 ParamType::Ship => Some(ParamData::Vehicle(build_ship(&param_data))),
