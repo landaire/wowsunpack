@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::{Add, Mul, Sub};
 
 use derive_builder::Builder;
 use strum_macros::{EnumString, IntoStaticStr};
@@ -7,6 +8,221 @@ use variantly::Variantly;
 use crate::{Rc, data::ResourceLoader, game_types::GameParamId};
 
 use super::provider::GameMetadataProvider;
+
+/// Conversion factor: 1 BigWorld unit = 30 meters.
+const BW_TO_METERS: f32 = 30.0;
+
+/// Distance in meters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Meters(f32);
+
+/// Distance in BigWorld coordinate units (1 BW unit = 30 meters).
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct BigWorldDistance(f32);
+
+/// Distance in kilometers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Km(f32);
+
+// --- Construction ---
+
+impl From<f32> for Meters {
+    fn from(v: f32) -> Self {
+        Self(v)
+    }
+}
+impl From<i32> for Meters {
+    fn from(v: i32) -> Self {
+        Self(v as f32)
+    }
+}
+
+impl From<f32> for BigWorldDistance {
+    fn from(v: f32) -> Self {
+        Self(v)
+    }
+}
+impl From<i32> for BigWorldDistance {
+    fn from(v: i32) -> Self {
+        Self(v as f32)
+    }
+}
+
+impl From<f32> for Km {
+    fn from(v: f32) -> Self {
+        Self(v)
+    }
+}
+impl From<i32> for Km {
+    fn from(v: i32) -> Self {
+        Self(v as f32)
+    }
+}
+
+// --- Read access and unit conversions ---
+
+impl Meters {
+    pub fn value(self) -> f32 {
+        self.0
+    }
+    pub fn to_bigworld(self) -> BigWorldDistance {
+        BigWorldDistance(self.0 / BW_TO_METERS)
+    }
+    pub fn to_km(self) -> Km {
+        Km(self.0 / 1000.0)
+    }
+}
+
+impl BigWorldDistance {
+    pub fn value(self) -> f32 {
+        self.0
+    }
+    pub fn to_meters(self) -> Meters {
+        Meters(self.0 * BW_TO_METERS)
+    }
+}
+
+impl Km {
+    pub fn value(self) -> f32 {
+        self.0
+    }
+    pub fn to_meters(self) -> Meters {
+        Meters(self.0 * 1000.0)
+    }
+}
+
+// --- Scalar multiplication (dimensionless coefficients) ---
+
+impl Mul<f32> for Meters {
+    type Output = Meters;
+    fn mul(self, rhs: f32) -> Meters {
+        Meters(self.0 * rhs)
+    }
+}
+
+impl Mul<f32> for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn mul(self, rhs: f32) -> BigWorldDistance {
+        BigWorldDistance(self.0 * rhs)
+    }
+}
+
+impl Mul<f32> for Km {
+    type Output = Km;
+    fn mul(self, rhs: f32) -> Km {
+        Km(self.0 * rhs)
+    }
+}
+
+// --- Same-type arithmetic ---
+
+impl Add for Meters {
+    type Output = Meters;
+    fn add(self, rhs: Meters) -> Meters {
+        Meters(self.0 + rhs.0)
+    }
+}
+impl Sub for Meters {
+    type Output = Meters;
+    fn sub(self, rhs: Meters) -> Meters {
+        Meters(self.0 - rhs.0)
+    }
+}
+
+impl Add for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn add(self, rhs: BigWorldDistance) -> BigWorldDistance {
+        BigWorldDistance(self.0 + rhs.0)
+    }
+}
+impl Sub for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn sub(self, rhs: BigWorldDistance) -> BigWorldDistance {
+        BigWorldDistance(self.0 - rhs.0)
+    }
+}
+
+impl Add for Km {
+    type Output = Km;
+    fn add(self, rhs: Km) -> Km {
+        Km(self.0 + rhs.0)
+    }
+}
+impl Sub for Km {
+    type Output = Km;
+    fn sub(self, rhs: Km) -> Km {
+        Km(self.0 - rhs.0)
+    }
+}
+
+// --- Cross-type arithmetic (converts RHS to LHS unit, returns LHS type) ---
+
+impl Add<BigWorldDistance> for Meters {
+    type Output = Meters;
+    fn add(self, rhs: BigWorldDistance) -> Meters {
+        Meters(self.0 + rhs.to_meters().0)
+    }
+}
+impl Sub<BigWorldDistance> for Meters {
+    type Output = Meters;
+    fn sub(self, rhs: BigWorldDistance) -> Meters {
+        Meters(self.0 - rhs.to_meters().0)
+    }
+}
+
+impl Add<Meters> for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn add(self, rhs: Meters) -> BigWorldDistance {
+        BigWorldDistance(self.0 + rhs.to_bigworld().0)
+    }
+}
+impl Sub<Meters> for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn sub(self, rhs: Meters) -> BigWorldDistance {
+        BigWorldDistance(self.0 - rhs.to_bigworld().0)
+    }
+}
+
+impl Add<Km> for Meters {
+    type Output = Meters;
+    fn add(self, rhs: Km) -> Meters {
+        Meters(self.0 + rhs.to_meters().0)
+    }
+}
+impl Sub<Km> for Meters {
+    type Output = Meters;
+    fn sub(self, rhs: Km) -> Meters {
+        Meters(self.0 - rhs.to_meters().0)
+    }
+}
+
+impl Add<Meters> for Km {
+    type Output = Km;
+    fn add(self, rhs: Meters) -> Km {
+        Km(self.0 + rhs.to_km().0)
+    }
+}
+impl Sub<Meters> for Km {
+    type Output = Km;
+    fn sub(self, rhs: Meters) -> Km {
+        Km(self.0 - rhs.to_km().0)
+    }
+}
 
 #[derive(
     EnumString, Clone, Debug, Variantly, IntoStaticStr, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -274,13 +490,13 @@ pub enum ParamType {
 )]
 pub struct HullUpgradeConfig {
     /// Sea detection range in km.
-    pub detection_km: f32,
+    pub detection_km: Km,
     /// Air detection range in km.
-    pub air_detection_km: f32,
+    pub air_detection_km: Km,
     /// Main battery max range in meters (from the artillery component tied to this hull).
-    pub main_battery_m: Option<f32>,
+    pub main_battery_m: Option<Meters>,
     /// Secondary battery max range in meters (from the ATBA component tied to this hull).
-    pub secondary_battery_m: Option<f32>,
+    pub secondary_battery_m: Option<Meters>,
 }
 
 /// Ship configuration data extracted from GameParams.
@@ -304,17 +520,17 @@ pub struct ShipConfigData {
 #[derive(Clone, Debug, Default)]
 pub struct ShipRanges {
     /// Sea detection range in km.
-    pub detection_km: Option<f32>,
+    pub detection_km: Option<Km>,
     /// Air detection range in km.
-    pub air_detection_km: Option<f32>,
+    pub air_detection_km: Option<Km>,
     /// Main battery max range in meters.
-    pub main_battery_m: Option<f32>,
+    pub main_battery_m: Option<Meters>,
     /// Secondary battery max range in meters.
-    pub secondary_battery_m: Option<f32>,
-    /// Radar detection range in meters (converted from BigWorld units).
-    pub radar_m: Option<f32>,
-    /// Hydro detection range in meters (converted from BigWorld units).
-    pub hydro_m: Option<f32>,
+    pub secondary_battery_m: Option<Meters>,
+    /// Radar detection range in meters.
+    pub radar_m: Option<Meters>,
+    /// Hydro detection range in meters.
+    pub hydro_m: Option<Meters>,
 }
 
 
@@ -402,14 +618,10 @@ impl Vehicle {
                     };
                     match cat.consumable_type() {
                         Some(crate::game_types::Consumable::Radar) => {
-                            if let Some(dist) = cat.detection_radius() {
-                                ranges.radar_m = Some(dist * 30.0);
-                            }
+                            ranges.radar_m = cat.detection_radius();
                         }
                         Some(crate::game_types::Consumable::HydroacousticSearch) => {
-                            if let Some(dist) = cat.detection_radius() {
-                                ranges.hydro_m = Some(dist * 30.0);
-                            }
+                            ranges.hydro_m = cat.detection_radius();
                         }
                         _ => {}
                     }
@@ -438,18 +650,22 @@ pub struct AbilityCategory {
     reload_time: f32,
     title_id: String,
     work_time: f32,
-    /// Detection radius for ships (radar, hydro, sublocator). BigWorld units (same as world coordinates).
+    /// Detection radius for ships (radar, hydro, sublocator). BigWorld units.
     #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
-    dist_ship: Option<f32>,
-    /// Detection radius for torpedoes (hydro only). BigWorld units (same as world coordinates).
+    dist_ship: Option<BigWorldDistance>,
+    /// Detection radius for torpedoes (hydro only). BigWorld units.
     #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
-    dist_torpedo: Option<f32>,
-    /// Hydrophone wave radius in meters (already in world units).
+    dist_torpedo: Option<BigWorldDistance>,
+    /// Hydrophone wave radius in meters.
     #[cfg_attr(feature = "serde", serde(default))]
     #[builder(default)]
-    hydrophone_wave_radius: Option<f32>,
+    hydrophone_wave_radius: Option<Meters>,
+    /// Fighter patrol radius. BigWorld units.
+    #[cfg_attr(feature = "serde", serde(default))]
+    #[builder(default)]
+    patrol_radius: Option<BigWorldDistance>,
 }
 
 impl AbilityCategory {
@@ -469,12 +685,24 @@ impl AbilityCategory {
         self.work_time
     }
 
-    /// Detection radius in BigWorld units.
+    /// Detection radius in meters.
     ///
-    /// Returns hydrophone_wave_radius if present, otherwise dist_ship directly.
-    /// Returns None if this consumable has no detection radius.
-    pub fn detection_radius(&self) -> Option<f32> {
-        self.hydrophone_wave_radius.or(self.dist_ship)
+    /// Returns hydrophone_wave_radius if present, otherwise converts dist_ship
+    /// from BigWorld units to meters. Returns None if this consumable has no
+    /// detection radius.
+    pub fn detection_radius(&self) -> Option<Meters> {
+        self.hydrophone_wave_radius
+            .or_else(|| self.dist_ship.map(|d| d.to_meters()))
+    }
+
+    /// Torpedo detection radius in meters.
+    pub fn torpedo_detection_radius(&self) -> Option<Meters> {
+        self.dist_torpedo.map(|d| d.to_meters())
+    }
+
+    /// Fighter patrol radius in meters.
+    pub fn patrol_radius(&self) -> Option<Meters> {
+        self.patrol_radius.map(|d| d.to_meters())
     }
 }
 

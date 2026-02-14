@@ -512,16 +512,25 @@ fn build_ability_category(
     let dist_ship = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("distShip".to_owned().into()))
             .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .map(BigWorldDistance::from)
     });
 
     let dist_torpedo = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("distTorpedo".to_owned().into()))
             .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .map(BigWorldDistance::from)
     });
 
     let hydrophone_wave_radius = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("hydrophoneWaveRadius".to_owned().into()))
             .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .map(Meters::from)
+    });
+
+    let patrol_radius = logic.as_ref().and_then(|l| {
+        l.get(&HashableValue::String("radius".to_owned().into()))
+            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .map(BigWorldDistance::from)
     });
 
     AbilityCategoryBuilder::default()
@@ -542,6 +551,7 @@ fn build_ability_category(
         .dist_ship(dist_ship)
         .dist_torpedo(dist_torpedo)
         .hydrophone_wave_radius(hydrophone_wave_radius)
+        .patrol_radius(patrol_radius)
         .build()
 }
 
@@ -699,8 +709,8 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 .and_then(|v| v.dict_ref())
             {
                 let hull_data = hull_data.inner();
-                config.detection_km = read_float(&*hull_data, "visibilityFactor").unwrap_or(0.0);
-                config.air_detection_km = read_float(&*hull_data, "visibilityFactorByPlane").unwrap_or(0.0);
+                config.detection_km = Km::from(read_float(&*hull_data, "visibilityFactor").unwrap_or(0.0));
+                config.air_detection_km = Km::from(read_float(&*hull_data, "visibilityFactorByPlane").unwrap_or(0.0));
             }
         }
 
@@ -713,7 +723,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 .get(&HashableValue::String(art_comp.into()))
                 .and_then(|v| v.dict_ref())
             {
-                config.main_battery_m = read_float(&*art_data.inner(), "maxDist");
+                config.main_battery_m = read_float(&*art_data.inner(), "maxDist").map(Meters::from);
             }
         }
 
@@ -726,12 +736,12 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 .get(&HashableValue::String(atba_comp.into()))
                 .and_then(|v| v.dict_ref())
             {
-                config.secondary_battery_m = read_float(&*atba_data.inner(), "maxDist");
+                config.secondary_battery_m = read_float(&*atba_data.inner(), "maxDist").map(Meters::from);
             }
         }
 
         // Only store if we got meaningful data
-        if config.detection_km > 0.0 {
+        if config.detection_km.value() > 0.0 {
             hull_upgrades.insert(upgrade_name, config);
         }
     }
