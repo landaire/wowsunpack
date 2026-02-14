@@ -449,6 +449,142 @@ impl BattleConstants {
     pub fn torpedo_marker_type(&self, id: i32) -> Option<&str> {
         self.torpedo_marker_types.get(&id).map(|s| s.as_str())
     }
+
+    pub fn camera_modes_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.camera_modes
+    }
+
+    pub fn death_reasons_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.death_reasons
+    }
+
+    pub fn game_modes_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.game_modes
+    }
+
+    pub fn battle_results_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.battle_results
+    }
+
+    pub fn player_relations_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.player_relations
+    }
+
+    pub fn damage_modules_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.damage_modules
+    }
+
+    pub fn finish_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.finish_types
+    }
+
+    pub fn consumable_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.consumable_states
+    }
+
+    pub fn planes_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.planes_types
+    }
+
+    pub fn diplomacy_relations_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.diplomacy_relations
+    }
+
+    pub fn modules_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.modules_states
+    }
+
+    pub fn entity_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.entity_types
+    }
+
+    pub fn entity_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.entity_states
+    }
+
+    pub fn battery_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.battery_states
+    }
+
+    pub fn depth_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.depth_states
+    }
+
+    pub fn building_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.building_types
+    }
+
+    pub fn torpedo_marker_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.torpedo_marker_types
+    }
+
+    pub fn camera_modes(&self) -> &HashMap<i32, String> {
+        &self.camera_modes
+    }
+
+    pub fn death_reasons(&self) -> &HashMap<i32, String> {
+        &self.death_reasons
+    }
+
+    pub fn game_modes(&self) -> &HashMap<i32, String> {
+        &self.game_modes
+    }
+
+    pub fn battle_results(&self) -> &HashMap<i32, String> {
+        &self.battle_results
+    }
+
+    pub fn player_relations(&self) -> &HashMap<i32, String> {
+        &self.player_relations
+    }
+
+    pub fn damage_modules(&self) -> &HashMap<i32, String> {
+        &self.damage_modules
+    }
+
+    pub fn finish_types(&self) -> &HashMap<i32, String> {
+        &self.finish_types
+    }
+
+    pub fn consumable_states(&self) -> &HashMap<i32, String> {
+        &self.consumable_states
+    }
+
+    pub fn planes_types(&self) -> &HashMap<i32, String> {
+        &self.planes_types
+    }
+
+    pub fn diplomacy_relations(&self) -> &HashMap<i32, String> {
+        &self.diplomacy_relations
+    }
+
+    pub fn modules_states(&self) -> &HashMap<i32, String> {
+        &self.modules_states
+    }
+
+    pub fn entity_types(&self) -> &HashMap<i32, String> {
+        &self.entity_types
+    }
+
+    pub fn entity_states(&self) -> &HashMap<i32, String> {
+        &self.entity_states
+    }
+
+    pub fn battery_states(&self) -> &HashMap<i32, String> {
+        &self.battery_states
+    }
+
+    pub fn depth_states(&self) -> &HashMap<i32, String> {
+        &self.depth_states
+    }
+
+    pub fn building_types(&self) -> &HashMap<i32, String> {
+        &self.building_types
+    }
+
+    pub fn torpedo_marker_types(&self) -> &HashMap<i32, String> {
+        &self.torpedo_marker_types
+    }
 }
 
 /// Constants parsed from `gui/data/constants/ships.xml`.
@@ -537,6 +673,22 @@ impl ShipsConstants {
     pub fn module_type(&self, id: i32) -> Option<&str> {
         self.module_types.get(&id).map(|s| s.as_str())
     }
+
+    pub fn weapon_types(&self) -> &HashMap<i32, String> {
+        &self.weapon_types
+    }
+
+    pub fn module_types(&self) -> &HashMap<i32, String> {
+        &self.module_types
+    }
+
+    pub fn weapon_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.weapon_types
+    }
+
+    pub fn module_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.module_types
+    }
 }
 
 /// Constants parsed from `gui/data/constants/weapons.xml`.
@@ -593,6 +745,14 @@ impl WeaponsConstants {
 
     pub fn gun_state(&self, id: i32) -> Option<&str> {
         self.gun_states.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn gun_states(&self) -> &HashMap<i32, String> {
+        &self.gun_states
+    }
+
+    pub fn gun_states_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.gun_states
     }
 }
 
@@ -676,6 +836,32 @@ impl CommonConstants {
     pub fn consumable_type(&self, id: i32) -> Option<&crate::game_types::Consumable> {
         self.consumable_types.as_ref()?.get(&id)
     }
+
+    pub fn plane_ammo_types(&self) -> &HashMap<i32, String> {
+        &self.plane_ammo_types
+    }
+
+    pub fn torpedo_types(&self) -> &HashMap<i32, String> {
+        &self.torpedo_types
+    }
+
+    pub fn consumable_types(&self) -> Option<&HashMap<i32, crate::game_types::Consumable>> {
+        self.consumable_types.as_ref()
+    }
+
+    pub fn plane_ammo_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.plane_ammo_types
+    }
+
+    pub fn torpedo_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.torpedo_types
+    }
+
+    pub fn consumable_types_mut(
+        &mut self,
+    ) -> &mut Option<HashMap<i32, crate::game_types::Consumable>> {
+        &mut self.consumable_types
+    }
 }
 
 /// Constants parsed from `gui/data/constants/channel.xml`.
@@ -743,6 +929,22 @@ impl ChannelConstants {
 
     pub fn channel_type_ident(&self, id: i32) -> Option<&str> {
         self.channel_type_idents.get(&id).map(|s| s.as_str())
+    }
+
+    pub fn battle_chat_channel_types(&self) -> &HashMap<i32, String> {
+        &self.battle_chat_channel_types
+    }
+
+    pub fn channel_type_idents(&self) -> &HashMap<i32, String> {
+        &self.channel_type_idents
+    }
+
+    pub fn battle_chat_channel_types_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.battle_chat_channel_types
+    }
+
+    pub fn channel_type_idents_mut(&mut self) -> &mut HashMap<i32, String> {
+        &mut self.channel_type_idents
     }
 }
 
