@@ -12,11 +12,12 @@ use itertools::Itertools;
 use pickled::{HashableValue, Value};
 use tracing::debug;
 
-use crate::{game_types::GameParamId,
+use crate::{
     Rc,
     data::{DataFileWithCallback, ResourceLoader, idx::FileNode, pkg::PkgFileLoader},
     error::ErrorKind,
     game_params::convert::game_params_to_pickle,
+    game_types::GameParamId,
     rpc::entitydefs::{EntitySpec, parse_scripts},
 };
 
@@ -175,9 +176,7 @@ macro_rules! game_param_to_type {
 
 /// TODO: Too many unpredictable schema differences >:(
 /// Need to just create structs for everything.
-fn build_skill_modifiers(
-    modifiers: &BTreeMap<HashableValue, Value>,
-) -> Result<Vec<CrewSkillModifier>, CrewSkillModifierBuilderError> {
+fn build_skill_modifiers(modifiers: &BTreeMap<HashableValue, Value>) -> Vec<CrewSkillModifier> {
     modifiers
         .iter()
         .filter_map(|(modifier_name, modifier_data)| {
@@ -190,7 +189,7 @@ fn build_skill_modifiers(
 
             let modifier = if let Some(common_value) = modifier_data.i64_ref().cloned() {
                 let common_value = common_value as f32;
-                CrewSkillModifierBuilder::default()
+                CrewSkillModifier::builder()
                     .aircraft_carrier(common_value)
                     .auxiliary(common_value)
                     .battleship(common_value)
@@ -201,7 +200,7 @@ fn build_skill_modifiers(
                     .build()
             } else if let Some(common_value) = modifier_data.f64_ref().cloned() {
                 let common_value = common_value as f32;
-                CrewSkillModifierBuilder::default()
+                CrewSkillModifier::builder()
                     .aircraft_carrier(common_value)
                     .auxiliary(common_value)
                     .battleship(common_value)
@@ -214,8 +213,8 @@ fn build_skill_modifiers(
                 let modifier_data = modifier_data.inner();
 
                 // Skip dicts that aren't per-species modifier dicts
-                let Some(_) = modifier_data
-                    .get(&HashableValue::String("AirCarrier".to_owned().into()))
+                let Some(_) =
+                    modifier_data.get(&HashableValue::String("AirCarrier".to_owned().into()))
                 else {
                     return None;
                 };
@@ -231,7 +230,7 @@ fn build_skill_modifiers(
                         .unwrap_or(1.0)
                 };
 
-                CrewSkillModifierBuilder::default()
+                CrewSkillModifier::builder()
                     .aircraft_carrier(read_species("AirCarrier"))
                     .auxiliary(read_species("Auxiliary"))
                     .battleship(read_species("Battleship"))
@@ -250,9 +249,7 @@ fn build_skill_modifiers(
         .collect()
 }
 
-fn build_crew_skills(
-    skills: &BTreeMap<HashableValue, Value>,
-) -> Result<Vec<CrewSkill>, CrewSkillBuilderError> {
+fn build_crew_skills(skills: &BTreeMap<HashableValue, Value>) -> Vec<CrewSkill> {
     skills
         .iter()
         .filter_map(|(hashable_skill_name, skill_data)| {
@@ -273,17 +270,16 @@ fn build_crew_skills(
             let logic_modifiers =
                 game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
 
-            let logic_modifiers = logic_modifiers.map(|modifiers| {
-                build_skill_modifiers(&modifiers.inner()).expect("failed to build logic modifiers")
-            });
+            let logic_modifiers =
+                logic_modifiers.map(|modifiers| build_skill_modifiers(&modifiers.inner()));
 
             let logic_trigger_data =
                 game_param_to_type!(skill_data, "LogicTrigger", Option<HashMap<(), ()>>);
 
             let logic_trigger = logic_trigger_data.map(|logic_trigger_data| {
                 let logic_trigger_data = logic_trigger_data.inner();
-                CrewSkillLogicTriggerBuilder::default()
-                    .burn_count(game_param_to_type!(
+                CrewSkillLogicTrigger::builder()
+                    .maybe_burn_count(game_param_to_type!(
                         logic_trigger_data,
                         "burnCount",
                         Option<usize>
@@ -300,30 +296,30 @@ fn build_crew_skills(
                     ))
                     .cooling_delay(game_param_to_type!(logic_trigger_data, "coolingDelay", f32))
                     .cooling_interpolator(Vec::default())
-                    .divider_type(game_param_to_type!(
+                    .maybe_divider_type(game_param_to_type!(
                         logic_trigger_data,
                         "dividerType",
                         Option<String>
                     ))
-                    .divider_value(game_param_to_type!(
+                    .maybe_divider_value(game_param_to_type!(
                         logic_trigger_data,
                         "dividerValue",
                         Option<f32>
                     ))
                     .duration(game_param_to_type!(logic_trigger_data, "duration", f32))
                     .energy_coeff(game_param_to_type!(logic_trigger_data, "energyCoeff", f32))
-                    .flood_count(game_param_to_type!(
+                    .maybe_flood_count(game_param_to_type!(
                         logic_trigger_data,
                         "floodCount",
                         Option<usize>
                     ))
-                    .health_factor(game_param_to_type!(
+                    .maybe_health_factor(game_param_to_type!(
                         logic_trigger_data,
                         "healthFactor",
                         Option<f32>
                     ))
                     .heat_interpolator(Vec::default())
-                    .modifiers(logic_modifiers)
+                    .maybe_modifiers(logic_modifiers)
                     .trigger_desc_ids(game_param_to_type!(
                         logic_trigger_data,
                         "triggerDescIds",
@@ -335,49 +331,43 @@ fn build_crew_skills(
                         String
                     ))
                     .build()
-                    .expect("failed to build logic trigger")
             });
 
             let modifiers = game_param_to_type!(skill_data, "modifiers", Option<HashMap<(), ()>>);
 
-            let modifiers = modifiers.map(|modifiers| {
-                build_skill_modifiers(&modifiers.inner()).expect("failed to build skill modifiers")
-            });
+            let modifiers = modifiers.map(|modifiers| build_skill_modifiers(&modifiers.inner()));
 
             let tier_data = game_param_to_type!(skill_data, "tier", HashMap<(), ()>);
             let tier_data = tier_data.inner();
-            let tier = CrewSkillTiersBuilder::default()
+            let tier = CrewSkillTiers::builder()
                 .aircraft_carrier(game_param_to_type!(tier_data, "AirCarrier", usize))
                 .auxiliary(game_param_to_type!(tier_data, "Auxiliary", usize))
                 .battleship(game_param_to_type!(tier_data, "Battleship", usize))
                 .cruiser(game_param_to_type!(tier_data, "Cruiser", usize))
                 .destroyer(game_param_to_type!(tier_data, "Destroyer", usize))
                 .submarine(game_param_to_type!(tier_data, "Submarine", usize))
-                .build()
-                .expect("failed to build skill tiers");
+                .build();
 
             Some(
-                CrewSkillBuilder::default()
+                CrewSkill::builder()
                     .internal_name(skill_name.to_owned())
                     .can_be_learned(game_param_to_type!(skill_data, "canBeLearned", bool))
                     .is_epic(game_param_to_type!(skill_data, "isEpic", bool))
                     .skill_type(game_param_to_type!(skill_data, "skillType", usize))
                     .ui_treat_as_trigger(game_param_to_type!(skill_data, "uiTreatAsTrigger", bool))
                     .tier(tier)
-                    .modifiers(modifiers)
-                    .logic_trigger(logic_trigger)
+                    .maybe_modifiers(modifiers)
+                    .maybe_logic_trigger(logic_trigger)
                     .build(),
             )
         })
         .collect()
 }
 
-fn build_crew_personality(
-    personality: &BTreeMap<HashableValue, Value>,
-) -> Result<CrewPersonality, CrewPersonalityBuilderError> {
+fn build_crew_personality(personality: &BTreeMap<HashableValue, Value>) -> CrewPersonality {
     let ships = game_param_to_type!(personality, "ships", HashMap<(), ()>);
     let ships = ships.inner();
-    let ships = CrewPersonalityShipsBuilder::default()
+    let ships = CrewPersonalityShips::builder()
         .groups(
             game_param_to_type!(ships, "groups", &[()])
                 .inner()
@@ -430,10 +420,9 @@ fn build_crew_personality(
                 })
                 .collect(),
         )
-        .build()
-        .expect("failed to build CrewPersonalityShips");
+        .build();
 
-    CrewPersonalityBuilder::default()
+    CrewPersonality::builder()
         .can_reset_skills_for_free(game_param_to_type!(
             personality,
             "canResetSkillsForFree",
@@ -476,9 +465,7 @@ fn build_crew_personality(
         .build()
 }
 
-fn build_ability_category(
-    category_data: &BTreeMap<HashableValue, Value>,
-) -> Result<AbilityCategory, AbilityCategoryBuilderError> {
+fn build_ability_category(category_data: &BTreeMap<HashableValue, Value>) -> AbilityCategory {
     let reload_time = if let Some(reload_time) =
         category_data.get(&HashableValue::String("reloadTime".to_owned().into()))
     {
@@ -511,30 +498,48 @@ fn build_ability_category(
 
     let dist_ship = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("distShip".to_owned().into()))
-            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .and_then(|v| {
+                v.f64_ref()
+                    .map(|f| *f as f32)
+                    .or_else(|| v.i64_ref().map(|i| *i as f32))
+            })
             .map(BigWorldDistance::from)
     });
 
     let dist_torpedo = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("distTorpedo".to_owned().into()))
-            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .and_then(|v| {
+                v.f64_ref()
+                    .map(|f| *f as f32)
+                    .or_else(|| v.i64_ref().map(|i| *i as f32))
+            })
             .map(BigWorldDistance::from)
     });
 
     let hydrophone_wave_radius = logic.as_ref().and_then(|l| {
-        l.get(&HashableValue::String("hydrophoneWaveRadius".to_owned().into()))
-            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
-            .map(Meters::from)
+        l.get(&HashableValue::String(
+            "hydrophoneWaveRadius".to_owned().into(),
+        ))
+        .and_then(|v| {
+            v.f64_ref()
+                .map(|f| *f as f32)
+                .or_else(|| v.i64_ref().map(|i| *i as f32))
+        })
+        .map(Meters::from)
     });
 
     let patrol_radius = logic.as_ref().and_then(|l| {
         l.get(&HashableValue::String("radius".to_owned().into()))
-            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .and_then(|v| {
+                v.f64_ref()
+                    .map(|f| *f as f32)
+                    .or_else(|| v.i64_ref().map(|i| *i as f32))
+            })
             .map(BigWorldDistance::from)
     });
 
-    AbilityCategoryBuilder::default()
-        .special_sound_id(game_param_to_type!(
+    AbilityCategory::builder()
+        .maybe_special_sound_id(game_param_to_type!(
             category_data,
             "SpecialSoundID",
             Option<String>
@@ -548,16 +553,14 @@ fn build_ability_category(
         .reload_time(reload_time)
         .title_id(game_param_to_type!(category_data, "titleIDs", String))
         .work_time(work_time)
-        .dist_ship(dist_ship)
-        .dist_torpedo(dist_torpedo)
-        .hydrophone_wave_radius(hydrophone_wave_radius)
-        .patrol_radius(patrol_radius)
+        .maybe_dist_ship(dist_ship)
+        .maybe_dist_torpedo(dist_torpedo)
+        .maybe_hydrophone_wave_radius(hydrophone_wave_radius)
+        .maybe_patrol_radius(patrol_radius)
         .build()
 }
 
-fn build_ability(
-    ability_data: &BTreeMap<HashableValue, Value>,
-) -> Result<Ability, AbilityBuilderError> {
+fn build_ability(ability_data: &BTreeMap<HashableValue, Value>) -> Ability {
     let test_key = HashableValue::String("numConsumables".to_string().into());
     let categories: HashMap<String, AbilityCategory> =
         HashMap::from_iter(ability_data.iter().filter_map(|(key, value)| {
@@ -569,14 +572,14 @@ fn build_ability(
             if value.contains_key(&test_key) {
                 Some((
                     key.string_ref().unwrap().inner().to_owned(),
-                    build_ability_category(&value).expect("failed to build ability category"),
+                    build_ability_category(&value),
                 ))
             } else {
                 None
             }
         }));
 
-    AbilityBuilder::default()
+    Ability::builder()
         .can_buy(game_param_to_type!(ability_data, "canBuy", bool))
         .cost_credits(game_param_to_type!(ability_data, "costCR", isize))
         .cost_gold(game_param_to_type!(ability_data, "costGold", isize))
@@ -585,7 +588,7 @@ fn build_ability(
         .build()
 }
 
-fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, VehicleBuilderError> {
+fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
     let ability_data = game_param_to_type!(ship_data, "ShipAbilities", Option<HashMap<(), ()>>);
     let abilities: Option<Vec<Vec<(String, String)>>> = ability_data.map(|abilities_data| {
         abilities_data
@@ -661,20 +664,29 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
     // Helper: read a float from a pickled dict, accepting both f64 and i64
     let read_float = |dict: &BTreeMap<HashableValue, Value>, key: &str| -> Option<f32> {
         dict.get(&HashableValue::String(key.to_string().into()))
-            .and_then(|v| v.f64_ref().map(|f| *f as f32).or_else(|| v.i64_ref().map(|i| *i as f32)))
+            .and_then(|v| {
+                v.f64_ref()
+                    .map(|f| *f as f32)
+                    .or_else(|| v.i64_ref().map(|i| *i as f32))
+            })
     };
 
     // Helper: extract first string from a pickled list value
     let read_first_string = |val: &Value| -> Option<String> {
         let list = val.list_ref()?;
         let inner = list.inner();
-        inner.first()
+        inner
+            .first()
             .and_then(|v| v.string_ref().map(|s| s.inner().clone()))
     };
 
     for (upgrade_name_val, upgrade_value) in upgrade_data.inner().iter() {
-        let Some(upgrade_name) = upgrade_name_val.string_ref().map(|s| s.inner().clone()) else { continue };
-        let Some(upgrade_dict) = upgrade_value.dict_ref() else { continue };
+        let Some(upgrade_name) = upgrade_name_val.string_ref().map(|s| s.inner().clone()) else {
+            continue;
+        };
+        let Some(upgrade_dict) = upgrade_value.dict_ref() else {
+            continue;
+        };
         let upgrade_dict = upgrade_dict.inner();
 
         // Only process _Hull upgrades -- they define the complete config for a hull loadout
@@ -687,7 +699,6 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
         if uc_type != "_Hull" {
             continue;
         }
-
 
         let Some(components) = upgrade_dict
             .get(&HashableValue::String("components".to_string().into()))
@@ -709,8 +720,10 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 .and_then(|v| v.dict_ref())
             {
                 let hull_data = hull_data.inner();
-                config.detection_km = Km::from(read_float(&*hull_data, "visibilityFactor").unwrap_or(0.0));
-                config.air_detection_km = Km::from(read_float(&*hull_data, "visibilityFactorByPlane").unwrap_or(0.0));
+                config.detection_km =
+                    Km::from(read_float(&*hull_data, "visibilityFactor").unwrap_or(0.0));
+                config.air_detection_km =
+                    Km::from(read_float(&*hull_data, "visibilityFactorByPlane").unwrap_or(0.0));
             }
         }
 
@@ -736,7 +749,8 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
                 .get(&HashableValue::String(atba_comp.into()))
                 .and_then(|v| v.dict_ref())
             {
-                config.secondary_battery_m = read_float(&*atba_data.inner(), "maxDist").map(Meters::from);
+                config.secondary_battery_m =
+                    read_float(&*atba_data.inner(), "maxDist").map(Meters::from);
             }
         }
 
@@ -749,17 +763,15 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Result<Vehicle, Veh
     let config_data = if hull_upgrades.is_empty() {
         None
     } else {
-        Some(crate::game_params::types::ShipConfigData {
-            hull_upgrades,
-        })
+        Some(crate::game_params::types::ShipConfigData { hull_upgrades })
     };
 
-    VehicleBuilder::default()
+    Vehicle::builder()
         .level(level)
         .group(group)
-        .abilities(abilities)
+        .maybe_abilities(abilities)
         .upgrades(upgrades)
-        .config_data(config_data)
+        .maybe_config_data(config_data)
         .build()
 }
 
@@ -838,24 +850,22 @@ impl GameMetadataProvider {
                             let species = species.string_ref().and_then(|s| Species::from_str(s.inner().as_str()).ok());
 
                             let parsed_param_data = match param_type {
-                                ParamType::Ship => Some(build_ship(&param_data).map(ParamData::Vehicle).expect("failed to build Vehicle")),
+                                ParamType::Ship => Some(ParamData::Vehicle(build_ship(&param_data))),
                                 ParamType::Crew => {
                                     let money_training_level = game_param_to_type!(param_data, "moneyTrainingLevel", usize);
 
                                     let personality = game_param_to_type!(param_data, "CrewPersonality", HashMap<(), ()>);
                                     let personality = personality.inner();
-                                    let crew_personality = build_crew_personality(&personality).expect("failed to build crew personality");
+                                    let crew_personality = build_crew_personality(&personality);
 
                                     let skills = game_param_to_type!(param_data, "Skills", Option<HashMap<(), ()>>);
-                                    let skills = skills.map(|skills| build_crew_skills(&skills.inner()).expect("failed to build crew skills"));
+                                    let skills = skills.map(|skills| build_crew_skills(&skills.inner()));
 
-                                    CrewBuilder::default()
+                                    Some(ParamData::Crew(Crew::builder()
                                         .money_training_level(money_training_level)
                                         .personality(crew_personality)
-                                        .skills(skills)
-                                        .build()
-                                        .ok()
-                                        .map(ParamData::Crew)
+                                        .maybe_skills(skills)
+                                        .build()))
                                 }
                                 ParamType::Achievement => {
                                     let is_group = game_param_to_type!(param_data, "group", bool);
@@ -863,25 +873,20 @@ impl GameMetadataProvider {
                                     let ui_type = game_param_to_type!(param_data, "uiType", String);
                                     let ui_name = game_param_to_type!(param_data, "uiName", String);
 
-                                    AchievementBuilder::default()
+                                    Some(ParamData::Achievement(Achievement::builder()
                                         .is_group(is_group)
                                         .one_per_battle(one_per_battle)
                                         .ui_type(ui_type)
                                         .ui_name(ui_name)
-                                        .build()
-                                        .ok()
-                                        .map(ParamData::Achievement)
+                                        .build()))
                                 }
-                                ParamType::Ability => Some(build_ability(&param_data).map(ParamData::Ability).expect("failed to build Ability")),
+                                ParamType::Ability => Some(ParamData::Ability(build_ability(&param_data))),
                                 ParamType::Exterior => Some(ParamData::Exterior),
                                 ParamType::Modernization => {
                                     let modifiers = param_data
                                         .get(&HashableValue::String("modifiers".to_owned().into()))
                                         .and_then(|v| v.dict_ref())
                                         .map(|d| build_skill_modifiers(&d.inner()))
-                                        .transpose()
-                                        .ok()
-                                        .flatten()
                                         .unwrap_or_default();
                                     Some(ParamData::Modernization(super::types::Modernization::new(modifiers)))
                                 }
@@ -902,13 +907,11 @@ impl GameMetadataProvider {
                                         .and_then(|v| v.i64_ref())
                                         .copied()
                                         .unwrap_or(0);
-                                    super::types::BuffDropBuilder::default()
+                                    Some(ParamData::Drop(super::types::BuffDrop::builder()
                                         .marker_name_active(marker_name_active)
                                         .marker_name_inactive(marker_name_inactive)
                                         .sorting(sorting)
-                                        .build()
-                                        .ok()
-                                        .map(ParamData::Drop)
+                                        .build()))
                                 },
                                 ParamType::Aircraft => {
                                     let subtypes: Vec<String> = param_data
@@ -944,12 +947,10 @@ impl GameMetadataProvider {
                                                 })
                                         })
                                         .unwrap_or_default();
-                                    AircraftBuilder::default()
+                                    Some(ParamData::Aircraft(Aircraft::builder()
                                         .category(category)
                                         .ammo_type(ammo_type)
-                                        .build()
-                                        .ok()
-                                        .map(ParamData::Aircraft)
+                                        .build()))
                                 },
                                 ParamType::Projectile => {
                                     let ammo_type = param_data
@@ -957,11 +958,9 @@ impl GameMetadataProvider {
                                         .and_then(|v| v.string_ref())
                                         .map(|s| s.inner().to_string())
                                         .unwrap_or_default();
-                                    ProjectileBuilder::default()
+                                    Some(ParamData::Projectile(Projectile::builder()
                                         .ammo_type(ammo_type)
-                                        .build()
-                                        .ok()
-                                        .map(ParamData::Projectile)
+                                        .build()))
                                 },
                                 _ => {
                                     // Some params (e.g. Drops) have typeinfo.type = "Other"
@@ -982,13 +981,11 @@ impl GameMetadataProvider {
                                             .and_then(|v| v.i64_ref())
                                             .copied()
                                             .unwrap_or(0);
-                                        super::types::BuffDropBuilder::default()
+                                        Some(ParamData::Drop(super::types::BuffDrop::builder()
                                             .marker_name_active(marker_name_active)
                                             .marker_name_inactive(marker_name_inactive)
                                             .sorting(sorting)
-                                            .build()
-                                            .ok()
-                                            .map(ParamData::Drop)
+                                            .build()))
                                     } else {
                                         None
                                     }
@@ -1017,15 +1014,14 @@ impl GameMetadataProvider {
                                 .inner()
                                 .clone();
 
-                            ParamBuilder::default()
+                            Some(Param::builder()
                                 .id(id)
                                 .index(index)
                                 .name(name)
-                                .species(species)
+                                .maybe_species(species)
                                 .nation(nation)
                                 .data(parsed_param_data)
-                                .build()
-                                .ok()
+                                .build())
                         })
                 })
                 .collect::<Vec<Param>>();
