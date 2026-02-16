@@ -1,13 +1,20 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Read;
 use std::sync::LazyLock;
 
-use crate::data::idx::FileNode;
-use crate::data::pkg::PkgFileLoader;
 use crate::game_types::{
     BuoyancyState, CameraMode, Consumable, DeathCause, FinishType, WeaponType,
 };
+
+fn read_vfs_file(vfs: &vfs::VfsPath, path: &str) -> Result<Vec<u8>, vfs::VfsError> {
+    let mut buf = Vec::new();
+    vfs.join(path)?
+        .open_file()?
+        .read_to_end(&mut buf)
+        .map_err(vfs::VfsError::from)?;
+    Ok(buf)
+}
 
 /// Default battle constants (hardcoded, no game files needed).
 pub static DEFAULT_BATTLE_CONSTANTS: LazyLock<BattleConstants> =
@@ -45,12 +52,8 @@ pub struct BattleConstants {
 
 impl BattleConstants {
     /// Load from game files, falling back to defaults if the file can't be read.
-    pub fn load(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Self {
-        let mut buf = Vec::new();
-        if file_tree
-            .read_file_at_path(Path::new(BATTLE_CONSTANTS_PATH), pkg_loader, &mut buf)
-            .is_ok()
-        {
+    pub fn load(vfs: &vfs::VfsPath) -> Self {
+        if let Ok(buf) = read_vfs_file(vfs, BATTLE_CONSTANTS_PATH) {
             Self::from_xml(&buf)
         } else {
             Self::defaults()
@@ -629,12 +632,8 @@ pub struct ShipsConstants {
 
 impl ShipsConstants {
     /// Load from game files, falling back to defaults if the file can't be read.
-    pub fn load(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Self {
-        let mut buf = Vec::new();
-        if file_tree
-            .read_file_at_path(Path::new(SHIPS_CONSTANTS_PATH), pkg_loader, &mut buf)
-            .is_ok()
-        {
+    pub fn load(vfs: &vfs::VfsPath) -> Self {
+        if let Ok(buf) = read_vfs_file(vfs, SHIPS_CONSTANTS_PATH) {
             Self::from_xml(&buf)
         } else {
             Self::defaults()
@@ -732,12 +731,8 @@ pub struct WeaponsConstants {
 
 impl WeaponsConstants {
     /// Load from game files, falling back to defaults if the file can't be read.
-    pub fn load(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Self {
-        let mut buf = Vec::new();
-        if file_tree
-            .read_file_at_path(Path::new(WEAPONS_CONSTANTS_PATH), pkg_loader, &mut buf)
-            .is_ok()
-        {
+    pub fn load(vfs: &vfs::VfsPath) -> Self {
+        if let Ok(buf) = read_vfs_file(vfs, WEAPONS_CONSTANTS_PATH) {
             Self::from_xml(&buf)
         } else {
             Self::defaults()
@@ -800,12 +795,8 @@ pub struct CommonConstants {
 
 impl CommonConstants {
     /// Load from game files, falling back to defaults if the file can't be read.
-    pub fn load(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Self {
-        let mut buf = Vec::new();
-        if file_tree
-            .read_file_at_path(Path::new(COMMON_CONSTANTS_PATH), pkg_loader, &mut buf)
-            .is_ok()
-        {
+    pub fn load(vfs: &vfs::VfsPath) -> Self {
+        if let Ok(buf) = read_vfs_file(vfs, COMMON_CONSTANTS_PATH) {
             Self::from_xml(&buf)
         } else {
             Self::defaults()
@@ -983,12 +974,8 @@ pub struct ChannelConstants {
 
 impl ChannelConstants {
     /// Load from game files, falling back to defaults if the file can't be read.
-    pub fn load(file_tree: &FileNode, pkg_loader: &PkgFileLoader) -> Self {
-        let mut buf = Vec::new();
-        if file_tree
-            .read_file_at_path(Path::new(CHANNEL_CONSTANTS_PATH), pkg_loader, &mut buf)
-            .is_ok()
-        {
+    pub fn load(vfs: &vfs::VfsPath) -> Self {
+        if let Ok(buf) = read_vfs_file(vfs, CHANNEL_CONSTANTS_PATH) {
             Self::from_xml(&buf)
         } else {
             Self::defaults()

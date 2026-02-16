@@ -1,24 +1,24 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, Cursor, Read, Write},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     sync::RwLock,
 };
 
 use flate2::read::DeflateDecoder;
-use memmap::MmapOptions;
+use memmap2::MmapOptions;
 use thiserror::Error;
 
 use crate::data::idx::FileInfo;
 
-/// `PkgFileLoader` is reponsible for automatically loading and maintaining pkg files
+/// `PkgFileLoader` is responsible for automatically loading and maintaining pkg files
 /// in-memory to ensure that a file is only loaded once, and can be conveniently
 /// loaded on-demand.
 #[derive(Debug)]
 pub struct PkgFileLoader {
     pkgs_dir: PathBuf,
-    pkgs: RwLock<HashMap<PathBuf, (File, memmap::Mmap)>>,
+    pkgs: RwLock<HashMap<PathBuf, (File, memmap2::Mmap)>>,
 }
 
 #[derive(Debug, Error)]
@@ -39,8 +39,6 @@ impl PkgFileLoader {
     }
 
     /// Ensures that the package with the given name is loaded.
-    ///
-    /// Returns an error if no package can be found or the package cannot be read.
     fn ensure_pkg_loaded<P: AsRef<Path>>(&self, pkg: P) -> Result<(), PkgError> {
         let pkg = pkg.as_ref().to_owned();
         let pkg_loaded = { self.pkgs.read().unwrap().contains_key(&pkg) };
@@ -51,7 +49,6 @@ impl PkgFileLoader {
             }
 
             let pkg_file = File::open(pkg_path).expect("Input file does not exist");
-
             let mmap = unsafe { MmapOptions::new().map(&pkg_file)? };
 
             self.pkgs
@@ -83,7 +80,6 @@ impl PkgFileLoader {
         let mut cursor = Cursor::new(&mmap[start_offset..end_offset]);
         if file_info.compression_info != 0 {
             let mut decoder = DeflateDecoder::new(cursor);
-
             std::io::copy(&mut decoder, out_data)?;
         } else {
             std::io::copy(&mut cursor, out_data)?;

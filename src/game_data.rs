@@ -5,11 +5,14 @@
 
 use std::borrow::Cow;
 use std::fs::read_dir;
-use std::io::Cursor;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::data::idx::{self, FileNode};
-use crate::data::pkg::PkgFileLoader;
+use vfs::VfsPath;
+
+use crate::data::idx;
+use crate::data::idx_vfs::IdxVfs;
+use crate::data::wrappers::mmap::MmapPkgSource;
 use crate::data::{DataFileWithCallback, Version};
 use crate::error::ErrorKind;
 use crate::rpc::entitydefs::{EntitySpec, parse_scripts};
@@ -35,12 +38,6 @@ pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
 }
 
 /// Find the build directory in the game directory that matches the replay's version.
-///
-/// The game directory has a `bin/` folder containing numbered build directories
-/// (e.g. `bin/11791718/`). The replay's `clientVersionFromExe` field encodes the
-/// build number as the fourth component (e.g. `"15,0,0,11791718"`).
-///
-/// Returns the matching build number, or an error listing available builds.
 pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<u32, ErrorKind> {
     let available_builds = list_available_builds(game_dir)?;
 
@@ -59,15 +56,11 @@ pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<
 /// Loaded game resources from a WoWS installation.
 pub struct GameResources {
     pub specs: Vec<EntitySpec>,
-    pub file_tree: FileNode,
-    pub pkg_loader: PkgFileLoader,
+    pub vfs: VfsPath,
 }
 
-/// Load game resources (entity specs, file tree, package loader) from a game directory,
+/// Load game resources (entity specs, VFS) from a game directory,
 /// using the build number that matches the replay version.
-///
-/// This is the common resource-loading logic shared by replayshark, minimap-renderer,
-/// and any other tool that processes replays against game data.
 pub fn load_game_resources(
     game_dir: &Path,
     replay_version: &Version,
@@ -81,8 +74,7 @@ pub fn load_game_resources(
         let entry = entry?;
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             let file_data = std::fs::read(entry.path())?;
-            let mut cursor = Cursor::new(file_data.as_slice());
-            idx_files.push(idx::parse(&mut cursor)?);
+            idx_files.push(idx::parse(&file_data)?);
         }
     }
 
@@ -93,26 +85,28 @@ pub fn load_game_resources(
         ));
     }
 
-    let pkg_loader = PkgFileLoader::new(pkgs_path);
-    let file_tree = idx::build_file_tree(idx_files.as_slice());
+    let pkg_source = MmapPkgSource::new(&pkgs_path);
+    let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
+    let vfs = VfsPath::new(idx_vfs);
 
     let specs = {
-        let loader = DataFileWithCallback::new(|path| {
-            let path = Path::new(path);
-            let mut file_data = Vec::new();
-            file_tree
-                .read_file_at_path(path, &pkg_loader, &mut file_data)
-                .unwrap();
-            Ok(Cow::Owned(file_data))
+        let vfs_ref = &vfs;
+        let loader = DataFileWithCallback::new(move |path: &str| {
+            let file_path = vfs_ref
+                .join(path)
+                .map_err(|e| ErrorKind::ParsingFailure(format!("VFS path error: {e}")))?;
+            let mut data = Vec::new();
+            file_path
+                .open_file()
+                .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+                .read_to_end(&mut data)
+                .map_err(|e| ErrorKind::IoError(e))?;
+            Ok(Cow::Owned(data))
         });
         parse_scripts(&loader)?
     };
 
-    Ok(GameResources {
-        specs,
-        file_tree,
-        pkg_loader,
-    })
+    Ok(GameResources { specs, vfs })
 }
 
 /// Returns the path to the English translations file for the given build.

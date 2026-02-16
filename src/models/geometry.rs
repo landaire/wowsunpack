@@ -1,12 +1,28 @@
+use rootcause::Report;
+use thiserror::Error;
 use winnow::Parser;
 use winnow::binary::{le_i64, le_u8, le_u16, le_u32};
 use winnow::combinator::repeat;
-use winnow::error::ContextError;
 use winnow::token::take;
+
+use crate::data::parser_utils::{WResult, parse_packed_string, resolve_relptr};
 
 const ENCD_MAGIC: u32 = 0x44434E45;
 
-type WResult<T> = Result<T, winnow::error::ErrMode<ContextError>>;
+/// Errors that can occur during `.geometry` file parsing.
+#[derive(Debug, Error)]
+pub enum GeometryError {
+    #[error("invalid vertex stride: {0}")]
+    InvalidStride(usize),
+    #[error("unsupported index size: {0}")]
+    UnsupportedIndexSize(u16),
+    #[error("data extends beyond file at 0x{offset:X}")]
+    OutOfBounds { offset: usize },
+    #[error("meshopt decode error: {0}")]
+    DecodeError(String),
+    #[error("parse error: {0}")]
+    ParseError(String),
+}
 
 #[derive(Debug)]
 pub struct MergedGeometry<'a> {
@@ -79,11 +95,10 @@ fn decode_vertex_buffer_dynamic(
     count: usize,
     stride: usize,
     encoded: &[u8],
-) -> eyre::Result<Vec<u8>> {
-    eyre::ensure!(
-        stride > 0 && stride <= 256 && stride % 4 == 0,
-        "invalid vertex stride: {stride}"
-    );
+) -> Result<Vec<u8>, Report<GeometryError>> {
+    if stride == 0 || stride > 256 || stride % 4 != 0 {
+        return Err(Report::new(GeometryError::InvalidStride(stride)));
+    }
 
     let total_bytes = count * stride;
     let mut output = vec![0u8; total_bytes];
@@ -96,13 +111,10 @@ fn decode_vertex_buffer_dynamic(
             // Safety: output buffer has exactly count * stride bytes, and Vertex has size = stride.
             // The decode function reads/writes through the slice as raw bytes internally.
             let vertex_slice: &mut [Vertex] = unsafe {
-                std::slice::from_raw_parts_mut(
-                    $output.as_mut_ptr() as *mut Vertex,
-                    $count,
-                )
+                std::slice::from_raw_parts_mut($output.as_mut_ptr() as *mut Vertex, $count)
             };
             meshopt_rs::vertex::buffer::decode_vertex_buffer(vertex_slice, $encoded)
-                .map_err(|e| eyre::eyre!("meshopt vertex decode error: {e:?}"))?;
+                .map_err(|e| Report::new(GeometryError::DecodeError(format!("{e:?}"))))?;
         }};
     }
 
@@ -123,14 +135,14 @@ fn decode_vertex_buffer_dynamic(
         56 => decode_with_stride!(56, count, encoded, output),
         60 => decode_with_stride!(60, count, encoded, output),
         64 => decode_with_stride!(64, count, encoded, output),
-        _ => eyre::bail!("unsupported vertex stride: {stride} (add to dispatch table)"),
+        _ => return Err(Report::new(GeometryError::InvalidStride(stride))),
     }
 
     Ok(output)
 }
 
 impl VertexData<'_> {
-    pub fn decode(&self) -> eyre::Result<Vec<u8>> {
+    pub fn decode(&self) -> Result<Vec<u8>, Report<GeometryError>> {
         match self {
             VertexData::Encoded {
                 element_count,
@@ -143,7 +155,7 @@ impl VertexData<'_> {
 }
 
 impl IndexData<'_> {
-    pub fn decode(&self) -> eyre::Result<Vec<u8>> {
+    pub fn decode(&self) -> Result<Vec<u8>, Report<GeometryError>> {
         match self {
             IndexData::Encoded {
                 element_count,
@@ -153,22 +165,20 @@ impl IndexData<'_> {
                 let count = *element_count as usize;
                 let mut output = vec![0u32; count];
                 meshopt_rs::index::buffer::decode_index_buffer(&mut output, payload)
-                    .map_err(|e| eyre::eyre!("meshopt index decode error: {e:?}"))?;
+                    .map_err(|e| Report::new(GeometryError::DecodeError(format!("{e:?}"))))?;
 
                 match index_size {
-                    2 => Ok(output.iter().flat_map(|i| (*i as u16).to_le_bytes()).collect()),
+                    2 => Ok(output
+                        .iter()
+                        .flat_map(|i| (*i as u16).to_le_bytes())
+                        .collect()),
                     4 => Ok(output.iter().flat_map(|i| i.to_le_bytes()).collect()),
-                    other => eyre::bail!("unsupported index size: {other}"),
+                    other => Err(Report::new(GeometryError::UnsupportedIndexSize(*other))),
                 }
             }
             IndexData::Raw(data) => Ok(data.to_vec()),
         }
     }
-}
-
-/// Resolve a relative pointer: base_offset + rel_value = absolute file offset
-fn resolve_relptr(base_offset: usize, rel_value: i64) -> usize {
-    (base_offset as i64 + rel_value) as usize
 }
 
 fn parse_mapping_entry(input: &mut &[u8]) -> WResult<MappingEntry> {
@@ -232,25 +242,29 @@ fn parse_header(input: &mut &[u8]) -> WResult<HeaderFields> {
 }
 
 /// Parse the header and resolve all sub-structures from the full file data.
-pub fn parse_geometry(file_data: &[u8]) -> eyre::Result<MergedGeometry<'_>> {
+pub fn parse_geometry(file_data: &[u8]) -> Result<MergedGeometry<'_>, Report<GeometryError>> {
     let input = &mut &file_data[..];
 
     let hdr = parse_header(input)
-        .map_err(|e| eyre::eyre!("failed to parse geometry header: {e}"))?;
+        .map_err(|e| Report::new(GeometryError::ParseError(format!("header: {e}"))))?;
 
     let header_base = 0usize;
 
     let vm_offset = resolve_relptr(header_base, hdr.vertices_mapping_ptr);
-    let vertices_mapping = parse_mapping_array(file_data, vm_offset, hdr.vertices_mapping_count as usize)?;
+    let vertices_mapping =
+        parse_mapping_array(file_data, vm_offset, hdr.vertices_mapping_count as usize)?;
 
     let im_offset = resolve_relptr(header_base, hdr.indices_mapping_ptr);
-    let indices_mapping = parse_mapping_array(file_data, im_offset, hdr.indices_mapping_count as usize)?;
+    let indices_mapping =
+        parse_mapping_array(file_data, im_offset, hdr.indices_mapping_count as usize)?;
 
     let mv_offset = resolve_relptr(header_base, hdr.merged_vertices_ptr);
-    let merged_vertices = parse_vertices_array(file_data, mv_offset, hdr.merged_vertices_count as usize)?;
+    let merged_vertices =
+        parse_vertices_array(file_data, mv_offset, hdr.merged_vertices_count as usize)?;
 
     let mi_offset = resolve_relptr(header_base, hdr.merged_indices_ptr);
-    let merged_indices = parse_indices_array(file_data, mi_offset, hdr.merged_indices_count as usize)?;
+    let merged_indices =
+        parse_indices_array(file_data, mi_offset, hdr.merged_indices_count as usize)?;
 
     let collision_models = if hdr.collision_model_count > 0 {
         let cm_offset = resolve_relptr(header_base, hdr.collision_models_ptr);
@@ -276,41 +290,16 @@ fn parse_mapping_array(
     file_data: &[u8],
     offset: usize,
     count: usize,
-) -> eyre::Result<Vec<MappingEntry>> {
+) -> Result<Vec<MappingEntry>, Report<GeometryError>> {
     let input = &mut &file_data[offset..];
     let entries: Vec<MappingEntry> = repeat(count, parse_mapping_entry)
         .parse_next(input)
-        .map_err(|e| eyre::eyre!("failed to parse mapping entries at offset 0x{offset:X}: {e}"))?;
+        .map_err(|e| {
+            Report::new(GeometryError::ParseError(format!(
+                "mapping entries at 0x{offset:X}: {e}"
+            )))
+        })?;
     Ok(entries)
-}
-
-fn parse_packed_string(file_data: &[u8], struct_base: usize) -> eyre::Result<String> {
-    let input = &mut &file_data[struct_base..];
-    let (char_count, _padding, text_relptr) = parse_packed_string_fields(input)
-        .map_err(|e| eyre::eyre!("failed to parse packed string at 0x{struct_base:X}: {e}"))?;
-
-    if char_count == 0 {
-        return Ok(String::new());
-    }
-
-    let text_offset = resolve_relptr(struct_base, text_relptr);
-    let text_end = text_offset + char_count as usize;
-    eyre::ensure!(
-        text_end <= file_data.len(),
-        "packed string text extends beyond file: offset=0x{text_offset:X}, count={char_count}, file_len=0x{:X}",
-        file_data.len()
-    );
-
-    let text_bytes = &file_data[text_offset..text_end];
-    let text_bytes = text_bytes.strip_suffix(&[0]).unwrap_or(text_bytes);
-    Ok(String::from_utf8_lossy(text_bytes).into_owned())
-}
-
-fn parse_packed_string_fields(input: &mut &[u8]) -> WResult<(u32, u32, i64)> {
-    let char_count = le_u32.parse_next(input)?;
-    let padding = le_u32.parse_next(input)?;
-    let text_relptr = le_i64.parse_next(input)?;
-    Ok((char_count, padding, text_relptr))
 }
 
 fn parse_vertex_data<'a>(
@@ -318,11 +307,12 @@ fn parse_vertex_data<'a>(
     data_offset: usize,
     size_in_bytes: u32,
     stride_in_bytes: u16,
-) -> eyre::Result<VertexData<'a>> {
-    eyre::ensure!(
-        data_offset + size_in_bytes as usize <= file_data.len(),
-        "vertex data extends beyond file"
-    );
+) -> Result<VertexData<'a>, Report<GeometryError>> {
+    if data_offset + size_in_bytes as usize > file_data.len() {
+        return Err(Report::new(GeometryError::OutOfBounds {
+            offset: data_offset,
+        }));
+    }
     let blob = &file_data[data_offset..data_offset + size_in_bytes as usize];
 
     if blob.len() >= 8 {
@@ -345,11 +335,12 @@ fn parse_index_data<'a>(
     data_offset: usize,
     size_in_bytes: u32,
     index_size: u16,
-) -> eyre::Result<IndexData<'a>> {
-    eyre::ensure!(
-        data_offset + size_in_bytes as usize <= file_data.len(),
-        "index data extends beyond file"
-    );
+) -> Result<IndexData<'a>, Report<GeometryError>> {
+    if data_offset + size_in_bytes as usize > file_data.len() {
+        return Err(Report::new(GeometryError::OutOfBounds {
+            offset: data_offset,
+        }));
+    }
     let blob = &file_data[data_offset..data_offset + size_in_bytes as usize];
 
     if blob.len() >= 8 {
@@ -376,14 +367,20 @@ fn parse_vertices_fields(input: &mut &[u8]) -> WResult<(i64, u32, u16, bool, boo
     let stride_in_bytes = le_u16.parse_next(input)?;
     let is_skinned = le_u8.parse_next(input)? != 0;
     let is_bumped = le_u8.parse_next(input)? != 0;
-    Ok((data_relptr, size_in_bytes, stride_in_bytes, is_skinned, is_bumped))
+    Ok((
+        data_relptr,
+        size_in_bytes,
+        stride_in_bytes,
+        is_skinned,
+        is_bumped,
+    ))
 }
 
 fn parse_vertices_array<'a>(
     file_data: &'a [u8],
     offset: usize,
     count: usize,
-) -> eyre::Result<Vec<VerticesPrototype<'a>>> {
+) -> Result<Vec<VerticesPrototype<'a>>, Report<GeometryError>> {
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -391,11 +388,16 @@ fn parse_vertices_array<'a>(
         let input = &mut &file_data[struct_base..];
 
         let (data_relptr, size_in_bytes, stride_in_bytes, is_skinned, is_bumped) =
-            parse_vertices_fields(input)
-                .map_err(|e| eyre::eyre!("vertices[{i}] parse error: {e}"))?;
+            parse_vertices_fields(input).map_err(|e| {
+                Report::new(GeometryError::ParseError(format!("vertices[{i}]: {e}")))
+            })?;
 
         let packed_string_base = struct_base + 0x08;
-        let format_name = parse_packed_string(file_data, packed_string_base)?;
+        let format_name = parse_packed_string(file_data, packed_string_base).map_err(|e| {
+            Report::new(GeometryError::ParseError(format!(
+                "vertices[{i}] packed string: {e}"
+            )))
+        })?;
         let data_offset = resolve_relptr(struct_base, data_relptr);
         let data = parse_vertex_data(file_data, data_offset, size_in_bytes, stride_in_bytes)?;
 
@@ -426,7 +428,7 @@ fn parse_indices_array<'a>(
     file_data: &'a [u8],
     offset: usize,
     count: usize,
-) -> eyre::Result<Vec<IndicesPrototype<'a>>> {
+) -> Result<Vec<IndicesPrototype<'a>>, Report<GeometryError>> {
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -434,7 +436,7 @@ fn parse_indices_array<'a>(
         let input = &mut &file_data[struct_base..];
 
         let (data_relptr, size_in_bytes, index_size) = parse_indices_fields(input)
-            .map_err(|e| eyre::eyre!("indices[{i}] parse error: {e}"))?;
+            .map_err(|e| Report::new(GeometryError::ParseError(format!("indices[{i}]: {e}"))))?;
 
         let data_offset = resolve_relptr(struct_base, data_relptr);
         let data = parse_index_data(file_data, data_offset, size_in_bytes, index_size)?;
@@ -463,7 +465,7 @@ fn parse_model_array<'a>(
     file_data: &'a [u8],
     offset: usize,
     count: usize,
-) -> eyre::Result<Vec<ModelPrototype<'a>>> {
+) -> Result<Vec<ModelPrototype<'a>>, Report<GeometryError>> {
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -471,16 +473,21 @@ fn parse_model_array<'a>(
         let input = &mut &file_data[struct_base..];
 
         let (data_relptr, size_in_bytes) = parse_model_fields(input)
-            .map_err(|e| eyre::eyre!("model[{i}] parse error: {e}"))?;
+            .map_err(|e| Report::new(GeometryError::ParseError(format!("model[{i}]: {e}"))))?;
 
         let packed_string_base = struct_base + 0x08;
-        let name = parse_packed_string(file_data, packed_string_base)?;
+        let name = parse_packed_string(file_data, packed_string_base).map_err(|e| {
+            Report::new(GeometryError::ParseError(format!(
+                "model[{i}] packed string: {e}"
+            )))
+        })?;
         let data_offset = resolve_relptr(struct_base, data_relptr);
 
-        eyre::ensure!(
-            data_offset + size_in_bytes as usize <= file_data.len(),
-            "model[{i}] data extends beyond file"
-        );
+        if data_offset + size_in_bytes as usize > file_data.len() {
+            return Err(Report::new(GeometryError::OutOfBounds {
+                offset: data_offset,
+            }));
+        }
         let data = &file_data[data_offset..data_offset + size_in_bytes as usize];
 
         result.push(ModelPrototype {

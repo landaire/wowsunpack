@@ -1,13 +1,13 @@
-use eyre::{Result, WrapErr};
+use rootcause::prelude::*;
 
-use memmap::MmapOptions;
+use memmap2::MmapOptions;
 use pickled::HashableValue;
 use serde::Serialize;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     fs::{self, File},
-    io::{BufWriter, Cursor, Write, stdout},
+    io::{BufWriter, Read, Write, stdout},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -16,11 +16,14 @@ use std::{
     time::Instant,
 };
 use thread_local::ThreadLocal;
+use vfs::VfsPath;
 use wowsunpack::data::{
-    idx::{self, FileNode},
+    idx::{self, VfsEntry},
+    idx_vfs::IdxVfs,
     serialization,
+    wrappers::mmap::MmapPkgSource,
 };
-use wowsunpack::{data::pkg::PkgFileLoader, game_params::convert::game_params_to_pickle};
+use wowsunpack::game_params::convert::game_params_to_pickle;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use indicatif::{ParallelProgressIterator, ProgressBar};
@@ -169,16 +172,12 @@ enum MetadataFormat {
     Csv,
 }
 
-fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
-    let input_file = File::open(&path).wrap_err("Failed to open idx file")?;
-    let mmap = unsafe { MmapOptions::new().map(&input_file)? };
-
-    let mut reader = Cursor::new(&mmap[..]);
-
-    Ok(idx::parse(&mut reader)?)
+fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile, Report> {
+    let file_data = std::fs::read(&path).context("Failed to read idx file")?;
+    Ok(idx::parse(&file_data)?)
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<(), Report> {
     let mut args = Args::parse();
 
     // Handle commands that don't need idx/pkg infrastructure
@@ -212,9 +211,9 @@ fn run() -> Result<()> {
         if game_dir.join("WorldOfWarships.exe").exists() {
             // Maybe we are? Try enumerating the `bin` directory
             let paths = fs::read_dir(&bin_dir)
-                .wrap_err("No index files were provided and could not enumerate `bin` directory")?;
+                .context("No index files were provided and could not enumerate `bin` directory")?;
             for path in paths {
-                let path = path.wrap_err("could not enumerate path")?;
+                let path = path.context("could not enumerate path")?;
                 if path.file_type()?.is_dir()
                     && let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
                 {
@@ -242,9 +241,9 @@ fn run() -> Result<()> {
 
             eprintln!();
 
-            return Err(eyre::eyre!(
+            bail!(
                 "Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"
-            ));
+            );
         }
     }
 
@@ -282,16 +281,21 @@ fn run() -> Result<()> {
         )
     });
 
-    let mut pkg_loader = packages_dir.as_ref().map(PkgFileLoader::new);
-
     paths.into_par_iter().try_for_each(|path| {
         resources.lock().unwrap().push(load_idx_file(path)?);
 
-        Ok::<(), eyre::Error>(())
+        Ok::<(), Report>(())
     })?;
 
     let idx_files = resources.into_inner().unwrap();
     let file_tree = idx::build_file_tree(&idx_files);
+
+    // Build VFS for commands that need to read file contents
+    let vfs = packages_dir.as_ref().map(|pkg_dir| {
+        let pkg_source = MmapPkgSource::new(pkg_dir);
+        let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
+        VfsPath::new(idx_vfs)
+    });
 
     match args.command {
         Commands::Extract {
@@ -300,64 +304,115 @@ fn run() -> Result<()> {
             out_dir,
             strip_prefix,
         } => {
-            let paths = file_tree.paths();
+            let Some(vfs) = &vfs else {
+                bail!("Package file loader is unavailable. Check that the pkg_dir exists.");
+            };
+
             let globs = files
                 .iter()
                 .map(|file_name| glob::Pattern::new(file_name).expect("invalid glob pattern"))
                 .collect::<Vec<_>>();
 
-            let mut extracted_paths = HashSet::<&Path>::new();
             let files_written = AtomicUsize::new(0);
 
-            for (path, node) in &paths {
-                let mut matches = false;
-
-                for glob in &globs {
-                    if glob.matches_path(path) {
-                        matches = true;
-                        break;
+            // Collect matching entries
+            let matching: Vec<(&str, &VfsEntry)> = file_tree
+                .iter()
+                .filter(|(path, entry)| {
+                    let path_str = path.as_str();
+                    let mut matches = false;
+                    for glob in &globs {
+                        if glob.matches(path_str) {
+                            matches = true;
+                            break;
+                        }
                     }
-                }
+                    if !matches {
+                        return false;
+                    }
+                    // Skip directories when flattening
+                    if flatten && matches!(entry, VfsEntry::Directory) {
+                        return false;
+                    }
+                    true
+                })
+                .map(|(p, e)| (p.as_str(), e))
+                .collect();
 
-                // Skip this node if the file path doesn't match OR we're told to
-                // flatten the file system
-                if !matches || (flatten && !node.is_file()) {
-                    continue;
-                }
+            for (path, entry) in &matching {
+                match entry {
+                    VfsEntry::File { .. } => {
+                        let mut file_data = Vec::new();
+                        vfs.join(path)
+                            .context("VFS path error")?
+                            .open_file()
+                            .context_with(|| format!("Failed to open {path}"))?
+                            .read_to_end(&mut file_data)?;
 
-                // Also skip this path if its parent directory has already been extracted
-                if let Some(parent) = path.parent()
-                    && extracted_paths.contains(parent)
-                {
-                    continue;
-                }
+                        let out_path = if flatten {
+                            let file_name = path.rsplit('/').next().unwrap_or(path);
+                            out_dir.join(file_name)
+                        } else if strip_prefix {
+                            // Strip the matched prefix, keep only the last component
+                            let file_name = path.rsplit('/').next().unwrap_or(path);
+                            out_dir.join(file_name)
+                        } else {
+                            out_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+                        };
 
-                extracted_paths.insert((*path).as_ref());
+                        if let Some(parent) = out_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(&out_path, &file_data)?;
+                        files_written.fetch_add(1, Ordering::Relaxed);
+                    }
+                    VfsEntry::Directory => {
+                        // For directories, extract all children recursively
+                        let prefix = if path.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{}/", path)
+                        };
 
-                let out_dir = if !node.is_root() && !strip_prefix {
-                    out_dir.join(node.path()?.parent().expect("no parent node"))
-                } else {
-                    // TODO: optimize -- should be an unnecessary clone
-                    out_dir.clone()
-                };
+                        for (child_path, child_entry) in &file_tree {
+                            if !child_path.starts_with(&prefix) {
+                                continue;
+                            }
+                            if matches!(child_entry, VfsEntry::Directory) {
+                                continue;
+                            }
 
-                match pkg_loader.as_mut() {
-                    Some(pkg_loader) => {
-                        node.extract_to_path_with_callback(&out_dir, pkg_loader, || {
+                            let mut file_data = Vec::new();
+                            vfs.join(child_path.as_str())
+                                .context("VFS path error")?
+                                .open_file()
+                                .context_with(|| format!("Failed to open {child_path}"))?
+                                .read_to_end(&mut file_data)?;
+
+                            let relative = if strip_prefix {
+                                // Strip the matched part
+                                child_path
+                                    .strip_prefix(&prefix)
+                                    .unwrap_or(child_path.as_str())
+                            } else {
+                                child_path.as_str()
+                            };
+
+                            let out_path =
+                                out_dir.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+                            if let Some(parent) = out_path.parent() {
+                                fs::create_dir_all(parent)?;
+                            }
+                            fs::write(&out_path, &file_data)?;
                             files_written.fetch_add(1, Ordering::Relaxed);
-                        })?;
-                    }
-                    None => {
-                        return Err(eyre::eyre!(
-                            "Package file loader is unavailable. Check that the pkg_dir exists."
-                        ));
+                        }
                     }
                 }
             }
             println!("Wrote {} files", files_written.load(Ordering::Relaxed));
         }
         Commands::Metadata { format, out_file } => {
-            let data = serialization::tree_to_serialized_files(file_tree.clone());
+            let data = serialization::tree_to_serialized_files(&file_tree);
             let out_file = if out_file.to_str().unwrap() != "-" {
                 Some(BufWriter::new(File::create(out_file)?))
             } else {
@@ -394,13 +449,13 @@ fn run() -> Result<()> {
                         let mut writer = out_file;
 
                         for record in data {
-                            writeln!(&mut writer, "{}", record.path.to_str().unwrap())?;
+                            writeln!(&mut writer, "{}", record.path())?;
                         }
                     } else {
                         let mut writer = stdout().lock();
 
                         for record in data {
-                            writeln!(&mut writer, "{}", record.path.to_str().unwrap())?;
+                            writeln!(&mut writer, "{}", record.path())?;
                         }
                     };
                 }
@@ -412,140 +467,111 @@ fn run() -> Result<()> {
             id,
             print_ids: ids,
             full,
-        } => match pkg_loader.as_mut() {
-            Some(pkg_loader) => {
-                let Ok(game_params_file) = file_tree.find("content/GameParams.data") else {
-                    return Err(eyre::eyre!(
-                        "Could not find GameParams.data in WoWs package"
-                    ));
-                };
+        } => {
+            let Some(vfs) = &vfs else {
+                bail!("Package file loader is unavailable. Check that the pkg_dir exists.");
+            };
 
-                let mut game_params_data: Vec<u8> = Vec::with_capacity(
-                    game_params_file.file_info().unwrap().unpacked_size as usize,
-                );
+            let pickle = load_game_params(vfs)?;
 
-                game_params_file
-                    .read_file(pkg_loader, &mut game_params_data)
-                    .expect("failed to read GameParams");
-
-                let pickle = game_params_to_pickle(game_params_data)
-                    .expect("failed to deserialize GameParams");
-
-                fn print_ids(params_dict: &BTreeMap<pickled::HashableValue, pickled::Value>) {
-                    for key in params_dict.keys() {
-                        if let HashableValue::String(s) = key {
-                            let s = s.inner();
-                            if s.is_empty() {
-                                println!("(empty string)");
-                            } else {
-                                println!("{s}");
-                            }
+            fn print_ids(params_dict: &BTreeMap<pickled::HashableValue, pickled::Value>) {
+                for key in params_dict.keys() {
+                    if let HashableValue::String(s) = key {
+                        let s = s.inner();
+                        if s.is_empty() {
+                            println!("(empty string)");
                         } else {
-                            println!("Non-string Key: {key:?}")
+                            println!("{s}");
                         }
+                    } else {
+                        println!("Non-string Key: {key:?}")
                     }
                 }
+            }
 
-                let params_dict = if !full {
-                    match pickle {
-                        pickled::Value::Dict(params_dict) => {
-                            if ids {
-                                print_ids(&params_dict.inner());
-                                return Ok(());
-                            }
-
-                            let params_dict = params_dict.inner();
-                            let Some(dict) =
-                                params_dict.get(&HashableValue::String(id.clone().into()))
-                            else {
-                                return Err(eyre::eyre!("Could not find GameParams ID {id:?}"));
-                            };
-
-                            dict.clone()
+            let params_dict = if !full {
+                match pickle {
+                    pickled::Value::Dict(params_dict) => {
+                        if ids {
+                            print_ids(&params_dict.inner());
+                            return Ok(());
                         }
-                        pickled::Value::Tuple(params_tuple) => {
-                            if ids {
-                                println!("GameParams format does not have IDs");
 
-                                return Ok(());
-                            }
-                            params_tuple
-                                .inner()
-                                .first()
-                                .expect("params_list has no items?")
-                                .clone()
-                        }
-                        pickled::Value::List(params_list) => {
-                            if ids {
-                                println!("GameParams format does not have IDs");
+                        let params_dict = params_dict.inner();
+                        let Some(dict) = params_dict.get(&HashableValue::String(id.clone().into()))
+                        else {
+                            bail!("Could not find GameParams ID {id:?}");
+                        };
 
-                                return Ok(());
-                            }
-                            params_list
-                                .inner()
-                                .first()
-                                .expect("params_list has no items?")
-                                .clone()
-                        }
-                        _ => {
-                            panic!("Unexpected GameParams root element type");
-                        }
+                        dict.clone()
                     }
-                } else {
-                    pickle
-                };
+                    pickled::Value::Tuple(params_tuple) => {
+                        if ids {
+                            println!("GameParams format does not have IDs");
 
-                let writer = BufWriter::new(File::create(&out_file)?);
-                if ugly {
-                    let mut serializer = serde_json::Serializer::new(writer);
-                    params_dict.serialize(&mut serializer)?;
-                } else {
-                    let mut serializer = serde_json::Serializer::pretty(writer);
-                    params_dict.serialize(&mut serializer)?;
+                            return Ok(());
+                        }
+                        params_tuple
+                            .inner()
+                            .first()
+                            .expect("params_list has no items?")
+                            .clone()
+                    }
+                    pickled::Value::List(params_list) => {
+                        if ids {
+                            println!("GameParams format does not have IDs");
+
+                            return Ok(());
+                        }
+                        params_list
+                            .inner()
+                            .first()
+                            .expect("params_list has no items?")
+                            .clone()
+                    }
+                    _ => {
+                        panic!("Unexpected GameParams root element type");
+                    }
                 }
+            } else {
+                pickle
+            };
 
-                println!("GameParams written to {out_file:?}");
+            let writer = BufWriter::new(File::create(&out_file)?);
+            if ugly {
+                let mut serializer = serde_json::Serializer::new(writer);
+                params_dict.serialize(&mut serializer)?;
+            } else {
+                let mut serializer = serde_json::Serializer::pretty(writer);
+                params_dict.serialize(&mut serializer)?;
             }
-            None => {
-                return Err(eyre::eyre!(
-                    "Package file loader is unavailable. Check that the pkg_dir exists."
-                ));
-            }
-        },
+
+            println!("GameParams written to {out_file:?}");
+        }
         Commands::List { dir } => {
-            let paths = file_tree.paths();
-            for (path, node) in &paths {
+            for (path, entry) in &file_tree {
                 let matches = dir
                     .as_ref()
-                    .map(|dir| path.starts_with(dir))
+                    .map(|dir| path.starts_with(dir.as_str()))
                     .unwrap_or(true);
                 if !matches {
                     continue;
                 }
 
-                if node.is_file() {
-                    print!("(F)")
-                } else {
-                    print!("(D)")
-                }
-
-                print!(
-                    " {}",
-                    path.as_os_str()
-                        .to_str()
-                        .expect("could not convert path to string")
-                );
-
-                if let Some(info) = node.file_info() {
-                    println!(" {} bytes", info.unpacked_size);
+                match entry {
+                    VfsEntry::File { file_info, .. } => {
+                        println!("(F) {} {} bytes", path, file_info.unpacked_size);
+                    }
+                    VfsEntry::Directory => {
+                        print!("(D) {path}");
+                        println!();
+                    }
                 }
             }
         }
         Commands::Grep { pattern, path } => {
-            let Some(pkg_loader) = pkg_loader.as_mut() else {
-                return Err(eyre::eyre!(
-                    "Package file loader is unavailable. Check that the pkg_dir exists."
-                ));
+            let Some(vfs) = &vfs else {
+                bail!("Package file loader is unavailable. Check that the pkg_dir exists.");
             };
 
             let regex = regex::bytes::Regex::new(pattern.as_str())?;
@@ -553,63 +579,74 @@ fn run() -> Result<()> {
             let glob =
                 path.map(|glob| glob::Pattern::new(glob.as_str()).expect("invalid glob pattern"));
 
-            let files = file_tree.paths();
+            let files: Vec<(&String, &VfsEntry)> = file_tree.iter().collect();
 
             let buffer = ThreadLocal::<RefCell<Vec<u8>>>::new();
 
-            let bar = ProgressBar::new(files.iter().len() as u64);
+            let bar = ProgressBar::new(files.len() as u64);
 
             files
                 .into_par_iter()
                 .progress_with(bar.clone())
-                .for_each(|(path, node)| {
+                .for_each(|(path, entry)| {
                     if let Some(glob) = &glob
-                        && !glob.matches_path(&path)
+                        && !glob.matches(path.as_str())
                     {
                         return;
                     }
 
-                    if path.is_dir() {
+                    if matches!(entry, VfsEntry::Directory) {
                         return;
                     }
+
+                    let file_info = match entry {
+                        VfsEntry::File { file_info, .. } => file_info,
+                        _ => return,
+                    };
 
                     let buffer = buffer.get_or_default();
                     let mut buffer = buffer.borrow_mut();
 
                     buffer.clear();
 
-                    let Some(file_info) = node.file_info() else {
-                        return;
-                    };
                     let bytes_needed =
                         (file_info.unpacked_size as usize).saturating_sub(buffer.capacity());
                     if bytes_needed > 0 {
                         buffer.reserve(bytes_needed);
                     }
 
-                    node.read_file(pkg_loader, &mut *buffer)
-                        .expect("failed to read file");
+                    let Ok(mut file) = vfs.join(path.as_str()).and_then(|p| p.open_file()) else {
+                        return;
+                    };
+
+                    if file.read_to_end(&mut *buffer).is_err() {
+                        return;
+                    }
 
                     if let Some(matched) = regex.find(buffer.as_slice()) {
-                        let file_path = path.as_os_str().to_string_lossy();
-
                         if let Ok(data) = std::str::from_utf8(matched.as_bytes()) {
-                            bar.println(format!("{} matched: {}", file_path, data));
+                            bar.println(format!("{path} matched: {data}"));
                         } else {
-                            bar.println(format!("{} matched", file_path));
+                            bar.println(format!("{path} matched"));
                         }
                     }
                 });
         }
         Commands::DiffDump { out_dir } => {
+            let Some(vfs) = &vfs else {
+                bail!("Package file loader is unavailable. Check that the pkg_dir exists.");
+            };
+
             let game_version = game_version.expect("could not determine latest game version");
             std::fs::write(out_dir.join("version.txt"), game_version.to_string())?;
 
             let file_info_path = out_dir.join("pkg_files");
 
             // Dump file info
-            for file in serialization::tree_to_serialized_files(file_tree.clone()) {
-                let mut dest = file_info_path.join(&file.path);
+            for file in serialization::tree_to_serialized_files(&file_tree) {
+                let file_path_on_disk =
+                    file_info_path.join(file.path().replace('/', std::path::MAIN_SEPARATOR_STR));
+                let mut dest = file_path_on_disk;
                 let mut new_name = dest.file_name().expect("file has no name?").to_os_string();
                 new_name.push(".txt");
                 dest.set_file_name(new_name);
@@ -631,97 +668,87 @@ fn run() -> Result<()> {
             let game_params_path = out_dir.join("game_params");
 
             // Dump params info
-            match pkg_loader.as_mut() {
-                Some(pkg_loader) => {
-                    let pickle = load_game_params(pkg_loader, &file_tree)?;
+            let pickle = load_game_params(vfs)?;
 
-                    // Dump the base params first
-                    let base_path = game_params_path.join("base");
+            // Dump the base params first
+            let base_path = game_params_path.join("base");
 
-                    let handle_params_from_listish = |params: &pickled::Value| {
+            let handle_params_from_listish = |params: &pickled::Value| -> Result<(), Report> {
+                let pickled::Value::Dict(params) = params else {
+                    bail!("Params are not a dictionary");
+                };
+
+                let params = params.inner();
+                for (key, value) in params.iter() {
+                    let key_str = key.to_string_key().expect("key is not stringable");
+
+                    dump_param(&key_str, value, base_path.to_owned());
+                }
+
+                Ok(())
+            };
+
+            match pickle {
+                pickled::Value::Dict(params_dict) => {
+                    let params_dict = params_dict.inner();
+
+                    let base_data = params_dict
+                        .get(&HashableValue::String("".to_string().into()))
+                        .expect("failed to find base GameParams");
+
+                    let base_data = base_data
+                        .dict_ref()
+                        .expect("params are not a dictionary")
+                        .inner();
+
+                    for (key, value) in base_data.iter() {
+                        let key = key.to_string_key().expect("key is not stringable");
+
+                        dump_param(key.as_ref(), value, base_path.to_owned());
+                    }
+
+                    for (region, params) in params_dict.iter().filter(|(key, _value)| {
+                        key.string_ref()
+                            .map(|s| !s.inner().is_empty())
+                            .unwrap_or_default()
+                    }) {
                         let pickled::Value::Dict(params) = params else {
-                            return Err(eyre::eyre!("Params are not a dictionary"));
+                            continue;
                         };
+
+                        let region_key = region
+                            .to_string_key()
+                            .expect("could not convert region to string");
+                        let region_path = game_params_path.join(region_key.as_ref());
 
                         let params = params.inner();
                         for (key, value) in params.iter() {
                             let key_str = key.to_string_key().expect("key is not stringable");
 
-                            dump_param(&key_str, value, base_path.to_owned());
+                            dump_param(&key_str, value, region_path.to_owned());
                         }
-
-                        Ok(())
-                    };
-
-                    match pickle {
-                        pickled::Value::Dict(params_dict) => {
-                            let params_dict = params_dict.inner();
-
-                            let base_data = params_dict
-                                .get(&HashableValue::String("".to_string().into()))
-                                .expect("failed to find base GameParams");
-
-                            let base_data = base_data
-                                .dict_ref()
-                                .expect("params are not a dictionary")
-                                .inner();
-
-                            for (key, value) in base_data.iter() {
-                                let key = key.to_string_key().expect("key is not stringable");
-
-                                dump_param(key.as_ref(), value, base_path.to_owned());
-                            }
-
-                            for (region, params) in params_dict.iter().filter(|(key, _value)| {
-                                key.string_ref()
-                                    .map(|s| !s.inner().is_empty())
-                                    .unwrap_or_default()
-                            }) {
-                                let pickled::Value::Dict(params) = params else {
-                                    continue;
-                                };
-
-                                let region_key = region
-                                    .to_string_key()
-                                    .expect("could not convert region to string");
-                                let region_path = game_params_path.join(region_key.as_ref());
-
-                                let params = params.inner();
-                                for (key, value) in params.iter() {
-                                    let key_str =
-                                        key.to_string_key().expect("key is not stringable");
-
-                                    dump_param(&key_str, value, region_path.to_owned());
-                                }
-                            }
-                        }
-                        pickled::Value::Tuple(params_tuple) => {
-                            handle_params_from_listish(
-                                params_tuple
-                                    .inner()
-                                    .first()
-                                    .expect("params tuple does not have any items?"),
-                            )?;
-                        }
-                        pickled::Value::List(params_list) => {
-                            let params = params_list.inner();
-                            let params = params
-                                .first()
-                                .expect("params list does not have any items?");
-
-                            handle_params_from_listish(params)?;
-                        }
-                        _ => {
-                            panic!("Unexpected GameParams root element type");
-                        }
-                    };
+                    }
                 }
-                None => {
-                    return Err(eyre::eyre!(
-                        "Package file loader is unavailable. Check that the pkg_dir exists."
-                    ));
+                pickled::Value::Tuple(params_tuple) => {
+                    handle_params_from_listish(
+                        params_tuple
+                            .inner()
+                            .first()
+                            .expect("params tuple does not have any items?"),
+                    )?;
                 }
-            }
+                pickled::Value::List(params_list) => {
+                    let params = params_list.inner();
+                    let params = params
+                        .first()
+                        .expect("params list does not have any items?");
+
+                    handle_params_from_listish(params)?;
+                }
+                _ => {
+                    panic!("Unexpected GameParams root element type");
+                }
+            };
         }
         Commands::Geometry { .. } | Commands::AssetsBin { .. } => {
             unreachable!("handled before idx loading")
@@ -763,24 +790,6 @@ fn dump_param(file_stem: &str, value: &pickled::Value, mut out_path: PathBuf) ->
     let parent = out_path.parent().expect("no parent dir?");
     std::fs::create_dir_all(parent).expect("failed to create parent dir");
 
-    // Doesn't work well with vcs
-
-    // if let Some((base, path)) = &base
-    //     && *base == value
-    // {
-    //     if std::fs::symlink_metadata(&out_path).ok()?.is_symlink() {
-    //         symlink::remove_symlink_file(&out_path).ok()?;
-    //     } else if out_path.is_file() {
-    //         std::fs::remove_file(&out_path).ok()?;
-    //     }
-
-    //     // Create a symlink
-    //     symlink::symlink_file(path, &out_path)
-    //         .with_context(|| format!("path={path:?}, out_path={out_path:?}"))
-    //         .expect("failed to create symlink");
-    //     return None;
-    // } else
-
     let file =
         BufWriter::new(std::fs::File::create(out_path).expect("failed to create output file"));
 
@@ -792,29 +801,25 @@ fn dump_param(file_stem: &str, value: &pickled::Value, mut out_path: PathBuf) ->
     None
 }
 
-fn load_game_params(pkg_loader: &PkgFileLoader, file_tree: &FileNode) -> Result<pickled::Value> {
-    let Ok(game_params_file) = file_tree.find("content/GameParams.data") else {
-        return Err(eyre::eyre!(
-            "Could not find GameParams.data in WoWs package"
-        ));
-    };
+fn load_game_params(vfs: &VfsPath) -> Result<pickled::Value, Report> {
+    let mut game_params_data: Vec<u8> = Vec::new();
+    vfs.join("content/GameParams.data")
+        .context("VFS path error")?
+        .open_file()
+        .context("Could not find GameParams.data in WoWs package")?
+        .read_to_end(&mut game_params_data)
+        .context("Failed to read GameParams")?;
 
-    let mut game_params_data: Vec<u8> =
-        Vec::with_capacity(game_params_file.file_info().unwrap().unpacked_size as usize);
-
-    game_params_file
-        .read_file(pkg_loader, &mut game_params_data)
-        .expect("failed to read GameParams");
-
-    let pickle = game_params_to_pickle(game_params_data).expect("failed to deserialize GameParams");
+    let pickle =
+        game_params_to_pickle(game_params_data).context("Failed to deserialize GameParams")?;
 
     Ok(pickle)
 }
 
-fn run_geometry(file: &Path, decode: bool) -> Result<()> {
+fn run_geometry(file: &Path, decode: bool) -> Result<(), Report> {
     use wowsunpack::models::geometry;
 
-    let input_file = File::open(file).wrap_err("Failed to open .geometry file")?;
+    let input_file = File::open(file).context("Failed to open .geometry file")?;
     let mmap = unsafe { MmapOptions::new().map(&input_file)? };
 
     let geom = geometry::parse_geometry(&mmap)?;
@@ -827,7 +832,11 @@ fn run_geometry(file: &Path, decode: bool) -> Result<()> {
     for (i, m) in geom.vertices_mapping.iter().enumerate() {
         println!(
             "  [{i}] id=0x{:08X} buf={} offset={} count={} texelDensity=0x{:04X}",
-            m.mapping_id, m.merged_buffer_index, m.items_offset, m.items_count, m.packed_texel_density
+            m.mapping_id,
+            m.merged_buffer_index,
+            m.items_offset,
+            m.items_count,
+            m.packed_texel_density
         );
     }
     println!();
@@ -836,7 +845,11 @@ fn run_geometry(file: &Path, decode: bool) -> Result<()> {
     for (i, m) in geom.indices_mapping.iter().enumerate() {
         println!(
             "  [{i}] id=0x{:08X} buf={} offset={} count={} texelDensity=0x{:04X}",
-            m.mapping_id, m.merged_buffer_index, m.items_offset, m.items_count, m.packed_texel_density
+            m.mapping_id,
+            m.merged_buffer_index,
+            m.items_offset,
+            m.items_count,
+            m.packed_texel_density
         );
     }
     println!();
@@ -899,10 +912,10 @@ fn run_geometry(file: &Path, decode: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result<()> {
+fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result<(), Report> {
     use wowsunpack::models::assets_bin;
 
-    let input_file = File::open(file).wrap_err("Failed to open assets.bin file")?;
+    let input_file = File::open(file).context("Failed to open assets.bin file")?;
     let mmap = unsafe { MmapOptions::new().map(&input_file)? };
 
     let db = assets_bin::parse_assets_bin(&mmap)?;
@@ -959,9 +972,7 @@ fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result
     println!("PathsStorage: {} entries", db.paths_storage.len());
     let mut shown = 0;
     for entry in &db.paths_storage {
-        let matches = filter
-            .map(|f| entry.name.contains(f))
-            .unwrap_or(true);
+        let matches = filter.map(|f| entry.name.contains(f)).unwrap_or(true);
         if !matches {
             continue;
         }
@@ -972,7 +983,11 @@ fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result
         shown += 1;
         if shown >= max_paths {
             let remaining = if let Some(f) = filter {
-                db.paths_storage.iter().filter(|e| e.name.contains(f)).count() - shown
+                db.paths_storage
+                    .iter()
+                    .filter(|e| e.name.contains(f))
+                    .count()
+                    - shown
             } else {
                 db.paths_storage.len() - shown
             };
@@ -995,7 +1010,7 @@ fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Report> {
     let timestamp = Instant::now();
 
     run()?;

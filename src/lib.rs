@@ -10,12 +10,15 @@ pub mod game_data;
 pub mod game_params;
 /// Game concept types (entities, positions, enums) useful across WoWS tools.
 pub mod game_types;
-/// Generic wrapper for values that may or may not match a known variant.
-pub mod recognized;
 /// 3D model formats (geometry, visual, etc.)
 pub mod models;
+/// Generic wrapper for values that may or may not match a known variant.
+pub mod recognized;
 /// Utilities involving the game's RPC functions -- useful for parsing entity defs and RPC definitions.
 pub mod rpc;
+
+#[cfg(feature = "vfs")]
+pub use vfs;
 
 #[cfg(feature = "arc")]
 pub type Rc<T> = std::sync::Arc<T>;

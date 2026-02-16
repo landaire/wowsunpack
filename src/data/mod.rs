@@ -1,9 +1,17 @@
 /// Main logic for parsing the game's resource index files
 pub mod idx;
+/// VFS abstraction for reading files from IDX/PKG archives
+#[cfg(feature = "vfs")]
+pub mod idx_vfs;
+/// Shared winnow parsing utilities
+pub mod parser_utils;
 /// Utilities for helping load and maintain `.pkg` files
 pub mod pkg;
 // File tree serialization utilities
 pub mod serialization;
+/// Wrapper types for VFS data sources
+#[cfg(feature = "vfs")]
+pub mod wrappers;
 
 use std::borrow::Cow;
 

@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
-    path::Path,
     sync::Arc,
 };
 
@@ -13,7 +12,7 @@ use tracing::debug;
 
 use crate::{
     Rc,
-    data::{DataFileWithCallback, ResourceLoader, idx::FileNode, pkg::PkgFileLoader},
+    data::{DataFileWithCallback, ResourceLoader},
     error::ErrorKind,
     game_params::convert::game_params_to_pickle,
     game_types::GameParamId,
@@ -829,8 +828,8 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                 continue;
             };
             let launcher_inner = launcher.inner();
-            let Some(ammo_val) = launcher_inner
-                .get(&HashableValue::String("ammoList".to_string().into()))
+            let Some(ammo_val) =
+                launcher_inner.get(&HashableValue::String("ammoList".to_string().into()))
             else {
                 continue;
             };
@@ -851,8 +850,10 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         }
     }
 
-    let config_data = if hull_upgrades.is_empty() && torpedo_ammo.is_empty()
-        && max_main_battery_m.is_none() && max_secondary_battery_m.is_none()
+    let config_data = if hull_upgrades.is_empty()
+        && torpedo_ammo.is_empty()
+        && max_main_battery_m.is_none()
+        && max_secondary_battery_m.is_none()
     {
         None
     } else {
@@ -879,15 +880,15 @@ impl GameMetadataProvider {
     /// representation.
     ///
     /// See [`GameMetadataProvider::from_params`] if you wish to use caching.
-    pub fn from_pkg(
-        file_tree: &FileNode,
-        pkg_loader: &PkgFileLoader,
-    ) -> Result<GameMetadataProvider, ErrorKind> {
+    pub fn from_vfs(vfs: &vfs::VfsPath) -> Result<GameMetadataProvider, ErrorKind> {
         debug!("deserializing gameparams");
 
-        let game_params = file_tree.find("content/GameParams.data")?;
         let mut game_params_data = Vec::new();
-        game_params.read_file(pkg_loader, &mut game_params_data)?;
+        vfs.join("content/GameParams.data")
+            .map_err(|e| ErrorKind::ParsingFailure(format!("VFS join error: {e}")))?
+            .open_file()
+            .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+            .read_to_end(&mut game_params_data)?;
 
         let pickled_params: Value = game_params_to_pickle(game_params_data)?;
 
@@ -1135,15 +1136,13 @@ impl GameMetadataProvider {
 
         let params = new_params;
 
-        Self::from_params(params, file_tree, pkg_loader)
+        Self::from_params_with_vfs(params, vfs)
     }
 
-    /// Constructs a GameMetadataProvider from a pre-built list of GameParams. This may be useful for callers
-    /// who wish to cache GameParams and avoid the cost of loading and converting directly from game PKG files.
-    pub fn from_params(
+    /// Constructs a GameMetadataProvider from a pre-built list of GameParams and a VFS.
+    pub fn from_params_with_vfs(
         params: Vec<Param>,
-        file_tree: &FileNode,
-        pkg_loader: &PkgFileLoader,
+        vfs: &vfs::VfsPath,
     ) -> Result<GameMetadataProvider, ErrorKind> {
         let param_id_to_translation_id = HashMap::from_iter(
             params
@@ -1154,11 +1153,12 @@ impl GameMetadataProvider {
         let data_file_loader = DataFileWithCallback::new(|path| {
             debug!("requesting file: {path}");
 
-            let path = Path::new(path);
-
             let mut file_data = Vec::new();
-            file_tree
-                .read_file_at_path(path, pkg_loader, &mut file_data)
+            vfs.join(path)
+                .expect("failed to join path")
+                .open_file()
+                .expect("failed to open file")
+                .read_to_end(&mut file_data)
                 .expect("failed to read file");
 
             Ok(Cow::Owned(file_data))
