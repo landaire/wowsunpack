@@ -230,6 +230,35 @@ impl From<i64> for PlaneId {
     }
 }
 
+/// A projectile identifier within a salvo (shell or torpedo).
+/// Used to match projectile launches with hit/kill events.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ShotId(u32);
+
+impl ShotId {
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for ShotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u32> for ShotId {
+    fn from(v: u32) -> Self {
+        ShotId(v)
+    }
+}
+
 // =============================================================================
 // Position Types
 // =============================================================================
@@ -283,6 +312,30 @@ impl std::ops::Mul<f32> for WorldPos {
             x: self.x * rhs,
             y: self.y * rhs,
             z: self.z * rhs,
+        }
+    }
+}
+
+/// 2D world-space position (X/Z plane) for entities that lack altitude data,
+/// such as minimap plane squadron positions.
+#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct WorldPos2D {
+    pub x: f32,
+    pub z: f32,
+}
+
+impl WorldPos2D {
+    /// Promote to 3D with `y = 0.0`.
+    pub fn to_world_pos(self) -> WorldPos {
+        WorldPos {
+            x: self.x,
+            y: 0.0,
+            z: self.z,
         }
     }
 }
@@ -1066,15 +1119,16 @@ impl fmt::Display for FinishType {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub enum DepthState {
+pub enum BuoyancyState {
     Invalid,
     Surface,
     Periscope,
-    Working,
-    Invulnerable,
+    SemiDeepWater,
+    DeepWater,
+    DeepWaterInvul,
 }
 
-impl DepthState {
+impl BuoyancyState {
     pub fn from_id(
         id: i32,
         constants: &BattleConstants,
@@ -1087,43 +1141,49 @@ impl DepthState {
 
     pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
         match name {
-            "INVALID_STATE" => Recognized::Known(DepthState::Invalid),
-            "SURFACE" => Recognized::Known(DepthState::Surface),
-            "PERISCOPE" => Recognized::Known(DepthState::Periscope),
-            "WORKING" => Recognized::Known(DepthState::Working),
-            "INVULNERABLE" => Recognized::Known(DepthState::Invulnerable),
+            "INVALID_STATE" => Recognized::Known(BuoyancyState::Invalid),
+            "SURFACE" => Recognized::Known(BuoyancyState::Surface),
+            "PERISCOPE" => Recognized::Known(BuoyancyState::Periscope),
+            "SEMI_DEEP_WATER" => Recognized::Known(BuoyancyState::SemiDeepWater),
+            "DEEP_WATER" => Recognized::Known(BuoyancyState::DeepWater),
+            "DEEP_WATER_INVUL" => Recognized::Known(BuoyancyState::DeepWaterInvul),
+            // Legacy names from old battle.xml
+            "WORKING" => Recognized::Known(BuoyancyState::SemiDeepWater),
+            "INVULNERABLE" => Recognized::Known(BuoyancyState::DeepWaterInvul),
             other => Recognized::Unknown(other.to_string()),
         }
     }
 
     pub const fn name(&self) -> &'static str {
         match self {
-            DepthState::Invalid => "INVALID_STATE",
-            DepthState::Surface => "SURFACE",
-            DepthState::Periscope => "PERISCOPE",
-            DepthState::Working => "WORKING",
-            DepthState::Invulnerable => "INVULNERABLE",
+            BuoyancyState::Invalid => "INVALID_STATE",
+            BuoyancyState::Surface => "SURFACE",
+            BuoyancyState::Periscope => "PERISCOPE",
+            BuoyancyState::SemiDeepWater => "SEMI_DEEP_WATER",
+            BuoyancyState::DeepWater => "DEEP_WATER",
+            BuoyancyState::DeepWaterInvul => "DEEP_WATER_INVUL",
         }
     }
 
     pub const fn description(&self) -> &'static str {
         match self {
-            DepthState::Invalid => "Invalid",
-            DepthState::Surface => "Surface",
-            DepthState::Periscope => "Periscope",
-            DepthState::Working => "Operating Depth",
-            DepthState::Invulnerable => "Deep Dive",
+            BuoyancyState::Invalid => "Invalid",
+            BuoyancyState::Surface => "Surface",
+            BuoyancyState::Periscope => "Periscope",
+            BuoyancyState::SemiDeepWater => "Semi-Deep",
+            BuoyancyState::DeepWater => "Deep",
+            BuoyancyState::DeepWaterInvul => "Deep (Invul)",
         }
     }
 }
 
-impl Default for DepthState {
+impl Default for BuoyancyState {
     fn default() -> Self {
-        DepthState::Surface
+        BuoyancyState::Surface
     }
 }
 
-impl fmt::Display for DepthState {
+impl fmt::Display for BuoyancyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.description())
     }
