@@ -12,6 +12,8 @@ pub mod game_params;
 pub mod game_types;
 /// Generic wrapper for values that may or may not match a known variant.
 pub mod recognized;
+/// 3D model formats (geometry, visual, etc.)
+pub mod models;
 /// Utilities involving the game's RPC functions -- useful for parsing entity defs and RPC definitions.
 pub mod rpc;
 

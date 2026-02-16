@@ -138,6 +138,28 @@ enum Commands {
     DiffDump {
         out_dir: PathBuf,
     },
+    /// Parse and inspect a .geometry model file
+    Geometry {
+        /// Path to the .geometry file
+        file: PathBuf,
+
+        /// Decode ENCD-compressed vertex/index buffers and print sizes
+        #[clap(long)]
+        decode: bool,
+    },
+    /// Parse and inspect an assets.bin (PrototypeDatabase) file
+    AssetsBin {
+        /// Path to the assets.bin file
+        file: PathBuf,
+
+        /// Filter path entries by name substring
+        #[clap(long)]
+        filter: Option<String>,
+
+        /// Maximum number of path entries to display
+        #[clap(long, default_value = "50")]
+        max_paths: usize,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, ValueEnum)]
@@ -158,6 +180,19 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile> {
 
 fn run() -> Result<()> {
     let mut args = Args::parse();
+
+    // Handle commands that don't need idx/pkg infrastructure
+    if let Commands::Geometry { file, decode } = &args.command {
+        return run_geometry(file, *decode);
+    }
+    if let Commands::AssetsBin {
+        file,
+        filter,
+        max_paths,
+    } = &args.command
+    {
+        return run_assets_bin(file, filter.as_deref(), *max_paths);
+    }
 
     let mut game_dir = PathBuf::from(std::env::args().next().expect("failed to get first arg"))
         .parent()
@@ -688,6 +723,9 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Geometry { .. } | Commands::AssetsBin { .. } => {
+            unreachable!("handled before idx loading")
+        }
     }
 
     Ok(())
@@ -771,6 +809,190 @@ fn load_game_params(pkg_loader: &PkgFileLoader, file_tree: &FileNode) -> Result<
     let pickle = game_params_to_pickle(game_params_data).expect("failed to deserialize GameParams");
 
     Ok(pickle)
+}
+
+fn run_geometry(file: &Path, decode: bool) -> Result<()> {
+    use wowsunpack::models::geometry;
+
+    let input_file = File::open(file).wrap_err("Failed to open .geometry file")?;
+    let mmap = unsafe { MmapOptions::new().map(&input_file)? };
+
+    let geom = geometry::parse_geometry(&mmap)?;
+
+    println!("=== .geometry file: {} ===", file.display());
+    println!("File size: {} bytes", mmap.len());
+    println!();
+
+    println!("Vertices mappings: {}", geom.vertices_mapping.len());
+    for (i, m) in geom.vertices_mapping.iter().enumerate() {
+        println!(
+            "  [{i}] id=0x{:08X} buf={} offset={} count={} texelDensity=0x{:04X}",
+            m.mapping_id, m.merged_buffer_index, m.items_offset, m.items_count, m.packed_texel_density
+        );
+    }
+    println!();
+
+    println!("Indices mappings: {}", geom.indices_mapping.len());
+    for (i, m) in geom.indices_mapping.iter().enumerate() {
+        println!(
+            "  [{i}] id=0x{:08X} buf={} offset={} count={} texelDensity=0x{:04X}",
+            m.mapping_id, m.merged_buffer_index, m.items_offset, m.items_count, m.packed_texel_density
+        );
+    }
+    println!();
+
+    println!("Merged vertices: {}", geom.merged_vertices.len());
+    for (i, v) in geom.merged_vertices.iter().enumerate() {
+        let encoding = match &v.data {
+            geometry::VertexData::Encoded { element_count, .. } => {
+                format!("ENCD ({element_count} elements)")
+            }
+            geometry::VertexData::Raw(_) => "raw".to_string(),
+        };
+        println!(
+            "  [{i}] format=\"{}\" size={} stride={} skinned={} bumped={} encoding={}",
+            v.format_name, v.size_in_bytes, v.stride_in_bytes, v.is_skinned, v.is_bumped, encoding
+        );
+
+        if decode {
+            match v.data.decode() {
+                Ok(decoded) => println!("    -> decoded {} bytes of vertex data", decoded.len()),
+                Err(e) => println!("    -> decode error: {e:?}"),
+            }
+        }
+    }
+    println!();
+
+    println!("Merged indices: {}", geom.merged_indices.len());
+    for (i, idx) in geom.merged_indices.iter().enumerate() {
+        let encoding = match &idx.data {
+            geometry::IndexData::Encoded { element_count, .. } => {
+                format!("ENCD ({element_count} elements)")
+            }
+            geometry::IndexData::Raw(_) => "raw".to_string(),
+        };
+        println!(
+            "  [{i}] size={} indexSize={} encoding={}",
+            idx.size_in_bytes, idx.index_size, encoding
+        );
+
+        if decode {
+            match idx.data.decode() {
+                Ok(decoded) => println!("    -> decoded {} bytes of index data", decoded.len()),
+                Err(e) => println!("    -> decode error: {e:?}"),
+            }
+        }
+    }
+    println!();
+
+    println!("Collision models: {}", geom.collision_models.len());
+    for (i, cm) in geom.collision_models.iter().enumerate() {
+        println!("  [{i}] name=\"{}\" size={}", cm.name, cm.size_in_bytes);
+    }
+    println!();
+
+    println!("Armor models: {}", geom.armor_models.len());
+    for (i, am) in geom.armor_models.iter().enumerate() {
+        println!("  [{i}] name=\"{}\" size={}", am.name, am.size_in_bytes);
+    }
+
+    Ok(())
+}
+
+fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result<()> {
+    use wowsunpack::models::assets_bin;
+
+    let input_file = File::open(file).wrap_err("Failed to open assets.bin file")?;
+    let mmap = unsafe { MmapOptions::new().map(&input_file)? };
+
+    let db = assets_bin::parse_assets_bin(&mmap)?;
+
+    println!("=== assets.bin (PrototypeDatabase): {} ===", file.display());
+    println!("File size: {} bytes", mmap.len());
+    println!();
+
+    println!("Header:");
+    println!("  magic:        0x{:08X}", db.header.magic);
+    println!("  version:      0x{:08X}", db.header.version);
+    println!("  checksum:     0x{:08X}", db.header.checksum);
+    println!("  architecture: 0x{:04X}", db.header.architecture);
+    println!("  endianness:   0x{:04X}", db.header.endianness);
+    println!();
+
+    println!("Strings:");
+    println!(
+        "  offsetsMap: capacity={}, buckets={} bytes, values={} bytes",
+        db.strings.offsets_map.capacity,
+        db.strings.offsets_map.buckets.len(),
+        db.strings.offsets_map.values.len()
+    );
+    println!("  string data: {} bytes", db.strings.string_data.len());
+    // Show a few sample strings
+    let mut sample_count = 0;
+    let mut pos = 0;
+    while pos < db.strings.string_data.len() && sample_count < 5 {
+        if db.strings.string_data[pos] == 0 {
+            pos += 1;
+            continue;
+        }
+        if let Some(s) = db.strings.get_string(pos as u32) {
+            if !s.is_empty() {
+                println!("    [offset={pos}] \"{s}\"");
+                pos += s.len() + 1;
+                sample_count += 1;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+    println!();
+
+    println!("ResourceToPrototypeMap:");
+    println!(
+        "  capacity={}, buckets={} bytes, values={} bytes",
+        db.resource_to_prototype_map.capacity,
+        db.resource_to_prototype_map.buckets.len(),
+        db.resource_to_prototype_map.values.len()
+    );
+    println!();
+
+    println!("PathsStorage: {} entries", db.paths_storage.len());
+    let mut shown = 0;
+    for entry in &db.paths_storage {
+        let matches = filter
+            .map(|f| entry.name.contains(f))
+            .unwrap_or(true);
+        if !matches {
+            continue;
+        }
+        println!(
+            "  selfId=0x{:016X} parentId=0x{:016X} name=\"{}\"",
+            entry.self_id, entry.parent_id, entry.name
+        );
+        shown += 1;
+        if shown >= max_paths {
+            let remaining = if let Some(f) = filter {
+                db.paths_storage.iter().filter(|e| e.name.contains(f)).count() - shown
+            } else {
+                db.paths_storage.len() - shown
+            };
+            if remaining > 0 {
+                println!("  ... and {remaining} more (use --max-paths to show more)");
+            }
+            break;
+        }
+    }
+    println!();
+
+    println!("Databases: {} entries", db.databases.len());
+    for (i, entry) in db.databases.iter().enumerate() {
+        println!(
+            "  [{i}] magic=0x{:08X} checksum=0x{:08X} size={} bytes",
+            entry.prototype_magic, entry.prototype_checksum, entry.size
+        );
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
