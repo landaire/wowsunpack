@@ -1,11 +1,8 @@
 use serde_json::Map;
 
-use std::io::Write;
+use std::io::{Read, Write};
 
-use crate::{
-    data::{idx::FileNode, pkg::PkgFileLoader},
-    error::ErrorKind,
-};
+use crate::error::ErrorKind;
 
 fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value {
     match pickled {
@@ -107,13 +104,15 @@ pub fn pickle_to_json(pickled: pickled::Value) -> serde_json::Value {
 
 pub fn read_game_params_as_json<W: Write>(
     pretty_print: bool,
-    file_tree: FileNode,
-    pkg_loader: &PkgFileLoader,
+    vfs: &vfs::VfsPath,
     writer: &mut W,
 ) -> Result<(), crate::error::ErrorKind> {
-    let game_params = file_tree.find("content/GameParams.data")?;
     let mut game_params_data = Vec::new();
-    game_params.read_file(pkg_loader, &mut game_params_data)?;
+    vfs.join("content/GameParams.data")
+        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS join error: {e}")))?
+        .open_file()
+        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+        .read_to_end(&mut game_params_data)?;
 
     let decoded = super::game_params_to_pickle(game_params_data)?;
     println!("decoded to pickle");

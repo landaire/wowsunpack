@@ -1,10 +1,10 @@
-use std::{path::PathBuf, rc::Rc};
+use crate::data::idx::VfsEntry;
+use std::collections::BTreeMap;
 
-use crate::data::idx::FileNode;
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SerializedFile {
-    pub path: PathBuf,
+    pub path: String,
     is_directory: bool,
     compressed_size: usize,
     compression_info: u64,
@@ -13,7 +13,7 @@ pub struct SerializedFile {
 }
 
 impl SerializedFile {
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &str {
         &self.path
     }
 
@@ -42,44 +42,31 @@ impl SerializedFile {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SerializedFileInfo {}
 
-pub fn tree_to_serialized_files(node: FileNode) -> Vec<SerializedFile> {
-    let mut out = Vec::new();
+pub fn tree_to_serialized_files(entries: &BTreeMap<String, VfsEntry>) -> Vec<SerializedFile> {
+    let mut out = Vec::with_capacity(entries.len());
 
-    let mut nodes = vec![(Rc::new(PathBuf::new()), node)];
-    while let Some((path, node)) = nodes.pop() {
-        let this_path = path.join(node.filename());
-        let (compressed_size, compression_info, unpacked_size, crc32) = node
-            .file_info()
-            .map(|file_info| {
-                (
-                    file_info.size as usize,
-                    file_info.compression_info,
-                    file_info.unpacked_size as usize,
-                    file_info.crc32,
-                )
-            })
-            .unwrap_or_default();
+    for (path, entry) in entries {
+        let (is_directory, compressed_size, compression_info, unpacked_size, crc32) = match entry {
+            VfsEntry::File { file_info, .. } => (
+                false,
+                file_info.size as usize,
+                file_info.compression_info,
+                file_info.unpacked_size as usize,
+                file_info.crc32,
+            ),
+            VfsEntry::Directory => (true, 0, 0, 0, 0),
+        };
 
-        let file = SerializedFile {
-            path: this_path.clone(),
-            is_directory: !node.is_file(),
+        out.push(SerializedFile {
+            path: path.clone(),
+            is_directory,
             compressed_size,
             compression_info,
             unpacked_size,
             crc32,
-        };
-
-        out.push(file);
-
-        let this_path = Rc::new(this_path);
-
-        for child in node.children().values() {
-            nodes.push((Rc::clone(&this_path), child.clone()));
-        }
+        });
     }
 
-    // Sort the files for consistency since the ordering isn't guaranteed otherwise
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-
+    // Already sorted since BTreeMap iterates in order
     out
 }

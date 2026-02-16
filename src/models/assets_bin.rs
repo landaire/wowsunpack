@@ -1,11 +1,25 @@
+use rootcause::Report;
+use thiserror::Error;
 use winnow::Parser;
 use winnow::binary::{le_i64, le_u16, le_u32};
-use winnow::error::ContextError;
+
+use crate::data::parser_utils::{WResult, parse_packed_string_fields, resolve_relptr};
 
 const BWDB_MAGIC: u32 = 0x42574442;
 const BWDB_VERSION: u32 = 0x01010000;
 
-type WResult<T> = Result<T, winnow::error::ErrMode<ContextError>>;
+/// Errors that can occur during assets.bin (PrototypeDatabase) parsing.
+#[derive(Debug, Error)]
+pub enum AssetsBinError {
+    #[error("invalid magic: 0x{actual:08X} (expected 0x{expected:08X})")]
+    InvalidMagic { actual: u32, expected: u32 },
+    #[error("unsupported version: 0x{actual:08X} (expected 0x{expected:08X})")]
+    UnsupportedVersion { actual: u32, expected: u32 },
+    #[error("data extends beyond file at 0x{offset:X}")]
+    OutOfBounds { offset: usize },
+    #[error("parse error: {0}")]
+    ParseError(String),
+}
 
 /// The top-level parsed assets.bin (PrototypeDatabase) file.
 #[derive(Debug)]
@@ -70,14 +84,12 @@ impl StringsSection<'_> {
             return None;
         }
         let remaining = &self.string_data[start..];
-        let end = remaining.iter().position(|&b| b == 0).unwrap_or(remaining.len());
+        let end = remaining
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(remaining.len());
         std::str::from_utf8(&remaining[..end]).ok()
     }
-}
-
-/// Resolve a relative pointer: base + rel_value = absolute file offset.
-fn resolve_relptr(base: usize, rel_value: i64) -> usize {
-    (base as i64 + rel_value) as usize
 }
 
 fn parse_header_fields(input: &mut &[u8]) -> WResult<Header> {
@@ -165,23 +177,25 @@ fn resolve_hashmap<'a>(
     values_relptr: i64,
     bucket_stride: usize,
     value_stride: usize,
-) -> eyre::Result<HashmapSection<'a>> {
+) -> Result<HashmapSection<'a>, Report<AssetsBinError>> {
     let cap = capacity as usize;
 
     let buckets_offset = resolve_relptr(base, buckets_relptr);
     let buckets_end = buckets_offset + cap * bucket_stride;
-    eyre::ensure!(
-        buckets_end <= file_data.len(),
-        "hashmap buckets extend beyond file: 0x{buckets_offset:X}..0x{buckets_end:X}"
-    );
+    if buckets_end > file_data.len() {
+        return Err(Report::new(AssetsBinError::OutOfBounds {
+            offset: buckets_offset,
+        }));
+    }
     let buckets = &file_data[buckets_offset..buckets_end];
 
     let values_offset = resolve_relptr(base, values_relptr);
     let values_end = values_offset + cap * value_stride;
-    eyre::ensure!(
-        values_end <= file_data.len(),
-        "hashmap values extend beyond file: 0x{values_offset:X}..0x{values_end:X}"
-    );
+    if values_end > file_data.len() {
+        return Err(Report::new(AssetsBinError::OutOfBounds {
+            offset: values_offset,
+        }));
+    }
     let values = &file_data[values_offset..values_end];
 
     Ok(HashmapSection {
@@ -200,19 +214,11 @@ fn parse_path_entry_ids(input: &mut &[u8]) -> WResult<(u64, u64)> {
     Ok((self_id, parent_id))
 }
 
-/// Parse packed string fields: (size, pad, relptr)
-fn parse_packed_string_fields(input: &mut &[u8]) -> WResult<(u32, u32, i64)> {
-    let size = le_u32.parse_next(input)?;
-    let pad = le_u32.parse_next(input)?;
-    let relptr = le_i64.parse_next(input)?;
-    Ok((size, pad, relptr))
-}
-
 fn parse_path_entries(
     file_data: &[u8],
     data_offset: usize,
     count: usize,
-) -> eyre::Result<Vec<PathEntry>> {
+) -> Result<Vec<PathEntry>, Report<AssetsBinError>> {
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -220,21 +226,26 @@ fn parse_path_entries(
         let input = &mut &file_data[entry_base..];
 
         let (self_id, parent_id) = parse_path_entry_ids(input)
-            .map_err(|e| eyre::eyre!("pathEntry[{i}] parse error: {e}"))?;
+            .map_err(|e| Report::new(AssetsBinError::ParseError(format!("pathEntry[{i}]: {e}"))))?;
 
         // name is a packed string at entry_base + 0x10
         let name_base = entry_base + 0x10;
         let name_input = &mut &file_data[name_base..];
-        let (name_size, _pad, name_relptr) = parse_packed_string_fields(name_input)
-            .map_err(|e| eyre::eyre!("pathEntry[{i}] name parse error: {e}"))?;
+        let (name_size, _pad, name_relptr) =
+            parse_packed_string_fields(name_input).map_err(|e| {
+                Report::new(AssetsBinError::ParseError(format!(
+                    "pathEntry[{i}] name: {e}"
+                )))
+            })?;
 
         let name = if name_size > 0 {
             let name_data_offset = resolve_relptr(name_base, name_relptr);
             let name_end = name_data_offset + name_size as usize;
-            eyre::ensure!(
-                name_end <= file_data.len(),
-                "pathEntry[{i}] name extends beyond file"
-            );
+            if name_end > file_data.len() {
+                return Err(Report::new(AssetsBinError::OutOfBounds {
+                    offset: name_data_offset,
+                }));
+            }
             let name_bytes = &file_data[name_data_offset..name_end];
             let name_bytes = name_bytes.strip_suffix(&[0]).unwrap_or(name_bytes);
             String::from_utf8_lossy(name_bytes).into_owned()
@@ -266,7 +277,7 @@ fn parse_database_entries<'a>(
     file_data: &'a [u8],
     entries_offset: usize,
     count: usize,
-) -> eyre::Result<Vec<DatabaseEntry<'a>>> {
+) -> Result<Vec<DatabaseEntry<'a>>, Report<AssetsBinError>> {
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -274,17 +285,18 @@ fn parse_database_entries<'a>(
         let input = &mut &file_data[entry_base..];
 
         let (prototype_magic, prototype_checksum, size, _pad, data_relptr) =
-            parse_database_entry_fields(input)
-                .map_err(|e| eyre::eyre!("database[{i}] parse error: {e}"))?;
+            parse_database_entry_fields(input).map_err(|e| {
+                Report::new(AssetsBinError::ParseError(format!("database[{i}]: {e}")))
+            })?;
 
         let data = if size > 0 {
             let data_offset = resolve_relptr(entry_base, data_relptr);
             let data_end = data_offset + size as usize;
-            eyre::ensure!(
-                data_end <= file_data.len(),
-                "database[{i}] data extends beyond file: 0x{data_offset:X}..0x{data_end:X}, file_len=0x{:X}",
-                file_data.len()
-            );
+            if data_end > file_data.len() {
+                return Err(Report::new(AssetsBinError::OutOfBounds {
+                    offset: data_offset,
+                }));
+            }
             &file_data[data_offset..data_end]
         } else {
             &[]
@@ -302,27 +314,29 @@ fn parse_database_entries<'a>(
 }
 
 /// Parse an assets.bin file into a PrototypeDatabase.
-pub fn parse_assets_bin(file_data: &[u8]) -> eyre::Result<PrototypeDatabase<'_>> {
+pub fn parse_assets_bin(file_data: &[u8]) -> Result<PrototypeDatabase<'_>, Report<AssetsBinError>> {
     let input = &mut &file_data[..];
 
     let header = parse_header_fields(input)
-        .map_err(|e| eyre::eyre!("failed to parse assets.bin header: {e}"))?;
+        .map_err(|e| Report::new(AssetsBinError::ParseError(format!("header: {e}"))))?;
 
-    eyre::ensure!(
-        header.magic == BWDB_MAGIC,
-        "invalid magic: 0x{:08X} (expected 0x{BWDB_MAGIC:08X})",
-        header.magic
-    );
-    eyre::ensure!(
-        header.version == BWDB_VERSION,
-        "unsupported version: 0x{:08X} (expected 0x{BWDB_VERSION:08X})",
-        header.version
-    );
+    if header.magic != BWDB_MAGIC {
+        return Err(Report::new(AssetsBinError::InvalidMagic {
+            actual: header.magic,
+            expected: BWDB_MAGIC,
+        }));
+    }
+    if header.version != BWDB_VERSION {
+        return Err(Report::new(AssetsBinError::UnsupportedVersion {
+            actual: header.version,
+            expected: BWDB_VERSION,
+        }));
+    }
 
     let body_base = 0x10; // header is 16 bytes
 
     let body = parse_body_header(&mut &file_data[body_base..])
-        .map_err(|e| eyre::eyre!("failed to parse assets.bin body header: {e}"))?;
+        .map_err(|e| Report::new(AssetsBinError::ParseError(format!("body header: {e}"))))?;
 
     // strings section: base = body_base (0x10)
     let strings_base = body_base;
@@ -332,16 +346,17 @@ pub fn parse_assets_bin(file_data: &[u8]) -> eyre::Result<PrototypeDatabase<'_>>
         body.offsets_map_capacity,
         body.offsets_map_buckets_relptr,
         body.offsets_map_values_relptr,
-        8,  // u64 buckets
-        4,  // u32 values
+        8, // u64 buckets
+        4, // u32 values
     )?;
 
     let string_data_offset = resolve_relptr(strings_base, body.string_data_relptr);
     let string_data_end = string_data_offset + body.string_data_size as usize;
-    eyre::ensure!(
-        string_data_end <= file_data.len(),
-        "string data extends beyond file"
-    );
+    if string_data_end > file_data.len() {
+        return Err(Report::new(AssetsBinError::OutOfBounds {
+            offset: string_data_offset,
+        }));
+    }
     let string_data = &file_data[string_data_offset..string_data_end];
 
     let strings = StringsSection {
@@ -364,19 +379,13 @@ pub fn parse_assets_bin(file_data: &[u8]) -> eyre::Result<PrototypeDatabase<'_>>
     // pathsStorage: base = body_base + 0x40
     let paths_base = body_base + 0x40;
     let paths_data_offset = resolve_relptr(paths_base, body.paths_data_relptr);
-    let paths_storage = parse_path_entries(
-        file_data,
-        paths_data_offset,
-        body.paths_count as usize,
-    )?;
+    let paths_storage =
+        parse_path_entries(file_data, paths_data_offset, body.paths_count as usize)?;
 
     // databases: relptr relative to body_base
     let db_entries_offset = resolve_relptr(body_base, body.databases_relptr);
-    let databases = parse_database_entries(
-        file_data,
-        db_entries_offset,
-        body.databases_count as usize,
-    )?;
+    let databases =
+        parse_database_entries(file_data, db_entries_offset, body.databases_count as usize)?;
 
     Ok(PrototypeDatabase {
         header,
