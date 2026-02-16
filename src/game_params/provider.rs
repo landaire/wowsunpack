@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::Arc,
 };
@@ -726,43 +726,142 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             }
         }
 
-        // Read artillery max range
-        if let Some(art_comp) = components
-            .get(&HashableValue::String("artillery".to_string().into()))
-            .and_then(|v| read_first_string(v))
-        {
-            if let Some(art_data) = ship_data
-                .get(&HashableValue::String(art_comp.into()))
-                .and_then(|v| v.dict_ref())
-            {
-                config.main_battery_m = read_float(&*art_data.inner(), "maxDist").map(Meters::from);
-            }
-        }
-
-        // Read ATBA (secondary) max range
-        if let Some(atba_comp) = components
-            .get(&HashableValue::String("atba".to_string().into()))
-            .and_then(|v| read_first_string(v))
-        {
-            if let Some(atba_data) = ship_data
-                .get(&HashableValue::String(atba_comp.into()))
-                .and_then(|v| v.dict_ref())
-            {
-                config.secondary_battery_m =
-                    read_float(&*atba_data.inner(), "maxDist").map(Meters::from);
-            }
-        }
-
         // Only store if we got meaningful data
         if config.detection_km.value() > 0.0 {
             hull_upgrades.insert(upgrade_name, config);
         }
     }
 
-    let config_data = if hull_upgrades.is_empty() {
+    // Collect weapon ranges from all upgrade types.
+    // Artillery, torpedo, and secondary upgrades are independent of hull selection.
+    let mut torpedo_ammo = HashSet::new();
+    let mut max_main_battery_m: Option<Meters> = None;
+    let mut max_secondary_battery_m: Option<Meters> = None;
+
+    for (_upgrade_name_val, upgrade_value) in upgrade_data.inner().iter() {
+        let Some(upgrade_dict) = upgrade_value.dict_ref() else {
+            continue;
+        };
+        let upgrade_dict = upgrade_dict.inner();
+        let Some(uc_type) = upgrade_dict
+            .get(&HashableValue::String("ucType".to_string().into()))
+            .and_then(|v| v.string_ref().map(|s| s.inner().clone()))
+        else {
+            continue;
+        };
+
+        let components = upgrade_dict
+            .get(&HashableValue::String("components".to_string().into()))
+            .and_then(|v| v.dict_ref());
+        let Some(components) = components else {
+            continue;
+        };
+
+        // Collect main battery maxDist from _Hull and _Artillery upgrades
+        if uc_type == "_Hull" || uc_type == "_Artillery" {
+            if let Some(art_comp) = components
+                .inner()
+                .get(&HashableValue::String("artillery".to_string().into()))
+                .and_then(|v| read_first_string(v))
+            {
+                if let Some(art_data) = ship_data
+                    .get(&HashableValue::String(art_comp.into()))
+                    .and_then(|v| v.dict_ref())
+                {
+                    if let Some(m) = read_float(&*art_data.inner(), "maxDist").map(Meters::from) {
+                        max_main_battery_m = Some(match max_main_battery_m {
+                            Some(prev) if prev.value() >= m.value() => prev,
+                            _ => m,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Collect secondary battery maxDist from _Hull upgrades
+        if uc_type == "_Hull" {
+            if let Some(atba_comp) = components
+                .inner()
+                .get(&HashableValue::String("atba".to_string().into()))
+                .and_then(|v| read_first_string(v))
+            {
+                if let Some(atba_data) = ship_data
+                    .get(&HashableValue::String(atba_comp.into()))
+                    .and_then(|v| v.dict_ref())
+                {
+                    if let Some(m) = read_float(&*atba_data.inner(), "maxDist").map(Meters::from) {
+                        max_secondary_battery_m = Some(match max_secondary_battery_m {
+                            Some(prev) if prev.value() >= m.value() => prev,
+                            _ => m,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Collect torpedo ammo from _Torpedoes upgrades
+        if uc_type != "_Torpedoes" {
+            continue;
+        }
+        let Some(components) = upgrade_dict
+            .get(&HashableValue::String("components".to_string().into()))
+            .and_then(|v| v.dict_ref())
+        else {
+            continue;
+        };
+        // Get the torpedo component name(s) from this upgrade
+        let Some(torp_comp) = components
+            .inner()
+            .get(&HashableValue::String("torpedoes".to_string().into()))
+            .and_then(|v| read_first_string(v))
+        else {
+            continue;
+        };
+        // Look up that component in the ship data and extract ammo from launchers
+        let Some(torp_data) = ship_data
+            .get(&HashableValue::String(torp_comp.into()))
+            .and_then(|v| v.dict_ref())
+        else {
+            continue;
+        };
+        for (_key, val) in torp_data.inner().iter() {
+            let Some(launcher) = val.dict_ref() else {
+                continue;
+            };
+            let launcher_inner = launcher.inner();
+            let Some(ammo_val) = launcher_inner
+                .get(&HashableValue::String("ammoList".to_string().into()))
+            else {
+                continue;
+            };
+            // ammoList can be either a Tuple or List in pickled data
+            let mut insert_ammo = |item: &Value| {
+                if let Some(name) = item.string_ref() {
+                    torpedo_ammo.insert(name.inner().clone());
+                }
+            };
+            match ammo_val {
+                Value::Tuple(t) => t.inner().iter().for_each(&mut insert_ammo),
+                Value::List(l) => {
+                    let items = l.inner();
+                    items.iter().for_each(&mut insert_ammo);
+                }
+                _ => continue,
+            };
+        }
+    }
+
+    let config_data = if hull_upgrades.is_empty() && torpedo_ammo.is_empty()
+        && max_main_battery_m.is_none() && max_secondary_battery_m.is_none()
+    {
         None
     } else {
-        Some(crate::game_params::types::ShipConfigData { hull_upgrades })
+        Some(crate::game_params::types::ShipConfigData {
+            hull_upgrades,
+            main_battery_m: max_main_battery_m,
+            secondary_battery_m: max_secondary_battery_m,
+            torpedo_ammo,
+        })
     };
 
     Vehicle::builder()
@@ -957,8 +1056,17 @@ impl GameMetadataProvider {
                                         .and_then(|v| v.string_ref())
                                         .map(|s| s.inner().to_string())
                                         .unwrap_or_default();
+                                    let max_dist = param_data
+                                        .get(&HashableValue::String("maxDist".to_string().into()))
+                                        .and_then(|v| {
+                                            v.f64_ref()
+                                                .map(|f| *f as f32)
+                                                .or_else(|| v.i64_ref().map(|i| *i as f32))
+                                        })
+                                        .map(BigWorldDistance::from);
                                     Some(ParamData::Projectile(Projectile::builder()
                                         .ammo_type(ammo_type)
+                                        .maybe_max_dist(max_dist)
                                         .build()))
                                 },
                                 _ => {

@@ -174,6 +174,103 @@ pub enum ArgValue<'argtype> {
     Tuple(Vec<ArgValue<'argtype>>),
 }
 
+
+impl<'argtype> ArgValue<'argtype> {
+    /// Convert any integer variant to i32 (widening or narrowing as needed).
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::Int8(v) => Some(*v as i32),
+            Self::Int16(v) => Some(*v as i32),
+            Self::Int32(v) => Some(*v),
+            Self::Int64(v) => Some(*v as i32),
+            Self::Uint8(v) => Some(*v as i32),
+            Self::Uint16(v) => Some(*v as i32),
+            Self::Uint32(v) => Some(*v as i32),
+            Self::Uint64(v) => Some(*v as i32),
+            _ => None,
+        }
+    }
+
+    /// Convert any integer variant to u32 (widening or narrowing as needed).
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Int8(v) => Some(*v as u32),
+            Self::Int16(v) => Some(*v as u32),
+            Self::Int32(v) => Some(*v as u32),
+            Self::Int64(v) => Some(*v as u32),
+            Self::Uint8(v) => Some(*v as u32),
+            Self::Uint16(v) => Some(*v as u32),
+            Self::Uint32(v) => Some(*v),
+            Self::Uint64(v) => Some(*v as u32),
+            _ => None,
+        }
+    }
+
+    /// Convert any integer variant to i64 (always lossless for signed).
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int8(v) => Some(*v as i64),
+            Self::Int16(v) => Some(*v as i64),
+            Self::Int32(v) => Some(*v as i64),
+            Self::Int64(v) => Some(*v),
+            Self::Uint8(v) => Some(*v as i64),
+            Self::Uint16(v) => Some(*v as i64),
+            Self::Uint32(v) => Some(*v as i64),
+            Self::Uint64(v) => Some(*v as i64),
+            _ => None,
+        }
+    }
+
+    /// Convert any integer variant to u64 (widening or narrowing as needed).
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Int8(v) => Some(*v as u64),
+            Self::Int16(v) => Some(*v as u64),
+            Self::Int32(v) => Some(*v as u64),
+            Self::Int64(v) => Some(*v as u64),
+            Self::Uint8(v) => Some(*v as u64),
+            Self::Uint16(v) => Some(*v as u64),
+            Self::Uint32(v) => Some(*v as u64),
+            Self::Uint64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Convert any numeric variant to f32.
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::Float32(v) => Some(*v),
+            Self::Float64(v) => Some(*v as f32),
+            Self::Int8(v) => Some(*v as f32),
+            Self::Int16(v) => Some(*v as f32),
+            Self::Int32(v) => Some(*v as f32),
+            Self::Int64(v) => Some(*v as f32),
+            Self::Uint8(v) => Some(*v as f32),
+            Self::Uint16(v) => Some(*v as f32),
+            Self::Uint32(v) => Some(*v as f32),
+            Self::Uint64(v) => Some(*v as f32),
+            _ => None,
+        }
+    }
+
+    /// Convert any numeric variant to f64.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Float64(v) => Some(*v),
+            Self::Float32(v) => Some(*v as f64),
+            Self::Int8(v) => Some(*v as f64),
+            Self::Int16(v) => Some(*v as f64),
+            Self::Int32(v) => Some(*v as f64),
+            Self::Int64(v) => Some(*v as f64),
+            Self::Uint8(v) => Some(*v as f64),
+            Self::Uint16(v) => Some(*v as f64),
+            Self::Uint32(v) => Some(*v as f64),
+            Self::Uint64(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 impl<'argtype> serde::Serialize for ArgValue<'argtype> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

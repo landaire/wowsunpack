@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Add, Mul, Sub};
 
 use bon::Builder;
@@ -712,10 +712,6 @@ pub struct HullUpgradeConfig {
     pub detection_km: Km,
     /// Air detection range in km.
     pub air_detection_km: Km,
-    /// Main battery max range in meters (from the artillery component tied to this hull).
-    pub main_battery_m: Option<Meters>,
-    /// Secondary battery max range in meters (from the ATBA component tied to this hull).
-    pub secondary_battery_m: Option<Meters>,
 }
 
 /// Ship configuration data extracted from GameParams.
@@ -731,6 +727,13 @@ pub struct HullUpgradeConfig {
 pub struct ShipConfigData {
     /// Hull upgrade configs keyed by upgrade GameParam name (e.g. "PAUH442_New_York_1934").
     pub hull_upgrades: HashMap<String, HullUpgradeConfig>,
+    /// Max main battery range across all artillery upgrades.
+    pub main_battery_m: Option<Meters>,
+    /// Max secondary battery range across all hull upgrades.
+    pub secondary_battery_m: Option<Meters>,
+    /// Names of torpedo ammo GameParams across all torpedo upgrades.
+    /// Resolved to max range in meters in resolve_ranges().
+    pub torpedo_ammo: HashSet<String>,
 }
 
 /// Resolved ship range values in real-world units.
@@ -745,6 +748,8 @@ pub struct ShipRanges {
     pub main_battery_m: Option<Meters>,
     /// Secondary battery max range in meters.
     pub secondary_battery_m: Option<Meters>,
+    /// Torpedo max range in meters.
+    pub torpedo_range_m: Option<Meters>,
     /// Radar detection range in meters.
     pub radar_m: Option<Meters>,
     /// Hydro detection range in meters.
@@ -811,8 +816,26 @@ impl Vehicle {
             if let Some(hc) = hull_config {
                 ranges.detection_km = Some(hc.detection_km);
                 ranges.air_detection_km = Some(hc.air_detection_km);
-                ranges.main_battery_m = hc.main_battery_m;
-                ranges.secondary_battery_m = hc.secondary_battery_m;
+                ranges.main_battery_m = config.main_battery_m;
+                ranges.secondary_battery_m = config.secondary_battery_m;
+                // Torpedo range: look up all ammo params and take the max range
+                if let Some(game_params) = game_params {
+                    let mut max_range: Option<Meters> = None;
+                    for ammo_name in &config.torpedo_ammo {
+                        if let Some(ammo_param) = game_params.game_param_by_name(ammo_name) {
+                            if let Some(projectile) = ammo_param.projectile() {
+                                if let Some(dist) = projectile.max_dist() {
+                                    let m = dist.to_meters();
+                                    max_range = Some(match max_range {
+                                        Some(prev) if prev.value() >= m.value() => prev,
+                                        _ => m,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ranges.torpedo_range_m = max_range;
+                }
             }
         }
 
@@ -1340,11 +1363,18 @@ impl Aircraft {
 pub struct Projectile {
     #[cfg_attr(feature = "serde", serde(default))]
     ammo_type: String,
+    /// Maximum range in BigWorld units. Present for torpedo ammo.
+    #[cfg_attr(feature = "serde", serde(default))]
+    max_dist: Option<BigWorldDistance>,
 }
 
 impl Projectile {
     pub fn ammo_type(&self) -> &str {
         &self.ammo_type
+    }
+
+    pub fn max_dist(&self) -> Option<BigWorldDistance> {
+        self.max_dist
     }
 }
 
