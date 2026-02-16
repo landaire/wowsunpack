@@ -289,12 +289,17 @@ hashes to offsets within the `stringData` byte array.
 
 ### OffsetsMap Hashmap
 
-- **capacity**: Number of hash buckets (always a power of 2 + 1)
-- **buckets**: Array of `capacity` entries, each 8 bytes (`u64`).
-  High bit set = occupied. Upper 32 bits contain metadata, lower 32 bits contain
-  a hash or key.
+Uses open addressing with linear probing. Slot = `name_id % capacity`.
+
+- **capacity**: Number of hash buckets
+- **buckets**: Array of `capacity` entries, each 8 bytes: `(u32 key, u32 sentinel)`.
+  - `key`: The 32-bit string name hash (MurmurHash3). 0 when slot is empty.
+  - `sentinel`: Has bit 31 set (0x80000000+) when occupied. 0 when empty.
 - **values**: Array of `capacity` entries, each 4 bytes (`u32`).
   Contains offsets into the string data array.
+
+Prototype records use `u32` name IDs (e.g. `nameId`, `materialNameId` in RenderSet)
+that are looked up through this hashmap to get the string data offset.
 
 ### String Data
 
@@ -304,13 +309,20 @@ names, and other text identifiers.
 
 ## ResourceToPrototypeMap
 
-A hashmap mapping resource IDs (64-bit hashes) to prototype indices.
+A hashmap mapping resource IDs (64-bit hashes) to prototype locations.
+Uses open addressing with linear probing. Slot = `selfId % capacity`.
 
 - **capacity**: Number of hash buckets
-- **buckets**: Array of `capacity` entries, each **16 bytes** (`u128`).
-  First 8 bytes = resource ID hash, next 8 bytes = metadata/flags.
+- **buckets**: Array of `capacity` entries, each **16 bytes**.
+  - Bytes 0-7 (`u64`): The key (`selfId` from pathsStorage)
+  - Bytes 8-15 (`u64`): Occupancy sentinel (1 = occupied, 0 = empty)
 - **values**: Array of `capacity` entries, each 4 bytes (`u32`).
-  Index into the pathsStorage array.
+  Encoded prototype location:
+  ```
+  value = (record_index << 8) | (blob_index * 4)
+  ```
+  - Low byte (`value & 0xFF`): `blob_index * 4` (type tag)
+  - Upper 24 bits (`value >> 8`): record index within that database blob
 
 ## PathsStorage
 
@@ -351,6 +363,43 @@ The data blobs are contiguous and collectively consume the remainder of the file
 Each database represents a different prototype type (e.g., visual, model, geometry,
 skeleton, material). The `prototypeMagic` and `prototypeChecksum` values are
 validated against a static table during loading.
+
+## Prototype Types
+
+The PrototypeDatabase contains 10 registered prototype types. Each type has a
+magic value (MurmurHash3_x86_32 of the type name string), a fixed item size,
+and a corresponding database blob.
+
+| Idx | Type Name                  | Magic      | Item Size   | Registration Fn  |
+|-----|----------------------------|------------|-------------|------------------|
+| 0   | MaterialPrototype          | 0x5069C471 | 0x78 (120B) | sub_140026de0    |
+| 1   | VisualPrototype            | 0x480DC57B | 0x70 (112B) | sub_140026f40    |
+| 2   | SkeletonExtenderPrototype  | 0x1AE023FF | 0x20 (32B)  | sub_140035cb0    |
+| 3   | ModelPrototype             | 0xA9576F28 | 0x28 (40B)  | sub_140035b20    |
+| 4   | PointLightPrototype        | 0x0D3665A4 | 0x70 (112B) | sub_1400658e0    |
+| 5   | EffectPrototype            | 0xEB23E0AF | 0x10 (16B)  | sub_140033cc0    |
+| 6   | VelocityFieldPrototype     | 0xAFD4A63F | 0x18 (24B)  | sub_140034190    |
+| 7   | EffectPresetPrototype      | 0x42E15336 | 0x10 (16B)  | sub_140033e50    |
+| 8   | EffectMetadataPrototype    | 0xDFC8F8E0 | 0x10 (16B)  | sub_140033b30    |
+| 9   | AtlasContourProto          | 0xF64359AA | 0x10 (16B)  | sub_140033fb0    |
+
+### Database Blob Structure
+
+Each blob has a 16-byte header followed by fixed-size records and out-of-line data:
+
+```
+Offset  Size          Content
+------  ----          -------
++0x00   8             count (u64 — number of records)
++0x08   8             header_size (u64 — always 16)
++0x10   count*item    Fixed-size records (item_size bytes each)
++...    remainder     Out-of-line (OOL) data: variable-length arrays, strings
+```
+
+Relative pointers (i64) in records point into the OOL region. The base for
+resolving relptrs is always the start of the containing struct:
+- Top-level record fields: base = record start
+- Sub-struct fields (e.g. RenderSet, LOD): base = sub-struct start
 
 ## File Layout Example
 

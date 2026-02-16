@@ -1,6 +1,5 @@
 use rootcause::prelude::*;
 
-use memmap2::MmapOptions;
 use pickled::HashableValue;
 use serde::Serialize;
 use std::{
@@ -25,7 +24,7 @@ use wowsunpack::data::{
 };
 use wowsunpack::game_params::convert::game_params_to_pickle;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rayon::prelude::*;
 
@@ -143,16 +142,20 @@ enum Commands {
     },
     /// Parse and inspect a .geometry model file
     Geometry {
-        /// Path to the .geometry file
+        /// Path to the .geometry file (VFS path by default, disk path with --no-vfs)
         file: PathBuf,
 
         /// Decode ENCD-compressed vertex/index buffers and print sizes
         #[clap(long)]
         decode: bool,
+
+        /// Read file from disk instead of VFS
+        #[clap(long)]
+        no_vfs: bool,
     },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
-        /// Path to the assets.bin file
+        /// Path to the assets.bin file (VFS path by default, disk path with --no-vfs)
         file: PathBuf,
 
         /// Filter path entries by name substring
@@ -162,6 +165,18 @@ enum Commands {
         /// Maximum number of path entries to display
         #[clap(long, default_value = "50")]
         max_paths: usize,
+
+        /// Resolve a path suffix to its prototype location and print record info
+        #[clap(long)]
+        resolve: Option<String>,
+
+        /// Parse and display a VisualPrototype by path suffix
+        #[clap(long)]
+        parse_visual: Option<String>,
+
+        /// Read file from disk instead of VFS
+        #[clap(long)]
+        no_vfs: bool,
     },
 }
 
@@ -177,21 +192,31 @@ fn load_idx_file(path: PathBuf) -> Result<idx::IdxFile, Report> {
     Ok(idx::parse(&file_data)?)
 }
 
+/// Read file data from disk (if `no_vfs`) or from the VFS.
+fn read_file_data(path: &Path, no_vfs: bool, vfs: Option<&VfsPath>) -> Result<Vec<u8>, Report> {
+    if no_vfs {
+        return Ok(std::fs::read(path).context("Failed to read file from disk")?);
+    }
+
+    let Some(vfs) = vfs else {
+        bail!(
+            "No VFS available. Use --game-dir to specify a game install, \
+             or --no-vfs to read from disk."
+        );
+    };
+
+    let vfs_path = path.to_string_lossy().replace('\\', "/");
+    let mut data = Vec::new();
+    vfs.join(&vfs_path)
+        .context("VFS path error")?
+        .open_file()
+        .context_with(|| format!("File not found in VFS: '{vfs_path}'"))?
+        .read_to_end(&mut data)?;
+    Ok(data)
+}
+
 fn run() -> Result<(), Report> {
     let mut args = Args::parse();
-
-    // Handle commands that don't need idx/pkg infrastructure
-    if let Commands::Geometry { file, decode } = &args.command {
-        return run_geometry(file, *decode);
-    }
-    if let Commands::AssetsBin {
-        file,
-        filter,
-        max_paths,
-    } = &args.command
-    {
-        return run_assets_bin(file, filter.as_deref(), *max_paths);
-    }
 
     let mut game_dir = PathBuf::from(std::env::args().next().expect("failed to get first arg"))
         .parent()
@@ -204,98 +229,95 @@ fn run() -> Result<(), Report> {
 
     let mut game_version = None;
 
-    // If we didn't get any idx dirs/files passed to us, try auto-detecting the
-    // WoWs directory
+    // Try to set up VFS from game directory / idx files. This is best-effort:
+    // if no game dir is provided and no idx files exist, vfs will be None.
+    let mut vfs: Option<VfsPath> = None;
+    let mut file_tree = BTreeMap::new();
+
     if args.idx_files.is_empty() {
         let bin_dir = game_dir.join("bin");
         if game_dir.join("WorldOfWarships.exe").exists() {
-            // Maybe we are? Try enumerating the `bin` directory
-            let paths = fs::read_dir(&bin_dir)
-                .context("No index files were provided and could not enumerate `bin` directory")?;
-            for path in paths {
-                let path = path.context("could not enumerate path")?;
-                if path.file_type()?.is_dir()
-                    && let Ok(version) = u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
-                {
-                    match game_version {
-                        Some(other_version) => {
-                            if other_version < version {
-                                game_version = Some(version);
+            let paths = fs::read_dir(&bin_dir).ok();
+            if let Some(paths) = paths {
+                for path in paths {
+                    let Ok(path) = path else { continue };
+                    if path.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                        && let Ok(version) =
+                            u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
+                    {
+                        match game_version {
+                            Some(other_version) => {
+                                if other_version < version {
+                                    game_version = Some(version);
+                                }
                             }
+                            None => game_version = Some(version),
                         }
-                        None => game_version = Some(version),
                     }
                 }
             }
-        }
 
-        if let Some(latest_version) = game_version {
-            let latest_version_str = format!("{latest_version}");
-
-            args.idx_files
-                .push(bin_dir.join(latest_version_str.as_str()).join("idx"));
-        }
-
-        if game_version.is_none() || !args.idx_files[0].exists() {
-            Args::command().print_help()?;
-
-            eprintln!();
-
-            bail!(
-                "Could not find game idx files. Either provide the path(s) manually or make sure your game installation folder is well-formed"
-            );
-        }
-    }
-
-    let resources = Mutex::new(Vec::new());
-    let mut paths = Vec::with_capacity(args.idx_files.len());
-
-    for path in args.idx_files {
-        if path.is_dir() {
-            if let Some(parent) = path.parent()
-                && let Some(stem) = parent.file_stem().and_then(|stem| stem.to_str())
-                && let Some(version) = stem.parse::<u64>().ok()
-            {
-                game_version = Some(version);
-            }
-
-            for path in fs::read_dir(path)? {
-                let path = path?;
-                if path.file_type()?.is_file() {
-                    paths.push(path.path());
+            if let Some(latest_version) = game_version {
+                let latest_version_str = format!("{latest_version}");
+                let idx_path = bin_dir.join(latest_version_str.as_str()).join("idx");
+                if idx_path.exists() {
+                    args.idx_files.push(idx_path);
                 }
             }
-        } else {
-            paths.push(path);
         }
     }
 
-    let packages_dir = args.pkg_dir.or_else(|| {
-        Some(
-            paths[0]
-                .parent()?
-                .parent()?
-                .parent()?
-                .parent()?
-                .join("res_packages"),
-        )
-    });
+    if !args.idx_files.is_empty() {
+        let resources = Mutex::new(Vec::new());
+        let mut paths = Vec::with_capacity(args.idx_files.len());
 
-    paths.into_par_iter().try_for_each(|path| {
-        resources.lock().unwrap().push(load_idx_file(path)?);
+        for path in args.idx_files {
+            if path.is_dir() {
+                if let Some(parent) = path.parent()
+                    && let Some(stem) = parent.file_stem().and_then(|stem| stem.to_str())
+                    && let Some(version) = stem.parse::<u64>().ok()
+                {
+                    game_version = Some(version);
+                }
 
-        Ok::<(), Report>(())
-    })?;
+                for path in fs::read_dir(path)? {
+                    let path = path?;
+                    if path.file_type()?.is_file() {
+                        paths.push(path.path());
+                    }
+                }
+            } else {
+                paths.push(path);
+            }
+        }
 
-    let idx_files = resources.into_inner().unwrap();
-    let file_tree = idx::build_file_tree(&idx_files);
+        let packages_dir = args.pkg_dir.or_else(|| {
+            Some(
+                paths[0]
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .join("res_packages"),
+            )
+        });
 
-    // Build VFS for commands that need to read file contents
-    let vfs = packages_dir.as_ref().map(|pkg_dir| {
-        let pkg_source = MmapPkgSource::new(pkg_dir);
-        let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
-        VfsPath::new(idx_vfs)
-    });
+        paths.into_par_iter().try_for_each(|path| {
+            resources.lock().unwrap().push(load_idx_file(path)?);
+
+            Ok::<(), Report>(())
+        })?;
+
+        let idx_files = resources.into_inner().unwrap();
+        file_tree = idx::build_file_tree(&idx_files);
+
+        // Build VFS for commands that need to read file contents
+        vfs = packages_dir.as_ref().map(|pkg_dir| {
+            let pkg_source = MmapPkgSource::new(pkg_dir);
+            let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
+            VfsPath::new(idx_vfs)
+        });
+    }
 
     match args.command {
         Commands::Extract {
@@ -750,8 +772,31 @@ fn run() -> Result<(), Report> {
                 }
             };
         }
-        Commands::Geometry { .. } | Commands::AssetsBin { .. } => {
-            unreachable!("handled before idx loading")
+        Commands::Geometry {
+            file,
+            decode,
+            no_vfs,
+        } => {
+            let file_data = read_file_data(&file, no_vfs, vfs.as_ref())?;
+            run_geometry(&file_data, &file.to_string_lossy(), decode)?;
+        }
+        Commands::AssetsBin {
+            file,
+            filter,
+            max_paths,
+            resolve,
+            parse_visual,
+            no_vfs,
+        } => {
+            let file_data = read_file_data(&file, no_vfs, vfs.as_ref())?;
+            run_assets_bin(
+                &file_data,
+                &file.to_string_lossy(),
+                filter.as_deref(),
+                max_paths,
+                resolve.as_deref(),
+                parse_visual.as_deref(),
+            )?;
         }
     }
 
@@ -816,16 +861,13 @@ fn load_game_params(vfs: &VfsPath) -> Result<pickled::Value, Report> {
     Ok(pickle)
 }
 
-fn run_geometry(file: &Path, decode: bool) -> Result<(), Report> {
+fn run_geometry(file_data: &[u8], name: &str, decode: bool) -> Result<(), Report> {
     use wowsunpack::models::geometry;
 
-    let input_file = File::open(file).context("Failed to open .geometry file")?;
-    let mmap = unsafe { MmapOptions::new().map(&input_file)? };
+    let geom = geometry::parse_geometry(file_data)?;
 
-    let geom = geometry::parse_geometry(&mmap)?;
-
-    println!("=== .geometry file: {} ===", file.display());
-    println!("File size: {} bytes", mmap.len());
+    println!("=== .geometry file: {} ===", name);
+    println!("File size: {} bytes", file_data.len());
     println!();
 
     println!("Vertices mappings: {}", geom.vertices_mapping.len());
@@ -912,16 +954,93 @@ fn run_geometry(file: &Path, decode: bool) -> Result<(), Report> {
     Ok(())
 }
 
-fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result<(), Report> {
+fn run_assets_bin(
+    file_data: &[u8],
+    name: &str,
+    filter: Option<&str>,
+    max_paths: usize,
+    resolve: Option<&str>,
+    parse_visual: Option<&str>,
+) -> Result<(), Report> {
     use wowsunpack::models::assets_bin;
+    use wowsunpack::models::visual;
 
-    let input_file = File::open(file).context("Failed to open assets.bin file")?;
-    let mmap = unsafe { MmapOptions::new().map(&input_file)? };
+    let db = assets_bin::parse_assets_bin(file_data)?;
 
-    let db = assets_bin::parse_assets_bin(&mmap)?;
+    // If --resolve is given, do a targeted lookup instead of the full dump.
+    if let Some(path_suffix) = resolve {
+        let self_id_index = db.build_self_id_index();
+        let (location, full_path) = db.resolve_path(path_suffix, &self_id_index)?;
 
-    println!("=== assets.bin (PrototypeDatabase): {} ===", file.display());
-    println!("File size: {} bytes", mmap.len());
+        println!("Resolved: {full_path}");
+        println!(
+            "  blob_index={}, record_index={}",
+            location.blob_index, location.record_index
+        );
+        let blob = &db.databases[location.blob_index];
+        println!(
+            "  blob: magic=0x{:08X}, record_count={}, size={}",
+            blob.prototype_magic, blob.record_count, blob.size
+        );
+
+        // Print the first 64 bytes of the record as hex
+        let item_sizes: &[usize] = &[0x78, 0x70, 0x20, 0x28, 0x70, 0x10, 0x18, 0x10, 0x10, 0x10];
+        if location.blob_index < item_sizes.len() {
+            let item_size = item_sizes[location.blob_index];
+            match db.get_prototype_data(location, item_size) {
+                Ok(data) => {
+                    let show_len = item_size.min(data.len()).min(128);
+                    println!("  item_size=0x{item_size:X} ({item_size} bytes)");
+                    println!("  record hex ({show_len} bytes):");
+                    for row in 0..(show_len + 15) / 16 {
+                        let start = row * 16;
+                        let end = (start + 16).min(show_len);
+                        let hex: String = data[start..end]
+                            .iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("    +0x{start:02X}: {hex}");
+                    }
+                }
+                Err(e) => println!("  error reading prototype data: {e}"),
+            }
+        }
+
+        return Ok(());
+    }
+
+    // --parse-visual: resolve path, extract record, parse and print VisualPrototype
+    if let Some(path_suffix) = parse_visual {
+        let self_id_index = db.build_self_id_index();
+        let (location, full_path) = db.resolve_path(path_suffix, &self_id_index)?;
+
+        if location.blob_index != 1 {
+            bail!(
+                "Path '{}' resolved to blob {} (not VisualPrototype blob 1)",
+                path_suffix,
+                location.blob_index
+            );
+        }
+
+        let record_data = db
+            .get_prototype_data(location, visual::VISUAL_ITEM_SIZE)
+            .context("Failed to get visual prototype data")?;
+
+        let vp = visual::parse_visual(record_data).context("Failed to parse VisualPrototype")?;
+
+        println!("=== VisualPrototype: {full_path} ===");
+        println!(
+            "  blob_index={}, record_index={}",
+            location.blob_index, location.record_index
+        );
+        vp.print_summary(&db);
+
+        return Ok(());
+    }
+
+    println!("=== assets.bin (PrototypeDatabase): {} ===", name);
+    println!("File size: {} bytes", file_data.len());
     println!();
 
     println!("Header:");
@@ -1002,8 +1121,8 @@ fn run_assets_bin(file: &Path, filter: Option<&str>, max_paths: usize) -> Result
     println!("Databases: {} entries", db.databases.len());
     for (i, entry) in db.databases.iter().enumerate() {
         println!(
-            "  [{i}] magic=0x{:08X} checksum=0x{:08X} size={} bytes",
-            entry.prototype_magic, entry.prototype_checksum, entry.size
+            "  [{i}] magic=0x{:08X} checksum=0x{:08X} records={} size={} bytes",
+            entry.prototype_magic, entry.prototype_checksum, entry.record_count, entry.size
         );
     }
 

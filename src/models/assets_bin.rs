@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rootcause::Report;
 use thiserror::Error;
 use winnow::Parser;
@@ -19,6 +21,14 @@ pub enum AssetsBinError {
     OutOfBounds { offset: usize },
     #[error("parse error: {0}")]
     ParseError(String),
+    #[error("path not found: {0}")]
+    PathNotFound(String),
+    #[error("prototype index {index} out of range for blob {blob} (count: {count})")]
+    PrototypeOutOfRange {
+        index: usize,
+        blob: usize,
+        count: u64,
+    },
 }
 
 /// The top-level parsed assets.bin (PrototypeDatabase) file.
@@ -73,11 +83,225 @@ pub struct DatabaseEntry<'a> {
     pub prototype_magic: u32,
     pub prototype_checksum: u32,
     pub size: u32,
+    /// The full blob data (including the 16-byte header).
     pub data: &'a [u8],
+    /// Number of prototype records in this blob (from the blob header).
+    pub record_count: u64,
+}
+
+/// Result of resolving a flat prototype index to a specific blob and record.
+#[derive(Debug, Clone, Copy)]
+pub struct PrototypeLocation {
+    /// Index of the database blob (0-9).
+    pub blob_index: usize,
+    /// Index of the record within the blob.
+    pub record_index: usize,
+}
+
+impl<'a> PrototypeDatabase<'a> {
+    /// Build a lookup index from `selfId` to path entry index.
+    pub fn build_self_id_index(&self) -> HashMap<u64, usize> {
+        self.paths_storage
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (entry.self_id, i))
+            .collect()
+    }
+
+    /// Look up a `selfId` in the resourceToPrototypeMap hashmap.
+    ///
+    /// The hashmap uses open addressing with linear probing. Each bucket is 16 bytes:
+    /// `(u64 key, u64 sentinel)` where sentinel=1 means occupied, sentinel=0 means empty.
+    /// Values are u32 flat indices stored in a parallel array.
+    pub fn lookup_r2p(&self, self_id: u64) -> Option<u32> {
+        let map = &self.resource_to_prototype_map;
+        let capacity = map.capacity as u64;
+        if capacity == 0 {
+            return None;
+        }
+
+        let start_slot = self_id % capacity;
+        for probe in 0..capacity {
+            let slot = ((start_slot + probe) % capacity) as usize;
+
+            // Read the bucket: (u64 key, u64 sentinel)
+            let bucket_offset = slot * map.bucket_stride;
+            let key = u64::from_le_bytes(
+                map.buckets[bucket_offset..bucket_offset + 8]
+                    .try_into()
+                    .ok()?,
+            );
+            let sentinel = u64::from_le_bytes(
+                map.buckets[bucket_offset + 8..bucket_offset + 16]
+                    .try_into()
+                    .ok()?,
+            );
+
+            if sentinel == 0 && key == 0 {
+                // Empty slot — key not found.
+                return None;
+            }
+
+            if key == self_id {
+                // Found. Read the u32 value from the parallel values array.
+                let value_offset = slot * map.value_stride;
+                let value =
+                    u32::from_le_bytes(map.values[value_offset..value_offset + 4].try_into().ok()?);
+                return Some(value);
+            }
+        }
+
+        None
+    }
+
+    /// Decode an r2p value into a (blob_index, record_index) pair.
+    ///
+    /// The encoding is: `val = (record_index << 8) | (blob_index * 4)`.
+    /// Low byte encodes the blob index (as `blob_index * 4`), upper 24 bits
+    /// encode the record index within that blob.
+    pub fn decode_r2p_value(
+        &self,
+        value: u32,
+    ) -> Result<PrototypeLocation, Report<AssetsBinError>> {
+        let type_tag = (value & 0xFF) as usize;
+        let record_index = (value >> 8) as usize;
+
+        if type_tag % 4 != 0 {
+            return Err(Report::new(AssetsBinError::ParseError(format!(
+                "r2p value 0x{value:08X}: low byte 0x{type_tag:02X} is not a multiple of 4"
+            ))));
+        }
+        let blob_index = type_tag / 4;
+
+        if blob_index >= self.databases.len() {
+            return Err(Report::new(AssetsBinError::ParseError(format!(
+                "r2p value 0x{value:08X}: blob_index {blob_index} >= database count {}",
+                self.databases.len()
+            ))));
+        }
+
+        let db = &self.databases[blob_index];
+        if record_index as u64 >= db.record_count {
+            return Err(Report::new(AssetsBinError::PrototypeOutOfRange {
+                index: record_index,
+                blob: blob_index,
+                count: db.record_count,
+            }));
+        }
+
+        Ok(PrototypeLocation {
+            blob_index,
+            record_index,
+        })
+    }
+
+    /// Get the raw bytes of a prototype record within a blob.
+    ///
+    /// The blob data starts with a 16-byte header (`u64 count`, `u64 header_size`),
+    /// followed by `count * item_size` bytes of fixed-size records, then out-of-line data.
+    ///
+    /// Returns the full blob data slice starting at the record's offset. The caller
+    /// should parse `item_size` bytes for the fixed record and resolve relptrs into
+    /// the remainder.
+    pub fn get_prototype_data(
+        &self,
+        location: PrototypeLocation,
+        item_size: usize,
+    ) -> Result<&'a [u8], Report<AssetsBinError>> {
+        let db = &self.databases[location.blob_index];
+        if location.record_index as u64 >= db.record_count {
+            return Err(Report::new(AssetsBinError::PrototypeOutOfRange {
+                index: location.record_index,
+                blob: location.blob_index,
+                count: db.record_count,
+            }));
+        }
+
+        let header_size = 16usize;
+        let record_offset = header_size + location.record_index * item_size;
+        if record_offset + item_size > db.data.len() {
+            return Err(Report::new(AssetsBinError::OutOfBounds {
+                offset: record_offset,
+            }));
+        }
+
+        // Return from record start to end of blob, so relptrs can resolve into OOL data.
+        Ok(&db.data[record_offset..])
+    }
+
+    /// Reconstruct the full path for a path entry by walking parent links.
+    pub fn reconstruct_path(
+        &self,
+        entry_index: usize,
+        self_id_index: &HashMap<u64, usize>,
+    ) -> String {
+        let mut parts = Vec::new();
+        let mut current = entry_index;
+        for _ in 0..100 {
+            let entry = &self.paths_storage[current];
+            if !entry.name.is_empty() {
+                parts.push(entry.name.as_str());
+            }
+            if entry.parent_id == 0 {
+                break;
+            }
+            match self_id_index.get(&entry.parent_id) {
+                Some(&parent_idx) => current = parent_idx,
+                None => break,
+            }
+        }
+        parts.reverse();
+        parts.join("/")
+    }
+
+    /// Find a path entry whose reconstructed path ends with the given suffix.
+    ///
+    /// This is a linear scan — use for interactive/CLI lookups, not hot paths.
+    pub fn find_path_by_suffix(
+        &self,
+        suffix: &str,
+        self_id_index: &HashMap<u64, usize>,
+    ) -> Option<(usize, String)> {
+        for (i, entry) in self.paths_storage.iter().enumerate() {
+            // Quick filter: the leaf name must end with the suffix's last component.
+            let suffix_leaf = suffix.rsplit('/').next().unwrap_or(suffix);
+            if !entry.name.ends_with(suffix_leaf) {
+                continue;
+            }
+            let full_path = self.reconstruct_path(i, self_id_index);
+            if full_path.ends_with(suffix) {
+                return Some((i, full_path));
+            }
+        }
+        None
+    }
+
+    /// Resolve a path suffix to a prototype location.
+    ///
+    /// Combines path lookup, r2p hashmap lookup, and flat index resolution.
+    pub fn resolve_path(
+        &self,
+        path_suffix: &str,
+        self_id_index: &HashMap<u64, usize>,
+    ) -> Result<(PrototypeLocation, String), Report<AssetsBinError>> {
+        let (entry_index, full_path) = self
+            .find_path_by_suffix(path_suffix, self_id_index)
+            .ok_or_else(|| Report::new(AssetsBinError::PathNotFound(path_suffix.to_string())))?;
+
+        let self_id = self.paths_storage[entry_index].self_id;
+        let r2p_value = self.lookup_r2p(self_id).ok_or_else(|| {
+            Report::new(AssetsBinError::PathNotFound(format!(
+                "{path_suffix} (selfId=0x{self_id:016X} not in r2p map)"
+            )))
+        })?;
+
+        let location = self.decode_r2p_value(r2p_value)?;
+        Ok((location, full_path))
+    }
 }
 
 impl StringsSection<'_> {
-    /// Look up a string by its offset into the string data pool.
+    /// Look up a string by its raw offset into the string data pool.
     pub fn get_string(&self, offset: u32) -> Option<&str> {
         let start = offset as usize;
         if start >= self.string_data.len() {
@@ -89,6 +313,50 @@ impl StringsSection<'_> {
             .position(|&b| b == 0)
             .unwrap_or(remaining.len());
         std::str::from_utf8(&remaining[..end]).ok()
+    }
+
+    /// Look up a string by its hashed name ID, using the offsets_map hashmap.
+    ///
+    /// The offsets_map uses open addressing with linear probing. Each bucket is
+    /// 8 bytes: `(u32 key, u32 sentinel)`. Sentinel has bit 31 set when occupied,
+    /// and both key and sentinel are 0 when the slot is empty.
+    /// Values are u32 string offsets in a parallel array.
+    pub fn get_string_by_id(&self, name_id: u32) -> Option<&str> {
+        let map = &self.offsets_map;
+        let capacity = map.capacity as u64;
+        if capacity == 0 {
+            return None;
+        }
+
+        let start_slot = (name_id as u64) % capacity;
+        for probe in 0..capacity {
+            let slot = ((start_slot + probe) % capacity) as usize;
+            let bucket_offset = slot * map.bucket_stride;
+
+            let bucket_key = u32::from_le_bytes(
+                map.buckets[bucket_offset..bucket_offset + 4]
+                    .try_into()
+                    .ok()?,
+            );
+            let sentinel = u32::from_le_bytes(
+                map.buckets[bucket_offset + 4..bucket_offset + 8]
+                    .try_into()
+                    .ok()?,
+            );
+
+            if bucket_key == 0 && sentinel == 0 {
+                return None; // empty slot
+            }
+
+            if bucket_key == name_id {
+                let value_offset = slot * map.value_stride;
+                let string_offset =
+                    u32::from_le_bytes(map.values[value_offset..value_offset + 4].try_into().ok()?);
+                return self.get_string(string_offset);
+            }
+        }
+
+        None
     }
 }
 
@@ -289,7 +557,7 @@ fn parse_database_entries<'a>(
                 Report::new(AssetsBinError::ParseError(format!("database[{i}]: {e}")))
             })?;
 
-        let data = if size > 0 {
+        let (data, record_count) = if size > 0 {
             let data_offset = resolve_relptr(entry_base, data_relptr);
             let data_end = data_offset + size as usize;
             if data_end > file_data.len() {
@@ -297,9 +565,18 @@ fn parse_database_entries<'a>(
                     offset: data_offset,
                 }));
             }
-            &file_data[data_offset..data_end]
+            let data = &file_data[data_offset..data_end];
+
+            // Parse blob header: u64 count + u64 header_size (always 16)
+            let record_count = u64::from_le_bytes(data[..8].try_into().map_err(|_| {
+                Report::new(AssetsBinError::ParseError(format!(
+                    "database[{i}] blob header too short"
+                )))
+            })?);
+
+            (data, record_count)
         } else {
-            &[]
+            (&[] as &[u8], 0)
         };
 
         result.push(DatabaseEntry {
@@ -307,6 +584,7 @@ fn parse_database_entries<'a>(
             prototype_checksum,
             size,
             data,
+            record_count,
         });
     }
 
