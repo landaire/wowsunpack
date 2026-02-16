@@ -5,7 +5,9 @@ use std::sync::LazyLock;
 
 use crate::data::idx::FileNode;
 use crate::data::pkg::PkgFileLoader;
-use crate::game_types::{CameraMode, Consumable, DeathCause, DepthState, FinishType, WeaponType};
+use crate::game_types::{
+    BuoyancyState, CameraMode, Consumable, DeathCause, FinishType, WeaponType,
+};
 
 /// Default battle constants (hardcoded, no game files needed).
 pub static DEFAULT_BATTLE_CONSTANTS: LazyLock<BattleConstants> =
@@ -385,11 +387,12 @@ impl BattleConstants {
                 (7, Cow::Borrowed("EMPTY")),
             ]),
             depth_states: HashMap::from([
-                (-1, Cow::Borrowed(DepthState::Invalid.name())),
-                (0, Cow::Borrowed(DepthState::Surface.name())),
-                (1, Cow::Borrowed(DepthState::Periscope.name())),
-                (2, Cow::Borrowed(DepthState::Working.name())),
-                (3, Cow::Borrowed(DepthState::Invulnerable.name())),
+                (-1, Cow::Borrowed(BuoyancyState::Invalid.name())),
+                (0, Cow::Borrowed(BuoyancyState::Surface.name())),
+                (1, Cow::Borrowed(BuoyancyState::Periscope.name())),
+                (2, Cow::Borrowed(BuoyancyState::SemiDeepWater.name())),
+                (3, Cow::Borrowed(BuoyancyState::DeepWater.name())),
+                (4, Cow::Borrowed(BuoyancyState::DeepWaterInvul.name())),
             ]),
             building_types: HashMap::from([
                 (0, Cow::Borrowed("ANTI_AIRCRAFT")),
