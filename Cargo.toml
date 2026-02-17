@@ -52,6 +52,7 @@ bon = "3.9.0"
 gltf-json = { version = "1", optional = true }
 gltf = { version = "1", optional = true }
 half = { version = "2", optional = true }
+unidecode = { version = "0.3", optional = true }
 vfs = { version = "0.12", optional = true }
 async-trait = { version = "0.1", optional = true }
 async-std = { version = "1.13", optional = true }
@@ -80,6 +81,7 @@ bin = [
     "dep:gltf-json",
     "dep:gltf",
     "dep:half",
+    "dep:unidecode",
     "arc",
     "json",
     "vfs",

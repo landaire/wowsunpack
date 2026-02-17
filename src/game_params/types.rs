@@ -756,6 +756,33 @@ pub struct ShipRanges {
     pub hydro_m: Option<Meters>,
 }
 
+/// A hit location group on a ship hull (e.g. Bow, Citadel, Stern).
+#[derive(Clone, Builder, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct HitLocation {
+    max_hp: f32,
+    hl_type: String,
+    regenerated_hp_part: f32,
+}
+
+impl HitLocation {
+    pub fn max_hp(&self) -> f32 {
+        self.max_hp
+    }
+
+    pub fn hl_type(&self) -> &str {
+        &self.hl_type
+    }
+
+    pub fn regenerated_hp_part(&self) -> f32 {
+        self.regenerated_hp_part
+    }
+}
+
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -770,6 +797,12 @@ pub struct Vehicle {
     upgrades: Vec<String>,
     #[cfg_attr(feature = "serde", serde(default))]
     config_data: Option<ShipConfigData>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    model_path: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    armor: Option<HashMap<u32, f32>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    hit_locations: Option<HashMap<String, HitLocation>>,
 }
 
 impl Vehicle {
@@ -791,6 +824,18 @@ impl Vehicle {
 
     pub fn config_data(&self) -> Option<&ShipConfigData> {
         self.config_data.as_ref()
+    }
+
+    pub fn model_path(&self) -> Option<&str> {
+        self.model_path.as_deref()
+    }
+
+    pub fn armor(&self) -> Option<&HashMap<u32, f32>> {
+        self.armor.as_ref()
+    }
+
+    pub fn hit_locations(&self) -> Option<&HashMap<String, HitLocation>> {
+        self.hit_locations.as_ref()
     }
 
     /// Resolve the ship's ranges for a specific hull upgrade.

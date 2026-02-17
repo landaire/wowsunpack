@@ -865,12 +865,86 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         })
     };
 
+    // Extract model path, armor map, and hit location groups from A_Hull.
+    let a_hull = ship_data
+        .get(&HashableValue::String("A_Hull".to_string().into()))
+        .and_then(|v| v.dict_ref());
+
+    let model_path: Option<String> = a_hull.as_ref().and_then(|hull_dict| {
+        hull_dict
+            .inner()
+            .get(&HashableValue::String("model".to_string().into()))
+            .and_then(|v| v.string_ref())
+            .map(|s| s.inner().to_string())
+    });
+
+    let armor: Option<HashMap<u32, f32>> = a_hull.as_ref().and_then(|hull_dict| {
+        hull_dict
+            .inner()
+            .get(&HashableValue::String("armor".to_string().into()))
+            .and_then(|v| v.dict_ref())
+            .map(|armor_dict| {
+                armor_dict
+                    .inner()
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        let key_str = k.string_ref()?.inner();
+                        let key: u32 = key_str.parse().ok()?;
+                        let value = v
+                            .f64_ref()
+                            .map(|f| *f as f32)
+                            .or_else(|| v.i64_ref().map(|i| *i as f32))?;
+                        Some((key, value))
+                    })
+                    .collect()
+            })
+    });
+
+    let hit_locations: Option<HashMap<String, HitLocation>> =
+        a_hull.as_ref().and_then(|hull_dict| {
+            hull_dict
+                .inner()
+                .get(&HashableValue::String(
+                    "hitLocationGroups".to_string().into(),
+                ))
+                .and_then(|v| v.dict_ref())
+                .map(|hlg_dict| {
+                    hlg_dict
+                        .inner()
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            let name = k.string_ref()?.inner().to_string();
+                            let group_dict = v.dict_ref()?.inner();
+                            let max_hp = read_float(&group_dict, "maxHP").unwrap_or(0.0);
+                            let hl_type = group_dict
+                                .get(&HashableValue::String("hlType".to_string().into()))
+                                .and_then(|v| v.string_ref())
+                                .map(|s| s.inner().to_string())
+                                .unwrap_or_default();
+                            let regenerated_hp_part =
+                                read_float(&group_dict, "regeneratedHPPart").unwrap_or(0.0);
+                            Some((
+                                name,
+                                HitLocation::builder()
+                                    .max_hp(max_hp)
+                                    .hl_type(hl_type)
+                                    .regenerated_hp_part(regenerated_hp_part)
+                                    .build(),
+                            ))
+                        })
+                        .collect()
+                })
+        });
+
     Vehicle::builder()
         .level(level)
         .group(group)
         .maybe_abilities(abilities)
         .upgrades(upgrades)
         .maybe_config_data(config_data)
+        .maybe_model_path(model_path)
+        .maybe_armor(armor)
+        .maybe_hit_locations(hit_locations)
         .build()
 }
 
