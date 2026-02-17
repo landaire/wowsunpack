@@ -603,6 +603,14 @@ impl Param {
             _ => None,
         }
     }
+
+    /// Returns the Exterior data if this param is an Exterior type.
+    pub fn exterior(&self) -> Option<&Exterior> {
+        match &self.data {
+            ParamData::Exterior(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy, Variantly)]
@@ -696,6 +704,91 @@ impl ParamType {
 
 // }
 
+/// A single mount point (hardpoint) within a ship component.
+///
+/// Each ship component (artillery, atba, etc.) has one or more mount points
+/// identified by `HP_*` keys in the GameParams data. Each mount references a
+/// 3D model file.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct MountPoint {
+    /// Hardpoint name, e.g. "HP_JGM_1".
+    hp_name: String,
+    /// Model path, e.g. "content/gameplay/.../JGM178.model".
+    model_path: String,
+}
+
+impl MountPoint {
+    pub fn new(hp_name: String, model_path: String) -> Self {
+        Self {
+            hp_name,
+            model_path,
+        }
+    }
+
+    pub fn hp_name(&self) -> &str {
+        &self.hp_name
+    }
+
+    pub fn model_path(&self) -> &str {
+        &self.model_path
+    }
+}
+
+/// All mount points for a single component type within a hull upgrade.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ComponentMounts {
+    /// The component name in GameParams (e.g. "AB1_Artillery").
+    component_name: String,
+    /// All HP_ mount points within this component.
+    mounts: Vec<MountPoint>,
+}
+
+impl ComponentMounts {
+    pub fn new(component_name: String, mounts: Vec<MountPoint>) -> Self {
+        Self {
+            component_name,
+            mounts,
+        }
+    }
+
+    pub fn component_name(&self) -> &str {
+        &self.component_name
+    }
+
+    pub fn mounts(&self) -> &[MountPoint] {
+        &self.mounts
+    }
+}
+
+/// Camouflage/exterior data from a GameParams `Exterior` entry.
+#[derive(Clone, Builder, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Exterior {
+    /// Camouflage texture scheme ID, e.g. "camo_permanent_1".
+    #[cfg_attr(feature = "serde", serde(default))]
+    camouflage: Option<String>,
+}
+
+impl Exterior {
+    pub fn camouflage(&self) -> Option<&str> {
+        self.camouflage.as_deref()
+    }
+}
+
 /// All range data associated with a specific hull upgrade.
 ///
 /// Each hull upgrade in `ShipUpgradeInfo` (ucType = "_Hull") references specific
@@ -712,6 +805,39 @@ pub struct HullUpgradeConfig {
     pub detection_km: Km,
     /// Air detection range in km.
     pub air_detection_km: Km,
+    /// Component type key → component name (e.g. "artillery" → "AB1_Artillery").
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub component_names: HashMap<String, String>,
+    /// Model path from the hull component for this upgrade.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub hull_model_path: Option<String>,
+    /// Mount points grouped by component type key.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mounts_by_type: HashMap<String, ComponentMounts>,
+}
+
+impl HullUpgradeConfig {
+    /// Get the component name for a given component type (e.g. "artillery").
+    pub fn component_name(&self, component_type: &str) -> Option<&str> {
+        self.component_names.get(component_type).map(|s| s.as_str())
+    }
+
+    /// Get the hull model path for this upgrade.
+    pub fn hull_model_path(&self) -> Option<&str> {
+        self.hull_model_path.as_deref()
+    }
+
+    /// Get mount points for a specific component type.
+    pub fn mounts(&self, component_type: &str) -> Option<&[MountPoint]> {
+        self.mounts_by_type
+            .get(component_type)
+            .map(|cm| cm.mounts())
+    }
+
+    /// Iterate over all mount points across all component types.
+    pub fn all_mount_points(&self) -> impl Iterator<Item = &MountPoint> {
+        self.mounts_by_type.values().flat_map(|cm| cm.mounts.iter())
+    }
 }
 
 /// Ship configuration data extracted from GameParams.
@@ -836,6 +962,28 @@ impl Vehicle {
 
     pub fn hit_locations(&self) -> Option<&HashMap<String, HitLocation>> {
         self.hit_locations.as_ref()
+    }
+
+    /// Look up a specific hull upgrade config by name.
+    pub fn hull_upgrade(&self, name: &str) -> Option<&HullUpgradeConfig> {
+        self.config_data.as_ref()?.hull_upgrades.get(name)
+    }
+
+    /// Get all hull upgrade configs, keyed by upgrade name.
+    pub fn hull_upgrades(&self) -> Option<&HashMap<String, HullUpgradeConfig>> {
+        self.config_data.as_ref().map(|c| &c.hull_upgrades)
+    }
+
+    /// Get the hull model path for a specific upgrade.
+    pub fn model_path_for_hull(&self, upgrade_name: &str) -> Option<&str> {
+        self.hull_upgrade(upgrade_name)?.hull_model_path()
+    }
+
+    /// Get all mount points for a specific hull upgrade.
+    pub fn mounts_for_hull(&self, upgrade_name: &str) -> Vec<&MountPoint> {
+        self.hull_upgrade(upgrade_name)
+            .map(|c| c.all_mount_points().collect())
+            .unwrap_or_default()
     }
 
     /// Resolve the ship's ranges for a specific hull upgrade.
@@ -1499,7 +1647,7 @@ pub enum ParamData {
     Ability(Ability),
     Achievement(Achievement),
     Modernization(Modernization),
-    Exterior,
+    Exterior(Exterior),
     Unit,
     Aircraft(Aircraft),
     Projectile(Projectile),
