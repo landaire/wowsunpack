@@ -30,6 +30,7 @@ use crate::models::assets_bin::{self, PrototypeDatabase};
 use crate::models::geometry;
 use crate::models::visual::{self, VisualPrototype};
 
+use super::camouflage::CamouflageDb;
 use super::gltf_export::{self, SubModel, TextureSet};
 use super::texture;
 
@@ -97,6 +98,7 @@ pub struct ShipAssets {
     assets_bin_bytes: Vec<u8>,
     vfs: VfsPath,
     metadata: GameMetadataProvider,
+    camo_db: Option<CamouflageDb>,
 }
 
 impl ShipAssets {
@@ -114,10 +116,13 @@ impl ShipAssets {
 
         let metadata = GameMetadataProvider::from_vfs(vfs).context("Failed to load GameParams")?;
 
+        let camo_db = CamouflageDb::load(vfs);
+
         Ok(Self {
             assets_bin_bytes,
             vfs: vfs.clone(),
             metadata,
+            camo_db,
         })
     }
 
@@ -300,7 +305,15 @@ impl ShipAssets {
             }
         }
 
-        Ok(texture::discover_texture_schemes(&self.vfs, &all_stems))
+        let mut schemes = texture::discover_texture_schemes(&self.vfs, &all_stems);
+
+        // Also include material-based camo scheme display names.
+        let mat_camos = self.discover_mat_camo_schemes(&info.model_dir);
+        for scheme in &mat_camos {
+            schemes.push(format!("{} (mat_camo)", scheme.display_name));
+        }
+
+        Ok(schemes)
     }
 
     /// Load a complete ship model, ready for export.
@@ -334,6 +347,9 @@ impl ShipAssets {
         let (turret_models, _turret_model_index, mounts) =
             self.load_mounts(&db, &self_id_index, &mount_points, &hull_parts)?;
 
+        // Resolve material-based camouflage schemes.
+        let mat_camo_schemes = self.discover_mat_camo_schemes(&info.model_dir);
+
         Ok(ShipModelContext {
             vfs: self.vfs.clone(),
             assets_bin_bytes: self.assets_bin_bytes.clone(),
@@ -342,10 +358,89 @@ impl ShipAssets {
             mounts,
             info,
             options: options.clone(),
+            mat_camo_schemes,
         })
     }
 
     // --- Internal helpers ---
+
+    /// Discover material-based camo schemes available for a ship via GameParams.
+    ///
+    /// Follows: Vehicle.permoflages → Exterior.camouflage → camouflages.xml entry.
+    /// Returns owned `MatCamoScheme` data (no lifetimes).
+    fn discover_mat_camo_schemes(&self, model_dir: &str) -> Vec<MatCamoScheme> {
+        let camo_db = match &self.camo_db {
+            Some(db) => db,
+            None => return Vec::new(),
+        };
+        let vehicle = match self.find_vehicle(model_dir) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut result = Vec::new();
+        let mut seen_camo_names = HashSet::new();
+
+        for permo_name in vehicle.permoflages() {
+            // permoflages entries are param names (e.g. "PCEM017_Steel_10lvl"), not indices.
+            let param = self
+                .metadata
+                .game_param_by_name(permo_name)
+                .or_else(|| self.metadata.game_param_by_index(permo_name));
+            let Some(param) = param else {
+                continue;
+            };
+            let Some(exterior) = param.exterior() else {
+                continue;
+            };
+            let Some(camo_name) = exterior.camouflage() else {
+                continue;
+            };
+
+            // Deduplicate by camo name (multiple exteriors can share the same camo).
+            if !seen_camo_names.insert(camo_name.to_string()) {
+                continue;
+            }
+
+            let Some(entry) = camo_db.get(camo_name) else {
+                continue;
+            };
+            // Skip tiled camos — can't represent UV tiling in standard glTF.
+            if entry.tiled || entry.textures.is_empty() {
+                continue;
+            }
+
+            // Build display name: try translated param name, then translated title, then raw camo name.
+            let display_name = self
+                .metadata
+                .localized_name_from_param(&param)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    exterior.title().and_then(|t| {
+                        self.metadata
+                            .localized_name_from_id(t)
+                            .map(|s| s.to_string())
+                    })
+                })
+                .unwrap_or_else(|| camo_name.to_string());
+
+            // Collect unique texture paths (most mat_camos reuse one texture for all parts).
+            let mut unique_paths: Vec<String> = Vec::new();
+            let mut seen_paths = HashSet::new();
+            for path in entry.textures.values() {
+                if seen_paths.insert(path.clone()) {
+                    unique_paths.push(path.clone());
+                }
+            }
+
+            result.push(MatCamoScheme {
+                display_name,
+                texture_paths: unique_paths,
+            });
+        }
+
+        result
+    }
 
     /// Re-parse the PrototypeDatabase from owned bytes.
     fn db(&self) -> Result<PrototypeDatabase<'_>, Report> {
@@ -668,6 +763,7 @@ pub struct ShipModelContext {
     mounts: Vec<ResolvedMount>,
     info: ShipInfo,
     options: ShipExportOptions,
+    mat_camo_schemes: Vec<MatCamoScheme>,
 }
 
 impl ShipModelContext {
@@ -743,7 +839,59 @@ impl ShipModelContext {
             for sub in &sub_models {
                 all_mfm_infos.extend(collect_mfm_info(sub.visual, &db));
             }
-            build_texture_set(&all_mfm_infos, &self.vfs)
+            let mut tex_set = build_texture_set(&all_mfm_infos, &self.vfs);
+            let per_ship_count = tex_set.camo_schemes.len();
+
+            // Merge material-based camo textures (mat_Steel, mat_Yamato_KoF, etc.).
+            if !self.mat_camo_schemes.is_empty() {
+                let stems: Vec<String> = {
+                    let mut s = HashSet::new();
+                    for info in &all_mfm_infos {
+                        s.insert(info.stem.clone());
+                    }
+                    s.into_iter().collect()
+                };
+
+                for scheme in &self.mat_camo_schemes {
+                    // Load the primary albedo texture. Most mat_camos use one
+                    // texture for all parts, so we load the first available.
+                    let mut png_bytes = None;
+                    for path in &scheme.texture_paths {
+                        if let Some(dds) = texture::load_dds_from_vfs(&self.vfs, path) {
+                            match texture::dds_to_png(&dds) {
+                                Ok(png) => {
+                                    png_bytes = Some(png);
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Warning: failed to decode mat_camo texture {}: {e}",
+                                        path
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(png) = png_bytes {
+                        let mut scheme_textures = HashMap::new();
+                        for stem in &stems {
+                            scheme_textures.insert(stem.clone(), png.clone());
+                        }
+                        tex_set
+                            .camo_schemes
+                            .push((scheme.display_name.clone(), scheme_textures));
+                    }
+                }
+
+                let mat_count = tex_set.camo_schemes.len() - per_ship_count;
+                eprintln!(
+                    "  Texture variants: {} per-ship, {} material-based",
+                    per_ship_count, mat_count
+                );
+            }
+
+            tex_set
         } else {
             TextureSet::empty()
         };
@@ -778,6 +926,14 @@ struct ResolvedMount {
     hp_name: String,
     turret_model_index: usize,
     transform: Option<[f32; 16]>,
+}
+
+/// Pre-resolved material-based camouflage scheme (owned data, no lifetimes).
+struct MatCamoScheme {
+    /// Display name for the variant (translated or fallback).
+    display_name: String,
+    /// Albedo texture VFS paths from camouflages.xml, keyed by part category.
+    texture_paths: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

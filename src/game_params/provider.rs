@@ -972,6 +972,26 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                 })
         });
 
+    let permoflages: Vec<String> = ship_data
+        .get(&pk(keys::PERMOFLAGES))
+        .map(|val| {
+            // permoflages can be either a list or a tuple in the pickle data.
+            let extract = |items: &[Value]| -> Vec<String> {
+                items
+                    .iter()
+                    .filter_map(|item| item.string_ref().map(|s| s.inner().to_string()))
+                    .collect()
+            };
+            if let Some(list) = val.list_ref() {
+                extract(&list.inner())
+            } else if let Some(tuple) = val.tuple_ref() {
+                extract(&tuple.inner())
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
+
     Vehicle::builder()
         .level(level)
         .group(group)
@@ -981,6 +1001,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         .maybe_model_path(model_path)
         .maybe_armor(armor)
         .maybe_hit_locations(hit_locations)
+        .permoflages(permoflages)
         .build()
 }
 
@@ -1096,8 +1117,14 @@ impl GameMetadataProvider {
                                         .and_then(|v| v.string_ref())
                                         .map(|s| s.inner().to_string())
                                         .filter(|s| !s.is_empty());
+                                    let title = param_data
+                                        .get(&pk(keys::TITLE))
+                                        .and_then(|v| v.string_ref())
+                                        .map(|s| s.inner().to_string())
+                                        .filter(|s| !s.is_empty());
                                     Some(ParamData::Exterior(Exterior::builder()
                                         .maybe_camouflage(camouflage)
+                                        .maybe_title(title)
                                         .build()))
                                 },
                                 ParamType::Modernization => {

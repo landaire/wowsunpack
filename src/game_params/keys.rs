@@ -62,6 +62,8 @@ pub const VISIBILITY_FACTOR_BY_PLANE: &str = "visibilityFactorByPlane";
 pub const MAX_DIST: &str = "maxDist";
 pub const AMMO_LIST: &str = "ammoList";
 pub const CAMOUFLAGE: &str = "camouflage";
+pub const PERMOFLAGES: &str = "permoflages";
+pub const TITLE: &str = "title";
 
 // HP_ mount prefix
 pub const HP_PREFIX: &str = "HP_";
