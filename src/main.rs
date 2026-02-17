@@ -1962,6 +1962,23 @@ fn run_export_ship(
             continue;
         }
 
+        // Turret meshes are authored with barrels pointing +Z (BigWorld forward).
+        // In glTF's right-handed coordinate system +Z points backward, so we
+        // post-multiply the hardpoint transform by a 180° Y rotation to flip
+        // the turret to face the correct direction.
+        let transform = transform.map(|mut m| {
+            // Ry(180°) negates columns 0 and 2 when post-multiplied.
+            m[0] = -m[0];
+            m[1] = -m[1];
+            m[2] = -m[2];
+            m[3] = -m[3]; // col 0
+            m[8] = -m[8];
+            m[9] = -m[9];
+            m[10] = -m[10];
+            m[11] = -m[11]; // col 2
+            m
+        });
+
         let turret_data = &turret_model_data[model_idx];
         let turret_geom = &parsed_turret_geoms[model_idx];
 
