@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::path::Path;
 
 use rootcause::prelude::*;
 use vfs::VfsPath;
@@ -25,13 +26,13 @@ use vfs::VfsPath;
 use crate::data::ResourceLoader;
 use crate::game_params::keys;
 use crate::game_params::provider::GameMetadataProvider;
-use crate::game_params::types::{GameParamProvider, MountPoint};
+use crate::game_params::types::{GameParamProvider, MountPoint, Vehicle};
 use crate::models::assets_bin::{self, PrototypeDatabase};
 use crate::models::geometry;
 use crate::models::visual::{self, VisualPrototype};
 
 use super::camouflage::{self, CamouflageDb};
-use super::gltf_export::{self, SubModel, TextureSet};
+use super::gltf_export::{self, InteractiveArmorMesh, SubModel, TextureSet};
 use super::texture;
 
 // ---------------------------------------------------------------------------
@@ -124,6 +125,18 @@ impl ShipAssets {
             metadata,
             camo_db,
         })
+    }
+
+    /// Load shared assets directly from a World of Warships installation directory.
+    ///
+    /// This is a convenience wrapper that builds the VFS (idx files + assets.bin overlay)
+    /// from the game directory, then calls [`Self::load`]. It uses the latest build
+    /// found in the `bin/` directory.
+    ///
+    /// For callers who already have a VFS, use [`Self::load`] instead.
+    pub fn from_game_dir(game_dir: &Path) -> Result<Self, Report> {
+        let vfs = crate::game_data::build_game_vfs(game_dir)?;
+        Self::load(&vfs)
     }
 
     /// Set translations for display name resolution.
@@ -333,23 +346,68 @@ impl ShipAssets {
         options: &ShipExportOptions,
     ) -> Result<ShipModelContext, Report> {
         let info = self.find_ship(name)?;
+        let vehicle = self.find_vehicle(&info.model_dir).ok();
+        self.load_ship_inner(info, vehicle, options)
+    }
+
+    /// Load a ship using a [`Vehicle`] reference instead of a name lookup.
+    ///
+    /// This is useful when the caller already has a `Vehicle` from their own
+    /// GameParams processing and wants to skip the name-based search.
+    pub fn load_ship_from_vehicle(
+        &self,
+        vehicle: &Vehicle,
+        options: &ShipExportOptions,
+    ) -> Result<ShipModelContext, Report> {
+        let model_path = vehicle
+            .model_path()
+            .ok_or_else(|| rootcause::report!("Vehicle has no model_path"))?;
+        // model_path is like "content/gameplay/nation/ship/DIR_NAME/file.model"
+        let dir = model_path
+            .rsplit_once('/')
+            .map(|(d, _)| d)
+            .unwrap_or(model_path);
+        let model_dir = dir.rsplit('/').next().unwrap_or(dir);
+
+        let param = self.metadata.params().iter().find(|p| {
+            p.vehicle()
+                .and_then(|v| v.model_path())
+                .map(|mp| mp.contains(model_dir))
+                .unwrap_or(false)
+        });
+
+        let info = ShipInfo {
+            model_dir: model_dir.to_string(),
+            display_name: param.and_then(|p| {
+                self.metadata
+                    .localized_name_from_param(p)
+                    .map(|s: &str| s.to_string())
+            }),
+            param_index: param.map(|p| p.index().to_string()).unwrap_or_default(),
+        };
+
+        self.load_ship_inner(info, Some(vehicle), options)
+    }
+
+    fn load_ship_inner(
+        &self,
+        info: ShipInfo,
+        vehicle: Option<&Vehicle>,
+        options: &ShipExportOptions,
+    ) -> Result<ShipModelContext, Report> {
         let db = self.db()?;
         let self_id_index = db.build_self_id_index();
 
         // Find all .visual files in the model directory.
         let visual_paths = self.find_visual_paths(&db, &self_id_index, &info.model_dir);
         if visual_paths.is_empty() {
-            bail!(
-                "No .visual files found for '{}'. Try using the model directory name directly.",
-                name
-            );
+            bail!("No .visual files found for '{}'.", info.model_dir);
         }
 
         // Load hull sub-models.
         let hull_parts = self.load_sub_models(&db, &self_id_index, &visual_paths)?;
 
         // Load turret/mount models from GameParams.
-        let vehicle = self.find_vehicle(&info.model_dir).ok();
         let mount_points: Vec<MountPoint> = vehicle
             .and_then(|v| self.select_hull_mount_points(v, options.hull.as_deref()))
             .unwrap_or_default();
@@ -951,6 +1009,30 @@ impl ShipModelContext {
         self.hull_parts
             .iter()
             .find_map(|p| p.splash_bytes.as_deref())
+    }
+
+    /// Build interactive armor meshes with per-triangle metadata.
+    ///
+    /// Returns one [`InteractiveArmorMesh`] per armor model found in the hull
+    /// geometry. Each mesh contains the renderable triangle soup plus
+    /// [`ArmorTriangleInfo`](gltf_export::ArmorTriangleInfo) entries aligned
+    /// 1:1 with triangles, so a viewer can look up material name, thickness,
+    /// and zone on hover/click.
+    pub fn interactive_armor_meshes(&self) -> Result<Vec<InteractiveArmorMesh>, Report> {
+        let mut result = Vec::new();
+        for hull_part in &self.hull_parts {
+            let geom = geometry::parse_geometry(&hull_part.geom_bytes)
+                .context("Failed to parse geometry for interactive armor")?;
+            for (i, armor_model) in geom.armor_models.iter().enumerate() {
+                let model_index = (i + 1) as u32; // 1-based
+                result.push(InteractiveArmorMesh::from_armor_model(
+                    armor_model,
+                    self.armor_map.as_ref(),
+                    model_index,
+                ));
+            }
+        }
+        Ok(result)
     }
 
     /// Export the loaded ship model to GLB format.

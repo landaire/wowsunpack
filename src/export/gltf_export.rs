@@ -1100,6 +1100,104 @@ fn bounding_coords(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+/// Per-triangle metadata for interactive armor viewers.
+///
+/// Each entry describes one triangle's collision material, zone classification,
+/// armor thickness, and display color. Consumers can use this for hover/click
+/// tooltips in a 3D viewer.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ArmorTriangleInfo {
+    /// Collision material ID (0–255) from the BVH node header.
+    pub material_id: u8,
+    /// Human-readable material name (e.g. "Cit_Belt", "Bow_Bottom").
+    pub material_name: String,
+    /// Zone classification (e.g. "Citadel", "Bow", "Superstructure").
+    pub zone: String,
+    /// Armor thickness in millimeters from GameParams (0.0 if unassigned).
+    pub thickness_mm: f32,
+    /// RGBA color [0.0–1.0] encoding the thickness via the game's color scale.
+    pub color: [f32; 4],
+}
+
+/// An indexed armor mesh with per-triangle metadata for interactive viewers.
+///
+/// Unlike `ArmorSubModel` (which groups by zone and loses per-triangle material info),
+/// this type preserves full metadata for every triangle. Consumers can render the mesh
+/// with `positions`/`normals`/`indices`/`colors`, then look up `triangle_info[face_index]`
+/// on hover/click to display material name, thickness, and zone.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InteractiveArmorMesh {
+    /// Armor model name (e.g. "CM_PA_united").
+    pub name: String,
+    /// Vertex positions (3 per triangle, triangle-soup layout).
+    pub positions: Vec<[f32; 3]>,
+    /// Vertex normals (same length as positions).
+    pub normals: Vec<[f32; 3]>,
+    /// Triangle indices into positions/normals (length = triangle_count * 3).
+    pub indices: Vec<u32>,
+    /// Per-vertex RGBA color encoding armor thickness.
+    /// All 3 vertices of a triangle share the same color.
+    pub colors: Vec<[f32; 4]>,
+    /// Per-triangle metadata. `triangle_info[i]` corresponds to
+    /// `indices[i*3..i*3+3]`. Length = `indices.len() / 3`.
+    pub triangle_info: Vec<ArmorTriangleInfo>,
+}
+
+impl InteractiveArmorMesh {
+    /// Build an `InteractiveArmorMesh` from a parsed `ArmorModel`.
+    ///
+    /// `armor_map` is the GameParams armor thickness data:
+    ///   key = `(model_index << 16) | material_id`, value = thickness in mm.
+    /// `model_index` is the 1-based index of this armor model in the geometry file.
+    pub fn from_armor_model(
+        armor: &crate::models::geometry::ArmorModel,
+        armor_map: Option<&std::collections::HashMap<u32, f32>>,
+        model_index: u32,
+    ) -> Self {
+        let tri_count = armor.triangles.len();
+        let vert_count = tri_count * 3;
+        let mut positions = Vec::with_capacity(vert_count);
+        let mut normals = Vec::with_capacity(vert_count);
+        let mut indices = Vec::with_capacity(vert_count);
+        let mut colors = Vec::with_capacity(vert_count);
+        let mut triangle_info = Vec::with_capacity(tri_count);
+
+        for (ti, tri) in armor.triangles.iter().enumerate() {
+            let key = (model_index << 16) | (tri.material_id as u32);
+            let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
+            let color = thickness_to_color(thickness_mm);
+            let mat_name = collision_material_name(tri.material_id);
+            let zone = zone_from_material_name(mat_name);
+
+            for v in 0..3 {
+                positions.push(tri.vertices[v]);
+                normals.push(tri.normals[v]);
+                indices.push((ti * 3 + v) as u32);
+                colors.push(color);
+            }
+
+            triangle_info.push(ArmorTriangleInfo {
+                material_id: tri.material_id,
+                material_name: mat_name.to_string(),
+                zone: zone.to_string(),
+                thickness_mm,
+                color,
+            });
+        }
+
+        Self {
+            name: armor.name.clone(),
+            positions,
+            normals,
+            indices,
+            colors,
+            triangle_info,
+        }
+    }
+}
+
 /// An armor mesh ready for glTF export (triangle soup, no textures).
 pub struct ArmorSubModel {
     pub name: String,

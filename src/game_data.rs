@@ -8,8 +8,11 @@ use std::fs::read_dir;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use rootcause::prelude::*;
 use vfs::VfsPath;
+use vfs::impls::overlay::OverlayFS;
 
+use crate::data::assets_bin_vfs::AssetsBinVfs;
 use crate::data::idx;
 use crate::data::idx_vfs::IdxVfs;
 use crate::data::wrappers::mmap::MmapPkgSource;
@@ -115,4 +118,72 @@ pub fn translations_path(game_dir: &Path, build: u32) -> PathBuf {
         .join("bin")
         .join(build.to_string())
         .join("res/texts/en/LC_MESSAGES/global.mo")
+}
+
+/// Build a VFS from a World of Warships installation directory.
+///
+/// Uses the latest build in `bin/`, loads all idx files, and overlays
+/// `assets.bin` on top of the package VFS so that asset paths resolve
+/// correctly.
+///
+/// This is the same VFS setup used by the CLI. If you already have a
+/// [`VfsPath`], pass it directly to [`crate::export::ship::ShipAssets::load`]
+/// instead.
+pub fn build_game_vfs(game_dir: &Path) -> Result<VfsPath, Report> {
+    let builds = list_available_builds(game_dir)
+        .map_err(|e| rootcause::report!("Failed to list builds: {e}"))?;
+    let latest_build = builds
+        .last()
+        .ok_or_else(|| rootcause::report!("No builds found in {}/bin", game_dir.display()))?;
+
+    let idx_dir = game_dir
+        .join("bin")
+        .join(latest_build.to_string())
+        .join("idx");
+    if !idx_dir.exists() {
+        bail!("idx directory not found: {}", idx_dir.display());
+    }
+
+    let mut idx_files = Vec::new();
+    for entry in read_dir(&idx_dir)
+        .context_with(|| format!("Failed to read idx dir: {}", idx_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let data = std::fs::read(entry.path())?;
+            let parsed = idx::parse(&data)
+                .map_err(|e| rootcause::report!("Failed to parse idx file: {e}"))?;
+            idx_files.push(parsed);
+        }
+    }
+
+    let pkgs_dir = game_dir.join("res_packages");
+    if !pkgs_dir.exists() {
+        bail!("res_packages not found: {}", pkgs_dir.display());
+    }
+
+    let pkg_source = MmapPkgSource::new(&pkgs_dir);
+    let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
+    let pkg_vfs = VfsPath::new(idx_vfs);
+
+    // Overlay assets.bin on top of the package VFS.
+    let mut assets_bin_data = Vec::new();
+    let assets_loaded = pkg_vfs
+        .join("content/assets.bin")
+        .and_then(|p| p.open_file())
+        .and_then(|mut f| {
+            f.read_to_end(&mut assets_bin_data)?;
+            Ok(())
+        })
+        .is_ok();
+
+    if assets_loaded {
+        if let Ok(assets_vfs) = AssetsBinVfs::new(assets_bin_data) {
+            let assets_layer = VfsPath::new(assets_vfs);
+            let overlay = OverlayFS::new(&[assets_layer, pkg_vfs]);
+            return Ok(VfsPath::new(overlay));
+        }
+    }
+
+    Ok(pkg_vfs)
 }
