@@ -609,6 +609,9 @@ pub struct SubModel<'a> {
     pub name: String,
     pub visual: &'a VisualPrototype,
     pub geometry: &'a MergedGeometry<'a>,
+    /// Optional world-space transform (column-major 4x4 matrix).
+    /// If `None`, the sub-model is placed at the origin.
+    pub transform: Option<[f32; 16]>,
 }
 
 /// Export multiple sub-models as a single GLB with separate named meshes/nodes.
@@ -672,6 +675,7 @@ pub fn export_ship_glb(
         let node = root.push(json::Node {
             mesh: Some(mesh),
             name: Some(sub.name.clone()),
+            matrix: sub.transform,
             ..Default::default()
         });
 

@@ -183,6 +183,15 @@ enum Commands {
         /// LOD level (0 = highest detail)
         #[arg(long, default_value = "0")]
         lod: usize,
+
+        /// List available hull upgrades and their components, then exit
+        #[arg(long)]
+        list_upgrades: bool,
+
+        /// Hull upgrade to use (e.g. "A" for stock, "B" for upgraded).
+        /// Accepts a prefix match against upgrade keys.
+        #[arg(long)]
+        hull: Option<String>,
     },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
@@ -894,12 +903,27 @@ fn run() -> Result<(), Report> {
 
             run_export_model(vfs, &name, &output, lod)?;
         }
-        Commands::ExportShip { name, output, lod } => {
+        Commands::ExportShip {
+            name,
+            output,
+            lod,
+            list_upgrades,
+            hull,
+        } => {
             let Some(vfs) = &vfs else {
                 bail!("VFS required for export-ship. Use --game-dir to specify a game install.");
             };
 
-            run_export_ship(vfs, &name, &output, lod, &game_dir, game_version)?;
+            run_export_ship(
+                vfs,
+                &name,
+                &output,
+                lod,
+                &game_dir,
+                game_version,
+                list_upgrades,
+                hull.as_deref(),
+            )?;
         }
         Commands::AssetsBin {
             file,
@@ -1347,7 +1371,10 @@ fn run_export_ship(
     lod: usize,
     game_dir: &Path,
     game_version: Option<u64>,
+    list_upgrades: bool,
+    hull_selection: Option<&str>,
 ) -> Result<(), Report> {
+    use std::collections::HashMap;
     use wowsunpack::export::gltf_export::{self, SubModel};
     use wowsunpack::models::assets_bin;
     use wowsunpack::models::geometry;
@@ -1476,22 +1503,483 @@ fn run_export_ship(
         });
     }
 
-    // Parse geometries from stable byte vectors and build SubModel refs.
-    // MergedGeometry borrows from geom_bytes, so we need a two-phase approach.
-    let parsed_geoms: Vec<geometry::MergedGeometry<'_>> = sub_model_data
+    // --- Load component mounts (turrets, AA, etc.) from GameParams ---
+
+    /// Info about a single mount point from GameParams.
+    struct MountInfo {
+        hp_name: String,    // e.g. "HP_JGM_1"
+        model_path: String, // e.g. "content/gameplay/.../JGM178.model"
+    }
+
+    let mut mount_infos: Vec<MountInfo> = Vec::new();
+    let mut ship_display_name = String::new();
+
+    // We need GameParams to know which turrets go on which hull.
+    // Load raw pickle data — this is the same approach as load_game_params().
+    let pickle = load_game_params(vfs)?;
+    let params_dict = match &pickle {
+        pickled::Value::Dict(d) => d
+            .inner()
+            .get(&HashableValue::String("".to_string().into()))
+            .and_then(|v| v.dict_ref())
+            .map(|d| d.inner().clone()),
+        pickled::Value::List(l) => l
+            .inner()
+            .first()
+            .and_then(|v| v.dict_ref())
+            .map(|d| d.inner().clone()),
+        _ => None,
+    };
+
+    if let Some(ref params_dict) = params_dict {
+        // Find the ship param by matching the model directory name.
+        // The model_dir from our visual_paths contains the dir name like "JSB039_Yamato_1945".
+        let ship_dir_name = visual_paths
+            .first()
+            .and_then(|(_, path)| {
+                // Extract dir name: "content/gameplay/.../JSB039_Yamato_1945/Foo.visual" -> "JSB039_Yamato_1945"
+                let parent = path.rsplit_once('/')?.0;
+                parent.rsplit_once('/').map(|(_, d)| d.to_string())
+            })
+            .unwrap_or_default();
+
+        // Find the ship entity in GameParams by matching hull model path.
+        let mut ship_param_key = String::new();
+        let mut ship_data_opt: Option<pickled::Value> = None;
+
+        for (key, value) in params_dict.iter() {
+            let Some(key_str) = key.string_ref() else {
+                continue;
+            };
+            let Some(entity_dict) = value.dict_ref() else {
+                continue;
+            };
+            let entity = entity_dict.inner();
+
+            // Check typeinfo.type == "Ship"
+            let is_ship = entity
+                .get(&HashableValue::String("typeinfo".to_string().into()))
+                .and_then(|v| v.dict_ref())
+                .map(|ti| {
+                    ti.inner()
+                        .get(&HashableValue::String("type".to_string().into()))
+                        .and_then(|v| v.string_ref())
+                        .map(|s| s.inner() == "Ship")
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !is_ship {
+                continue;
+            }
+
+            // Check if any hull component's model path contains our ship_dir_name.
+            let has_matching_hull = entity.iter().any(|(ek, ev)| {
+                let Some(ek_str) = ek.string_ref() else {
+                    return false;
+                };
+                if !ek_str.inner().contains("Hull") {
+                    return false;
+                }
+                let Some(hull_dict) = ev.dict_ref() else {
+                    return false;
+                };
+                hull_dict
+                    .inner()
+                    .get(&HashableValue::String("model".to_string().into()))
+                    .and_then(|v| v.string_ref())
+                    .map(|s| s.inner().contains(&ship_dir_name))
+                    .unwrap_or(false)
+            });
+
+            if has_matching_hull {
+                ship_param_key = key_str.inner().clone();
+                ship_data_opt = Some(value.clone());
+                break;
+            }
+        }
+
+        if let Some(ship_data_val) = ship_data_opt {
+            let ship_data = ship_data_val.dict_ref();
+            let Some(ship_data) = ship_data else {
+                bail!("Ship data is not a dict");
+            };
+            let ship_data = ship_data.inner();
+            ship_display_name = ship_param_key.clone();
+
+            // Read ShipUpgradeInfo to find _Hull upgrades.
+            let upgrade_info = ship_data
+                .get(&HashableValue::String("ShipUpgradeInfo".to_string().into()))
+                .and_then(|v| v.dict_ref());
+
+            if let Some(upgrade_info) = upgrade_info {
+                // Collect all _Hull upgrades.
+                let mut hull_upgrades: Vec<(
+                    String,
+                    std::collections::BTreeMap<HashableValue, pickled::Value>,
+                )> = Vec::new();
+
+                for (uk, uv) in upgrade_info.inner().iter() {
+                    let Some(uk_str) = uk.string_ref() else {
+                        continue;
+                    };
+                    let Some(ud) = uv.dict_ref() else {
+                        continue;
+                    };
+                    let uc_type = ud
+                        .inner()
+                        .get(&HashableValue::String("ucType".to_string().into()))
+                        .and_then(|v| v.string_ref())
+                        .map(|s| s.inner().clone())
+                        .unwrap_or_default();
+                    if uc_type == "_Hull" {
+                        hull_upgrades.push((uk_str.inner().clone(), ud.inner().clone()));
+                    }
+                }
+
+                hull_upgrades.sort_by(|a, b| a.0.cmp(&b.0));
+
+                // Handle --list-upgrades
+                if list_upgrades {
+                    println!("Hull upgrades for {ship_display_name}:");
+                    let component_types = [
+                        "hull",
+                        "artillery",
+                        "atba",
+                        "airDefense",
+                        "directors",
+                        "finders",
+                        "radars",
+                        "torpedoes",
+                    ];
+                    for (i, (upgrade_name, upgrade_dict)) in hull_upgrades.iter().enumerate() {
+                        println!("  [{}] {upgrade_name}", i + 1);
+
+                        let components = upgrade_dict
+                            .get(&HashableValue::String("components".to_string().into()))
+                            .and_then(|v| v.dict_ref());
+
+                        if let Some(components) = components {
+                            for ct in &component_types {
+                                let comp_name = components
+                                    .inner()
+                                    .get(&HashableValue::String(ct.to_string().into()))
+                                    .and_then(|v| v.list_ref())
+                                    .and_then(|l| {
+                                        l.inner()
+                                            .first()
+                                            .and_then(|v| v.string_ref())
+                                            .map(|s| s.inner().clone())
+                                    });
+                                if let Some(ref comp_name) = comp_name {
+                                    // Count HP_ entries in the component
+                                    let mount_count = ship_data
+                                        .get(&HashableValue::String(comp_name.clone().into()))
+                                        .and_then(|v| v.dict_ref())
+                                        .map(|d| {
+                                            d.inner()
+                                                .keys()
+                                                .filter(|k| {
+                                                    k.string_ref()
+                                                        .map(|s| s.inner().starts_with("HP_"))
+                                                        .unwrap_or(false)
+                                                })
+                                                .count()
+                                        })
+                                        .unwrap_or(0);
+                                    println!("      {ct}: {comp_name} ({mount_count} mounts)");
+                                } else {
+                                    println!("      {ct}: (none)");
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Select hull upgrade.
+                let selected_upgrade = if let Some(sel) = hull_selection {
+                    hull_upgrades
+                        .iter()
+                        .find(|(name, _)| {
+                            name == sel || name.to_lowercase().contains(&sel.to_lowercase())
+                        })
+                        .or_else(|| {
+                            // Try matching by hull letter prefix (A, B, C)
+                            let prefix = format!("{sel}_");
+                            hull_upgrades.iter().find(|(_, dict)| {
+                                dict.get(&HashableValue::String("components".to_string().into()))
+                                    .and_then(|v| v.dict_ref())
+                                    .map(|c| {
+                                        c.inner()
+                                            .get(&HashableValue::String("hull".to_string().into()))
+                                            .and_then(|v| v.list_ref())
+                                            .map(|l| {
+                                                l.inner()
+                                                    .first()
+                                                    .and_then(|v| v.string_ref())
+                                                    .map(|s| s.inner().starts_with(&prefix))
+                                                    .unwrap_or(false)
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                    .unwrap_or(false)
+                            })
+                        })
+                } else {
+                    hull_upgrades.first()
+                };
+
+                if let Some((_upgrade_name, upgrade_dict)) = selected_upgrade {
+                    let components = upgrade_dict
+                        .get(&HashableValue::String("components".to_string().into()))
+                        .and_then(|v| v.dict_ref());
+
+                    if let Some(components) = components {
+                        // Component types that have 3D models.
+                        let model_component_types = [
+                            "artillery",
+                            "atba",
+                            "airDefense",
+                            "directors",
+                            "finders",
+                            "radars",
+                            "torpedoes",
+                        ];
+
+                        for ct in &model_component_types {
+                            let comp_name = components
+                                .inner()
+                                .get(&HashableValue::String(ct.to_string().into()))
+                                .and_then(|v| v.list_ref())
+                                .and_then(|l| {
+                                    l.inner()
+                                        .first()
+                                        .and_then(|v| v.string_ref())
+                                        .map(|s| s.inner().clone())
+                                });
+                            let Some(comp_name) = comp_name else {
+                                continue;
+                            };
+
+                            let comp_data = ship_data
+                                .get(&HashableValue::String(comp_name.into()))
+                                .and_then(|v| v.dict_ref());
+                            let Some(comp_data) = comp_data else {
+                                continue;
+                            };
+
+                            for (mk, mv) in comp_data.inner().iter() {
+                                let Some(mk_str) = mk.string_ref() else {
+                                    continue;
+                                };
+                                if !mk_str.inner().starts_with("HP_") {
+                                    continue;
+                                }
+                                let Some(mount_dict) = mv.dict_ref() else {
+                                    continue;
+                                };
+                                let model_path = mount_dict
+                                    .inner()
+                                    .get(&HashableValue::String("model".to_string().into()))
+                                    .and_then(|v| v.string_ref())
+                                    .map(|s| s.inner().clone());
+                                let Some(model_path) = model_path else {
+                                    continue;
+                                };
+
+                                mount_infos.push(MountInfo {
+                                    hp_name: mk_str.inner().clone(),
+                                    model_path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Parse and deduplicate turret models ---
+
+    // Collect unique model paths for turrets.
+    let mut unique_turret_models: HashMap<String, usize> = HashMap::new(); // model_path -> index
+    let mut turret_model_data: Vec<SubModelData> = Vec::new();
+
+    for mi in &mount_infos {
+        if unique_turret_models.contains_key(&mi.model_path) {
+            continue;
+        }
+
+        // Convert .model path to .visual path
+        let visual_path = mi.model_path.replace(".model", ".visual");
+        let visual_suffix = visual_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&visual_path)
+            .to_string();
+
+        let vis_location = match db.resolve_path(&visual_suffix, &self_id_index) {
+            Ok((loc, _)) => loc,
+            Err(_) => {
+                eprintln!(
+                    "Warning: could not resolve turret visual '{}', skipping",
+                    visual_suffix
+                );
+                continue;
+            }
+        };
+
+        if vis_location.blob_index != 1 {
+            continue;
+        }
+
+        let vis_data = match db.get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Warning: failed to get turret visual data: {e}");
+                continue;
+            }
+        };
+        let vp = match visual::parse_visual(vis_data) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Warning: failed to parse turret visual: {e}");
+                continue;
+            }
+        };
+
+        // Resolve geometry.
+        let geom_path_idx = match self_id_index.get(&vp.merged_geometry_path_id) {
+            Some(&idx) => idx,
+            None => {
+                eprintln!(
+                    "Warning: could not resolve geometry for turret '{}', skipping",
+                    visual_suffix
+                );
+                continue;
+            }
+        };
+        let geom_full_path = db.reconstruct_path(geom_path_idx, &self_id_index);
+        let mut geom_bytes = Vec::new();
+        match vfs.join(&geom_full_path).and_then(|p| p.open_file()) {
+            Ok(mut f) => {
+                f.read_to_end(&mut geom_bytes)?;
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not open turret geometry '{}': {e}",
+                    geom_full_path
+                );
+                continue;
+            }
+        }
+
+        let idx = turret_model_data.len();
+        unique_turret_models.insert(mi.model_path.clone(), idx);
+        let model_short_name = mi
+            .model_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&mi.model_path)
+            .strip_suffix(".model")
+            .unwrap_or(&mi.model_path);
+        turret_model_data.push(SubModelData {
+            name: model_short_name.to_string(),
+            visual: vp,
+            geom_bytes,
+        });
+    }
+
+    if !mount_infos.is_empty() {
+        println!(
+            "Found {} mount points ({} unique models)",
+            mount_infos.len(),
+            unique_turret_models.len()
+        );
+    }
+
+    // --- Build hardpoint transform maps from hull sub-model visuals ---
+
+    // Collect all hardpoint transforms from all hull sub-model visuals.
+    let mut hp_transforms: HashMap<String, [f32; 16]> = HashMap::new();
+    for smd in &sub_model_data {
+        for (_i, &name_id) in smd.visual.nodes.name_map_name_ids.iter().enumerate() {
+            if let Some(name) = db.strings.get_string_by_id(name_id) {
+                if name.starts_with("HP_") {
+                    if let Some(xform) = smd.visual.find_hardpoint_transform(name, &db.strings) {
+                        hp_transforms.insert(name.to_string(), xform);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Parse geometries and build SubModel refs ---
+
+    // Parse hull geometries.
+    let parsed_hull_geoms: Vec<geometry::MergedGeometry<'_>> = sub_model_data
         .iter()
         .map(|d| geometry::parse_geometry(&d.geom_bytes).expect("Failed to parse geometry"))
         .collect();
 
-    let sub_models: Vec<SubModel<'_>> = sub_model_data
+    // Parse turret geometries.
+    let parsed_turret_geoms: Vec<geometry::MergedGeometry<'_>> = turret_model_data
         .iter()
-        .zip(parsed_geoms.iter())
-        .map(|(data, geom)| SubModel {
+        .map(|d| geometry::parse_geometry(&d.geom_bytes).expect("Failed to parse turret geometry"))
+        .collect();
+
+    // Build SubModel list: hull parts + mounted components.
+    let mut sub_models: Vec<SubModel<'_>> = Vec::new();
+
+    // Hull sub-models (no transform, placed at origin).
+    for (data, geom) in sub_model_data.iter().zip(parsed_hull_geoms.iter()) {
+        sub_models.push(SubModel {
             name: data.name.clone(),
             visual: &data.visual,
             geometry: geom,
-        })
-        .collect();
+            transform: None,
+        });
+    }
+
+    // Mount sub-models (with hardpoint transforms).
+    let mut mounted_count = 0;
+    let mut skipped_count = 0;
+    for mi in &mount_infos {
+        let Some(&model_idx) = unique_turret_models.get(&mi.model_path) else {
+            continue;
+        };
+
+        // Skip compound hardpoints (e.g. "HP_JGM_1_HP_JGA_1") for now.
+        let hp_parts: Vec<&str> = mi.hp_name.split("_HP_").collect();
+        if hp_parts.len() > 1 {
+            skipped_count += 1;
+            continue;
+        }
+
+        let transform = hp_transforms.get(&mi.hp_name).copied();
+        if transform.is_none() {
+            skipped_count += 1;
+            continue;
+        }
+
+        let turret_data = &turret_model_data[model_idx];
+        let turret_geom = &parsed_turret_geoms[model_idx];
+
+        sub_models.push(SubModel {
+            name: format!("{} ({})", mi.hp_name, turret_data.name),
+            visual: &turret_data.visual,
+            geometry: turret_geom,
+            transform,
+        });
+        mounted_count += 1;
+    }
+
+    if mounted_count > 0 || skipped_count > 0 {
+        println!(
+            "Mounted {} components ({} skipped — compound hardpoints or missing nodes)",
+            mounted_count, skipped_count
+        );
+    }
 
     let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
     gltf_export::export_ship_glb(&sub_models, &db, lod, &mut out_file)
