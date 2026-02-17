@@ -2,6 +2,8 @@
 pub mod data;
 /// Error definitions
 pub mod error;
+/// Export functionality (glTF, etc.)
+pub mod export;
 /// Constants parsed from the game's XML files in `res/gui/data/constants/`
 pub mod game_constants;
 /// Utilities for loading game resources from a WoWS installation directory.
