@@ -173,6 +173,10 @@ enum Commands {
         #[arg(long)]
         no_textures: bool,
 
+        /// Export the damaged/destroyed hull state (crack geometry instead of patches)
+        #[arg(long)]
+        damaged: bool,
+
         /// List available camouflage texture schemes, then exit
         #[arg(long)]
         list_textures: bool,
@@ -204,6 +208,10 @@ enum Commands {
         /// Skip loading camouflage textures
         #[arg(long)]
         no_textures: bool,
+
+        /// Export the damaged/destroyed hull state (crack geometry instead of patches)
+        #[arg(long)]
+        damaged: bool,
 
         /// List available camouflage texture schemes, then exit
         #[arg(long)]
@@ -917,13 +925,22 @@ fn run() -> Result<(), Report> {
             output,
             lod,
             no_textures,
+            damaged,
             list_textures,
         } => {
             let Some(vfs) = &vfs else {
                 bail!("VFS required for export-model. Use --game-dir to specify a game install.");
             };
 
-            run_export_model(vfs, &name, &output, lod, no_textures, list_textures)?;
+            run_export_model(
+                vfs,
+                &name,
+                &output,
+                lod,
+                no_textures,
+                damaged,
+                list_textures,
+            )?;
         }
         Commands::ExportShip {
             name,
@@ -932,6 +949,7 @@ fn run() -> Result<(), Report> {
             list_upgrades,
             hull,
             no_textures,
+            damaged,
             list_textures,
         } => {
             let Some(vfs) = &vfs else {
@@ -948,6 +966,7 @@ fn run() -> Result<(), Report> {
                 list_upgrades,
                 hull.as_deref(),
                 no_textures,
+                damaged,
                 list_textures,
             )?;
         }
@@ -1306,6 +1325,7 @@ fn run_export_model(
     output: &Path,
     lod: usize,
     no_textures: bool,
+    damaged: bool,
     list_textures: bool,
 ) -> Result<(), Report> {
     use wowsunpack::export::gltf_export;
@@ -1410,7 +1430,7 @@ fn run_export_model(
 
     // Export to GLB.
     let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
-    gltf_export::export_glb(&vp, &geom, &db, lod, &texture_set, &mut out_file)
+    gltf_export::export_glb(&vp, &geom, &db, lod, &texture_set, damaged, &mut out_file)
         .context("Failed to export GLB")?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
@@ -1434,6 +1454,7 @@ fn run_export_ship(
     list_upgrades: bool,
     hull_selection: Option<&str>,
     no_textures: bool,
+    damaged: bool,
     list_textures: bool,
 ) -> Result<(), Report> {
     use wowsunpack::export::ship::{ShipAssets, ShipExportOptions};
@@ -1487,6 +1508,7 @@ fn run_export_ship(
         lod,
         hull: hull_selection.map(|s| s.to_string()),
         textures: !no_textures,
+        damaged,
     };
     let ctx = assets.load_ship(name, &options)?;
 

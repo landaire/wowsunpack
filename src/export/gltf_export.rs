@@ -69,6 +69,7 @@ pub fn export_glb(
     db: &PrototypeDatabase<'_>,
     lod: usize,
     texture_set: &TextureSet,
+    damaged: bool,
     writer: &mut impl Write,
 ) -> Result<(), Report<ExportError>> {
     if visual.lods.is_empty() {
@@ -84,7 +85,7 @@ pub fn export_glb(
     let lod_entry = &visual.lods[lod];
 
     // Collect render sets for this LOD by matching LOD render_set_names to RS name_ids.
-    let primitives = collect_primitives(visual, geometry, db, lod_entry)?;
+    let primitives = collect_primitives(visual, geometry, db, lod_entry, damaged)?;
 
     if primitives.is_empty() {
         eprintln!("Warning: no primitives found for LOD {lod}");
@@ -180,14 +181,36 @@ pub fn export_glb(
     Ok(())
 }
 
+/// Render set name substrings to exclude for intact-state export.
+///
+/// BigWorld ship visuals contain both intact and damaged geometry in the same
+/// file. Crack geometry (`_crack_`) shows jagged fracture edges for the damaged
+/// state, while patch geometry (`_patch_`) covers those seams when intact.
+/// The `_hide` geometry is context-dependent and hidden by default.
+const INTACT_EXCLUDE: &[&str] = &["_crack_", "_hide"];
+
+/// Render set name substrings to exclude for damaged-state export.
+///
+/// In the damaged state, patch geometry is hidden and crack geometry is shown.
+const DAMAGED_EXCLUDE: &[&str] = &["_patch_", "_hide"];
+
 /// Collect and decode all render set primitives for a given LOD.
+///
+/// When `damaged` is false, crack and hide geometry is excluded (intact hull).
+/// When `damaged` is true, patch and hide geometry is excluded (destroyed look).
 fn collect_primitives(
     visual: &VisualPrototype,
     geometry: &MergedGeometry,
     db: &PrototypeDatabase<'_>,
     lod: &crate::models::visual::Lod,
+    damaged: bool,
 ) -> Result<Vec<DecodedPrimitive>, Report<ExportError>> {
     let mut result = Vec::new();
+    let exclude = if damaged {
+        DAMAGED_EXCLUDE
+    } else {
+        INTACT_EXCLUDE
+    };
 
     for &rs_name_id in &lod.render_set_names {
         // Find the render set with this name_id.
@@ -196,6 +219,13 @@ fn collect_primitives(
             .iter()
             .find(|rs| rs.name_id == rs_name_id)
             .ok_or_else(|| Report::new(ExportError::RenderSetNotFound(rs_name_id)))?;
+
+        // Skip render sets based on damage state.
+        if let Some(rs_name) = db.strings.get_string_by_id(rs_name_id) {
+            if exclude.iter().any(|sub| rs_name.contains(sub)) {
+                continue;
+            }
+        }
 
         // Decode unknown_u64 → (vertices_mapping_id, indices_mapping_id)
         let vertices_mapping_id = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
@@ -870,6 +900,7 @@ pub fn export_ship_glb(
     db: &PrototypeDatabase<'_>,
     lod: usize,
     texture_set: &TextureSet,
+    damaged: bool,
     writer: &mut impl Write,
 ) -> Result<(), Report<ExportError>> {
     let mut root = json::Root::default();
@@ -896,7 +927,7 @@ pub fn export_ship_glb(
         }
 
         let lod_entry = &sub.visual.lods[lod];
-        let primitives = collect_primitives(sub.visual, sub.geometry, db, lod_entry)?;
+        let primitives = collect_primitives(sub.visual, sub.geometry, db, lod_entry, damaged)?;
 
         if primitives.is_empty() {
             eprintln!(

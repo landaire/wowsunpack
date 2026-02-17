@@ -48,6 +48,10 @@ pub struct ShipExportOptions {
     pub hull: Option<String>,
     /// Whether to embed textures in the GLB. Default: true.
     pub textures: bool,
+    /// Export the damaged/destroyed hull state instead of intact.
+    /// When true, crack geometry is included and patch geometry is excluded.
+    /// Default: false (intact hull).
+    pub damaged: bool,
 }
 
 impl Default for ShipExportOptions {
@@ -56,6 +60,7 @@ impl Default for ShipExportOptions {
             lod: 0,
             hull: None,
             textures: true,
+            damaged: false,
         }
     }
 }
@@ -743,8 +748,15 @@ impl ShipModelContext {
             TextureSet::empty()
         };
 
-        gltf_export::export_ship_glb(&sub_models, &db, self.options.lod, &texture_set, writer)
-            .context("Failed to export ship GLB")?;
+        gltf_export::export_ship_glb(
+            &sub_models,
+            &db,
+            self.options.lod,
+            &texture_set,
+            self.options.damaged,
+            writer,
+        )
+        .context("Failed to export ship GLB")?;
 
         Ok(())
     }
