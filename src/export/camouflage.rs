@@ -1,28 +1,42 @@
-//! Parser for `camouflages.xml` — material-based camouflage definitions.
+//! Parser for `camouflages.xml` — camouflage definitions including color schemes.
 //!
 //! The game's camouflage system defines texture overrides in a large XML file
 //! (`camouflages.xml` in the VFS root). Each `<camouflage>` entry maps a name
-//! (e.g. `mat_Steel`) to per-part albedo texture paths.
+//! (e.g. `mat_Steel`) to per-part albedo texture paths. Tiled camouflages also
+//! reference a `colorScheme` that provides 4 RGBA colors used to colorize a
+//! repeating tile pattern texture.
 
 use std::collections::HashMap;
 use std::io::Read;
 
 use vfs::VfsPath;
 
+/// A color scheme with 4 RGBA colors (linear space).
+///
+/// The tile texture acts as a color-indexed mask: Black/R/G/B zones map to
+/// color0/color1/color2/color3 respectively.
+pub struct ColorScheme {
+    pub name: String,
+    pub colors: [[f32; 4]; 4],
+}
+
 /// A parsed camouflage entry from `camouflages.xml`.
 pub struct CamouflageEntry {
-    /// Name, e.g. "mat_Steel".
+    /// Name, e.g. "mat_Steel" or "camo_CN_NY_2018_02_tile".
     pub name: String,
-    /// Whether this camo uses UV tiling (can't be represented in glTF).
+    /// Whether this camo uses UV tiling (tile texture + colorScheme).
     pub tiled: bool,
     /// Per-part albedo texture paths. Key = part category (lowercase, e.g. "hull"),
-    /// Value = VFS path to the albedo DDS.
+    /// Value = VFS path to the albedo DDS. For tiled camos, typically just "tile".
     pub textures: HashMap<String, String>,
+    /// Name of the color scheme (for tiled camos).
+    pub color_scheme: Option<String>,
 }
 
 /// Parsed camouflage database from `camouflages.xml`.
 pub struct CamouflageDb {
     entries: HashMap<String, CamouflageEntry>,
+    color_schemes: HashMap<String, ColorScheme>,
 }
 
 impl CamouflageDb {
@@ -41,8 +55,42 @@ impl CamouflageDb {
 
     fn parse(xml: &str) -> Option<Self> {
         let doc = roxmltree::Document::parse(xml).ok()?;
-        let mut entries = HashMap::new();
 
+        // Parse color schemes first.
+        let mut color_schemes = HashMap::new();
+        for cs_node in doc.descendants().filter(|n| n.has_tag_name("colorScheme")) {
+            let Some(name) = child_text(&cs_node, "name").map(|s| s.trim()) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+
+            let mut colors = [[0.0f32; 4]; 4];
+            for i in 0..4 {
+                let tag = format!("color{i}");
+                if let Some(text) = child_text(&cs_node, &tag) {
+                    let parts: Vec<f32> = text
+                        .split_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    if parts.len() >= 4 {
+                        colors[i] = [parts[0], parts[1], parts[2], parts[3]];
+                    }
+                }
+            }
+
+            color_schemes.insert(
+                name.to_string(),
+                ColorScheme {
+                    name: name.to_string(),
+                    colors,
+                },
+            );
+        }
+
+        // Parse camouflage entries.
+        let mut entries = HashMap::new();
         for camo_node in doc.descendants().filter(|n| n.has_tag_name("camouflage")) {
             let Some(name) = child_text(&camo_node, "name").map(|s| s.trim()) else {
                 continue;
@@ -58,8 +106,8 @@ impl CamouflageDb {
             if let Some(tex_node) = camo_node.children().find(|n| n.has_tag_name("Textures")) {
                 for child in tex_node.children().filter(|n| n.is_element()) {
                     let tag = child.tag_name().name();
-                    // Skip MGN (metallic/gloss/normal) entries — we only load albedo.
-                    if tag.ends_with("_mgn") {
+                    // Skip MGN (metallic/gloss/normal) and animmap entries.
+                    if tag.ends_with("_mgn") || tag.ends_with("_animmap") {
                         continue;
                     }
                     if let Some(path) = child.text().map(|t| t.trim().to_string()) {
@@ -70,17 +118,28 @@ impl CamouflageDb {
                 }
             }
 
+            // Parse colorSchemes reference (take first word if multiple).
+            let color_scheme = child_text(&camo_node, "colorSchemes")
+                .map(|s| s.trim())
+                .and_then(|s| s.split_whitespace().next())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+
             entries.insert(
                 name.to_string(),
                 CamouflageEntry {
                     name: name.to_string(),
                     tiled,
                     textures,
+                    color_scheme,
                 },
             );
         }
 
-        Some(Self { entries })
+        Some(Self {
+            entries,
+            color_schemes,
+        })
     }
 
     /// Look up a camouflage by name (e.g. "mat_Steel").
@@ -88,7 +147,12 @@ impl CamouflageDb {
         self.entries.get(name)
     }
 
-    /// Number of entries in the database.
+    /// Look up a color scheme by name.
+    pub fn color_scheme(&self, name: &str) -> Option<&ColorScheme> {
+        self.color_schemes.get(name)
+    }
+
+    /// Number of camouflage entries in the database.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
