@@ -39,6 +39,66 @@ pub fn dds_to_png(dds_bytes: &[u8]) -> Result<Vec<u8>, Report<TextureError>> {
     Ok(png_buf)
 }
 
+/// Bake a tiled camouflage tile texture with color scheme replacement.
+///
+/// The tile texture is a color-indexed mask where R/G/B/Black zones correspond
+/// to color1/color2/color3/color0 from the color scheme. This function replaces
+/// each zone with the appropriate color and returns the result as PNG.
+pub fn bake_tiled_camo_png(
+    tile_dds_bytes: &[u8],
+    colors: &[[f32; 4]; 4],
+) -> Result<Vec<u8>, Report<TextureError>> {
+    let dds = image_dds::ddsfile::Dds::read(&mut Cursor::new(tile_dds_bytes))
+        .map_err(|e| Report::new(TextureError::DdsParse(e.to_string())))?;
+
+    let mut rgba_image = image_dds::image_from_dds(&dds, 0)
+        .map_err(|e| Report::new(TextureError::DdsDecode(e.to_string())))?;
+
+    for pixel in rgba_image.pixels_mut() {
+        let [r, g, b, _a] = pixel.0;
+        // Determine zone by dominant channel. DXT1 compression may blend
+        // edge pixels, but dominant-channel detection handles this well.
+        let color = if r > g && r > b && r > 30 {
+            &colors[1] // Red zone → color1
+        } else if g > r && g > b && g > 30 {
+            &colors[2] // Green zone → color2
+        } else if b > r && b > g && b > 30 {
+            &colors[3] // Blue zone → color3
+        } else {
+            &colors[0] // Black/dark zone → color0
+        };
+        // Convert linear float [0,1] to sRGB [0,255]
+        pixel.0 = [
+            (linear_to_srgb(color[0]) * 255.0) as u8,
+            (linear_to_srgb(color[1]) * 255.0) as u8,
+            (linear_to_srgb(color[2]) * 255.0) as u8,
+            (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+        ];
+    }
+
+    let mut png_buf = Vec::new();
+    PngEncoder::new(&mut png_buf)
+        .write_image(
+            rgba_image.as_raw(),
+            rgba_image.width(),
+            rgba_image.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| Report::new(TextureError::PngEncode(e.to_string())))?;
+
+    Ok(png_buf)
+}
+
+/// Convert a linear-space color component to sRGB.
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 const TEXTURE_BASE: &str = "content/gameplay/common/camouflage/textures";
 
 /// Load raw DDS bytes from an absolute VFS path.
