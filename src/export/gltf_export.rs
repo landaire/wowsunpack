@@ -1028,7 +1028,7 @@ fn add_armor_primitive_to_root(
         name: Some(format!("armor_{}", armor.name)),
         alpha_mode: Valid(json::material::AlphaMode::Blend),
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
-            base_color_factor: json::material::PbrBaseColorFactor([0.2, 0.6, 1.0, 0.3]),
+            base_color_factor: json::material::PbrBaseColorFactor([1.0, 1.0, 1.0, 1.0]),
             metallic_factor: json::material::StrengthFactor(0.0),
             roughness_factor: json::material::StrengthFactor(0.8),
             ..Default::default()
@@ -1115,7 +1115,7 @@ impl ArmorSubModel {
     /// Build an `ArmorSubModel` from a parsed `ArmorModel`.
     ///
     /// `armor_map` is the GameParams armor thickness data:
-    ///   key = `(model_index << 16) | triangle_index`, value = thickness in mm.
+    ///   key = `(model_index << 16) | material_id`, value = thickness in mm.
     /// `model_index` is the 1-based index of this armor model in the geometry file.
     pub fn from_armor_model(
         armor: &crate::models::geometry::ArmorModel,
@@ -1130,12 +1130,10 @@ impl ArmorSubModel {
         let mut colors = Vec::with_capacity(vert_count);
 
         for (ti, tri) in armor.triangles.iter().enumerate() {
-            // Look up thickness for this triangle.
-            let key = (model_index << 16) | (ti as u32);
+            // Look up thickness by material ID (not triangle index).
+            let key = (model_index << 16) | (tri.material_id as u32);
             let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
 
-            // Map thickness to a color: blue (thin) → green → yellow → red (thick).
-            // 0mm = blue, ~200mm = green, ~400mm = red. Clamp at 650mm.
             let color = thickness_to_color(thickness_mm);
 
             for v in 0..3 {
@@ -1156,39 +1154,314 @@ impl ArmorSubModel {
     }
 }
 
-/// Map armor thickness (mm) to an RGBA color for visualization.
+/// Game's exact armor thickness color scale.
 ///
-/// Uses a blue → cyan → green → yellow → red heat map:
-///   0mm = blue, 100mm = cyan, 200mm = green, 400mm = yellow, 650mm+ = red.
-/// Alpha is 0.5 for all thicknesses (semi-transparent overlay).
-fn thickness_to_color(thickness_mm: f32) -> [f32; 4] {
-    let alpha = 0.5;
+/// 10 color buckets matching the in-game visualization from `ArmorConstants.py`.
+/// Each entry: (max_thickness_mm, r, g, b).
+/// Assignment uses `bisect_left` — a thickness of exactly a breakpoint value
+/// falls into that breakpoint's bucket.
+const ARMOR_COLOR_SCALE: &[(f32, f32, f32, f32)] = &[
+    (14.0, 110.0 / 255.0, 209.0 / 255.0, 176.0 / 255.0), // teal
+    (16.0, 149.0 / 255.0, 210.0 / 255.0, 127.0 / 255.0), // light green
+    (24.0, 170.0 / 255.0, 201.0 / 255.0, 102.0 / 255.0), // yellow-green
+    (26.0, 192.0 / 255.0, 193.0 / 255.0, 80.0 / 255.0),  // olive
+    (28.0, 226.0 / 255.0, 195.0 / 255.0, 62.0 / 255.0),  // gold
+    (33.0, 225.0 / 255.0, 171.0 / 255.0, 54.0 / 255.0),  // orange-gold
+    (75.0, 227.0 / 255.0, 144.0 / 255.0, 49.0 / 255.0),  // orange
+    (160.0, 230.0 / 255.0, 115.0 / 255.0, 49.0 / 255.0), // dark orange
+    (399.0, 220.0 / 255.0, 78.0 / 255.0, 48.0 / 255.0),  // red-orange
+    (999.0, 185.0 / 255.0, 47.0 / 255.0, 48.0 / 255.0),  // dark red
+];
+
+/// Map armor thickness (mm) to an RGBA color matching the game's visualization.
+///
+/// Uses the exact 10-bucket color scale from the game's `ArmorConstants.py`.
+/// Thickness ≤ 0 is treated as unknown (faint blue).
+pub fn thickness_to_color(thickness_mm: f32) -> [f32; 4] {
     if thickness_mm <= 0.0 {
-        return [0.2, 0.2, 0.8, 0.3]; // dim blue for unmapped
+        return [0.8, 0.8, 0.8, 0.5]; // light gray for plates with no assigned thickness
     }
 
-    // Normalize: 0..650 → 0..1
-    let t = (thickness_mm / 650.0).clamp(0.0, 1.0);
+    // bisect_left: find first bucket where breakpoint >= thickness
+    let idx = ARMOR_COLOR_SCALE
+        .iter()
+        .position(|&(bp, _, _, _)| thickness_mm <= bp)
+        .unwrap_or(ARMOR_COLOR_SCALE.len() - 1);
 
-    let (r, g, b) = if t < 0.25 {
-        // blue → cyan (0..~162mm)
-        let s = t / 0.25;
-        (0.0, s, 1.0)
-    } else if t < 0.5 {
-        // cyan → green (~162..~325mm)
-        let s = (t - 0.25) / 0.25;
-        (0.0, 1.0, 1.0 - s)
-    } else if t < 0.75 {
-        // green → yellow (~325..~487mm)
-        let s = (t - 0.5) / 0.25;
-        (s, 1.0, 0.0)
-    } else {
-        // yellow → red (~487..650mm+)
-        let s = (t - 0.75) / 0.25;
-        (1.0, 1.0 - s, 0.0)
-    };
+    let (_, r, g, b) = ARMOR_COLOR_SCALE[idx];
+    [r, g, b, 0.8]
+}
 
-    [r, g, b, alpha]
+/// An entry in the armor thickness color legend.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ArmorLegendEntry {
+    /// Lower bound of this thickness range (mm), inclusive.
+    pub min_mm: f32,
+    /// Upper bound of this thickness range (mm), inclusive.
+    pub max_mm: f32,
+    /// RGBA color used in the GLB export, each component 0.0..1.0.
+    pub color: [f32; 4],
+    /// Human-readable color name.
+    pub color_name: String,
+}
+
+/// Return the armor thickness color legend.
+///
+/// Each entry describes one color bucket: the thickness range (mm) and the
+/// color used. External tools can use this to build UI legends, filter by
+/// exact mm ranges, or map thickness values to colors programmatically.
+pub fn armor_color_legend() -> Vec<ArmorLegendEntry> {
+    let color_names = [
+        "teal",
+        "light green",
+        "yellow-green",
+        "olive",
+        "gold",
+        "orange-gold",
+        "orange",
+        "dark orange",
+        "red-orange",
+        "dark red",
+    ];
+
+    ARMOR_COLOR_SCALE
+        .iter()
+        .enumerate()
+        .map(|(i, &(max_mm, r, g, b))| {
+            let min_mm = if i == 0 {
+                0.0
+            } else {
+                ARMOR_COLOR_SCALE[i - 1].0 + 1.0
+            };
+            ArmorLegendEntry {
+                min_mm,
+                max_mm,
+                color: [r, g, b, 0.8],
+                color_name: color_names[i].to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Derive the zone name from a collision material name.
+///
+/// Material names follow patterns like `Bow_Bottom`, `Cit_Belt`, `SS_Side`,
+/// `Tur1GkBar`, `RudderAft`, etc. The prefix before the first `_` determines
+/// the zone, with special handling for turret and rudder names.
+pub fn zone_from_material_name(mat_name: &str) -> &'static str {
+    if mat_name.starts_with("Bow") {
+        return "Bow";
+    }
+    if mat_name.starts_with("St_") {
+        return "Stern";
+    }
+    if mat_name.starts_with("Cit") {
+        return "Citadel";
+    }
+    if mat_name.starts_with("Cas") {
+        return "Casemate";
+    }
+    if mat_name.starts_with("SS") {
+        return "Superstructure";
+    }
+    if mat_name.starts_with("Tur") {
+        return "Turret";
+    }
+    if mat_name.starts_with("Rudder") {
+        return "SteeringGear";
+    }
+    if mat_name.starts_with("Bulge") {
+        return "TorpedoProtection";
+    }
+    match mat_name {
+        "Deck" | "ConstrSide" => "Hull",
+        "common" | "zero" => "Default",
+        _ => "Other",
+    }
+}
+
+/// The built-in collision material name table.
+///
+/// Index = material ID (u8), value = name string. Extracted from the game client.
+/// Only includes entries actually used by ship armor models.
+const COLLISION_MATERIAL_NAMES: &[(u8, &str)] = &[
+    (0, "common"),
+    (1, "zero"),
+    (2, "Dual_SSC_Bow_Side"),
+    (3, "Dual_SSC_Bow_Top"),
+    (4, "Dual_SSC_Bow_Bottom"),
+    (5, "Dual_SSC_St_Side"),
+    (6, "Dual_SSC_St_Top"),
+    (7, "Dual_SSC_St_Bottom"),
+    (8, "Dual_Cas_OCit_Belt"),
+    (9, "Dual_Cas_OCit_Deck"),
+    (10, "Dual_Cas_OCit_Bottom"),
+    (11, "Dual_Cas_OCit_Trans"),
+    (12, "Dual_SSC_Cas_Side"),
+    (13, "Dual_SSC_Cas_Top"),
+    (14, "Dual_SSC_Cas_Bottom"),
+    (15, "Dual_Cit_OCas_Belt"),
+    (16, "Dual_CasT_OCitT"),
+    (17, "Dual_Cit_OCas_Deck"),
+    (18, "Dual_Cit_OCas_Bottom"),
+    (19, "Dual_Cit_OCas_Trans"),
+    (20, "Dual_Cit_OCas_FwdTrans"),
+    (21, "Dual_Cit_OCas_AftTrans"),
+    (22, "Dual_SSC_Cit_Side"),
+    (23, "Dual_SSC_Cit_Top"),
+    (47, "Bow_Bottom"),
+    (48, "Bow_ConstrSide"),
+    (49, "Bow_Deck"),
+    (50, "Bow_Side"),
+    (51, "Bow_Trans"),
+    (52, "Bow_Top"),
+    (53, "BridgeSide"),
+    (54, "BridgeTop"),
+    (55, "Cas_AftTrans"),
+    (56, "Cas_Belt"),
+    (57, "Cas_Deck"),
+    (58, "Cas_FwdTrans"),
+    (59, "Cit_AftTrans"),
+    (60, "Cit_AftWall"),
+    (61, "Cit_Belt"),
+    (62, "Cit_Bottom"),
+    (63, "Cit_Bulge"),
+    (64, "Cit_Deck"),
+    (65, "Cit_FwdTrans"),
+    (66, "Cit_FwdWall"),
+    (67, "Cit_Side"),
+    (68, "Cit_Top"),
+    (69, "ConstrSide"),
+    (70, "DD_Belt"),
+    (71, "DD_Bottom"),
+    (72, "DD_Deck"),
+    (73, "DD_Side"),
+    (74, "DD_Top"),
+    (75, "Deck"),
+    (76, "Mid_Belt"),
+    (77, "Mid_Bottom"),
+    (78, "Mid_Deck"),
+    (79, "Mid_Side"),
+    (80, "RudderAft"),
+    (81, "RudderFwd"),
+    (82, "RudderSide"),
+    (83, "RudderTop"),
+    (84, "Side"),
+    (85, "Bottom"),
+    (86, "Top"),
+    (87, "SSC_Belt"),
+    (88, "SSC_Deck"),
+    (89, "SS_Side"),
+    (90, "SS_Top"),
+    (91, "SS_Bottom"),
+    (92, "St_Bottom"),
+    (93, "St_ConstrSide"),
+    (94, "St_Deck"),
+    (95, "St_Side"),
+    (96, "St_Trans"),
+    (97, "St_Top"),
+    (98, "CV_Belt"),
+    (99, "CV_Deck"),
+    (100, "CV_Bottom"),
+    (101, "Bulge"),
+    (102, "Cas_Bottom"),
+    (103, "Deck"),
+    (104, "Cas_Top"),
+    (105, "Cit_AftBulge"),
+    (106, "Cit_FwdBulge"),
+    (107, "SS_BridgeTop"),
+    (108, "SS_BridgeSide"),
+    (109, "SS_BridgeBottom"),
+    // Turret barbettes (GkBar), undersides (GkDown), tops (GkTop) for up to 20 turrets.
+    // Pattern: base + turret_number, where base is 134/174/214 for Bar/Down/Top.
+    (134, "Tur1GkBar"),
+    (135, "Tur2GkBar"),
+    (136, "Tur3GkBar"),
+    (137, "Tur4GkBar"),
+    (138, "Tur5GkBar"),
+    (174, "Tur1GkDown"),
+    (175, "Tur2GkDown"),
+    (176, "Tur3GkDown"),
+    (177, "Tur4GkDown"),
+    (178, "Tur5GkDown"),
+    (214, "Tur1GkTop"),
+    (215, "Tur2GkTop"),
+    (216, "Tur3GkTop"),
+    (217, "Tur4GkTop"),
+    (218, "Tur5GkTop"),
+];
+
+/// Look up the collision material name for a given material ID.
+pub fn collision_material_name(id: u8) -> &'static str {
+    COLLISION_MATERIAL_NAMES
+        .iter()
+        .find(|(mid, _)| *mid == id)
+        .map(|(_, name)| *name)
+        .unwrap_or("unknown")
+}
+
+/// Split an armor model into per-zone `ArmorSubModel`s for selective visibility in Blender.
+///
+/// Each triangle is classified by its collision material ID, which determines both:
+/// - The armor thickness (looked up from the GameParams armor dict)
+/// - The zone name (derived from the material name pattern)
+///
+/// Triangles are grouped into one mesh per zone for easy toggling in Blender.
+pub fn armor_sub_models_by_zone(
+    armor: &crate::models::geometry::ArmorModel,
+    armor_map: Option<&std::collections::HashMap<u32, f32>>,
+    model_index: u32,
+) -> Vec<ArmorSubModel> {
+    // Group triangles by zone name.
+    let mut zone_tris: std::collections::BTreeMap<
+        String,
+        Vec<(&crate::models::geometry::ArmorTriangle, [f32; 4])>,
+    > = std::collections::BTreeMap::new();
+
+    for tri in &armor.triangles {
+        let key = (model_index << 16) | (tri.material_id as u32);
+        let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
+
+        let mat_name = collision_material_name(tri.material_id);
+        let zone_name = zone_from_material_name(mat_name);
+
+        let color = thickness_to_color(thickness_mm);
+
+        zone_tris
+            .entry(zone_name.to_string())
+            .or_default()
+            .push((tri, color));
+    }
+
+    // Build one ArmorSubModel per zone.
+    zone_tris
+        .into_iter()
+        .map(|(zone_name, tris)| {
+            let vert_count = tris.len() * 3;
+            let mut positions = Vec::with_capacity(vert_count);
+            let mut normals = Vec::with_capacity(vert_count);
+            let mut indices = Vec::with_capacity(vert_count);
+            let mut colors = Vec::with_capacity(vert_count);
+
+            for (vi, (tri, color)) in tris.iter().enumerate() {
+                for v in 0..3 {
+                    positions.push(tri.vertices[v]);
+                    normals.push(tri.normals[v]);
+                    indices.push((vi * 3 + v) as u32);
+                    colors.push(*color);
+                }
+            }
+
+            ArmorSubModel {
+                name: format!("Armor_{}", zone_name),
+                positions,
+                normals,
+                indices,
+                colors,
+            }
+        })
+        .collect()
 }
 
 /// A named sub-model for multi-model ship export.
@@ -1199,6 +1472,8 @@ pub struct SubModel<'a> {
     /// Optional world-space transform (column-major 4x4 matrix).
     /// If `None`, the sub-model is placed at the origin.
     pub transform: Option<[f32; 16]>,
+    /// Group name for Blender outliner hierarchy (e.g. "Hull", "Main Battery").
+    pub group: &'static str,
 }
 
 /// Export multiple sub-models as a single GLB with separate named meshes/nodes.
@@ -1223,8 +1498,10 @@ pub fn export_ship_glb(
     };
 
     let mut bin_data: Vec<u8> = Vec::new();
-    let mut scene_nodes = Vec::new();
     let mut mat_cache = MaterialCache::new();
+
+    // Collect mesh nodes grouped by category.
+    let mut grouped_nodes: BTreeMap<&str, Vec<json::Index<json::Node>>> = BTreeMap::new();
 
     for sub in sub_models {
         // Validate LOD — skip sub-models that don't have enough LODs.
@@ -1273,10 +1550,11 @@ pub fn export_ship_glb(
             ..Default::default()
         });
 
-        scene_nodes.push(node);
+        grouped_nodes.entry(sub.group).or_default().push(node);
     }
 
-    // Add armor meshes as separate nodes.
+    // Add armor meshes grouped under "Armor".
+    let mut armor_nodes: Vec<json::Index<json::Node>> = Vec::new();
     for armor in armor_models {
         if armor.positions.is_empty() {
             continue;
@@ -1298,7 +1576,21 @@ pub fn export_ship_glb(
             ..Default::default()
         });
 
-        scene_nodes.push(node);
+        armor_nodes.push(node);
+    }
+    if !armor_nodes.is_empty() {
+        grouped_nodes.insert("Armor", armor_nodes);
+    }
+
+    // Build scene hierarchy: one parent node per group.
+    let mut scene_nodes = Vec::new();
+    for (group_name, children) in &grouped_nodes {
+        let parent = root.push(json::Node {
+            children: Some(children.clone()),
+            name: Some(group_name.to_string()),
+            ..Default::default()
+        });
+        scene_nodes.push(parent);
     }
 
     // Pad binary data to 4-byte alignment.
@@ -1320,7 +1612,7 @@ pub fn export_ship_glb(
         }
     }
 
-    // Create scene with all sub-model nodes.
+    // Create scene with group parent nodes.
     let scene = root.push(json::Scene {
         nodes: scene_nodes,
         name: None,

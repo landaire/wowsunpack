@@ -1542,13 +1542,33 @@ fn run_export_ship(
         ctx.unique_turret_count()
     );
 
+    let has_armor = ctx.armor_map().is_some() || ctx.hull_splash_bytes().is_some();
+
     let mut file = std::fs::File::create(output).context("Failed to create output file")?;
     ctx.export_glb(&mut file)?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!("Exported to {} ({} bytes)", output.display(), file_size);
 
+    if has_armor {
+        print_armor_legend();
+    }
+
     Ok(())
+}
+
+fn print_armor_legend() {
+    use wowsunpack::export::gltf_export;
+
+    println!();
+    println!("Armor thickness color scale:");
+    println!("     0    mm  light gray (no assigned thickness)");
+    for entry in gltf_export::armor_color_legend() {
+        println!(
+            "  {:>4}–{:>4} mm  {}",
+            entry.min_mm as u32, entry.max_mm as u32, entry.color_name
+        );
+    }
 }
 
 fn run_armor(
@@ -1587,6 +1607,8 @@ fn run_armor(
     );
 
     let armor_map = ctx.armor_map();
+
+    use wowsunpack::export::gltf_export::collision_material_name;
 
     // Parse geometry for each hull part to inspect armor models.
     let mut armor_model_index = 1u32;
@@ -1649,18 +1671,44 @@ fn run_armor(
                         max_t
                     );
 
-                    // Print per-triangle details sorted by index.
+                    // Print per-material details sorted by material ID.
                     let mut sorted = entries.clone();
-                    sorted.sort_by_key(|(ti, _)| *ti);
-                    for (ti, thickness) in &sorted {
+                    sorted.sort_by_key(|(mid, _)| *mid);
+                    for (mid, thickness) in &sorted {
                         if *thickness > 0.0 {
-                            println!("      tri {:>5} = {:>6.1} mm", ti, thickness);
+                            let mat_name = collision_material_name(*mid as u8);
+                            println!(
+                                "      mat {:>3} ({:<20}) = {:>6.1} mm",
+                                mid, mat_name, thickness
+                            );
                         }
                     }
                 }
             } else {
                 println!("    GameParams: no armor data available");
             }
+        }
+    }
+
+    // Zone classification by collision material ID.
+    {
+        use wowsunpack::export::gltf_export::zone_from_material_name;
+        println!("\nZone classification (by collision material):");
+        let mut zone_counts: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for geom_bytes in ctx.hull_geom_bytes() {
+            if let Ok(geom) = geometry::parse_geometry(geom_bytes) {
+                for am in &geom.armor_models {
+                    for tri in &am.triangles {
+                        let mat_name = collision_material_name(tri.material_id);
+                        let zone = zone_from_material_name(mat_name);
+                        *zone_counts.entry(zone).or_default() += 1;
+                    }
+                }
+            }
+        }
+        for (zone, count) in &zone_counts {
+            println!("  {:>20}: {:>5} triangles", zone, count);
         }
     }
 

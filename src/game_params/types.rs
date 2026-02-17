@@ -900,6 +900,11 @@ pub struct HitLocation {
     max_hp: f32,
     hl_type: String,
     regenerated_hp_part: f32,
+    /// Default armor plating thickness for this zone, in mm.
+    #[cfg_attr(feature = "serde", serde(default))]
+    thickness: f32,
+    #[cfg_attr(feature = "serde", serde(default))]
+    splash_boxes: Vec<String>,
 }
 
 impl HitLocation {
@@ -913,6 +918,15 @@ impl HitLocation {
 
     pub fn regenerated_hp_part(&self) -> f32 {
         self.regenerated_hp_part
+    }
+
+    /// Default armor plating thickness for this zone, in mm.
+    pub fn thickness(&self) -> f32 {
+        self.thickness
+    }
+
+    pub fn splash_boxes(&self) -> &[String] {
+        &self.splash_boxes
     }
 }
 

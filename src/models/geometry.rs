@@ -39,6 +39,9 @@ pub struct MergedGeometry<'a> {
 pub struct ArmorTriangle {
     pub vertices: [[f32; 3]; 3],
     pub normals: [[f32; 3]; 3],
+    /// Collision material ID from the BVH node header (byte 0).
+    /// Used as the key in the GameParams armor dict: `(model_index << 16) | material_id`.
+    pub material_id: u8,
 }
 
 /// A parsed armor model containing triangle geometry for hit detection.
@@ -46,6 +49,15 @@ pub struct ArmorTriangle {
 pub struct ArmorModel {
     pub name: String,
     pub triangles: Vec<ArmorTriangle>,
+}
+
+/// A named axis-aligned bounding box from a `.splash` file.
+/// Used to classify armor triangles into hit-location zones.
+#[derive(Debug, Clone)]
+pub struct SplashBox {
+    pub name: String,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +444,56 @@ fn parse_vertices_array<'a>(
     Ok(result)
 }
 
+/// Parse a `.splash` file containing named axis-aligned bounding boxes.
+///
+/// Format: `u32 count`, then per box: `u32 name_len`, `name` bytes, `6× f32 (min_xyz, max_xyz)`.
+pub fn parse_splash_file(data: &[u8]) -> Result<Vec<SplashBox>, Report<GeometryError>> {
+    let err = || GeometryError::ParseError("splash: unexpected end of data".into());
+    let mut pos = 0usize;
+
+    let read_u32 = |pos: &mut usize| -> Result<u32, Report<GeometryError>> {
+        let end = *pos + 4;
+        let bytes = data.get(*pos..end).ok_or_else(err)?;
+        *pos = end;
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    };
+
+    let read_f32 = |pos: &mut usize| -> Result<f32, Report<GeometryError>> {
+        let end = *pos + 4;
+        let bytes = data.get(*pos..end).ok_or_else(err)?;
+        *pos = end;
+        Ok(f32::from_le_bytes(bytes.try_into().unwrap()))
+    };
+
+    let count = read_u32(&mut pos)? as usize;
+    let mut boxes = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let name_len = read_u32(&mut pos)? as usize;
+        let name_end = pos + name_len;
+        let name_bytes = data.get(pos..name_end).ok_or_else(err)?;
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(|_| GeometryError::ParseError("splash: invalid UTF-8 name".into()))?
+            .to_string();
+        pos = name_end;
+
+        let min_x = read_f32(&mut pos)?;
+        let min_y = read_f32(&mut pos)?;
+        let min_z = read_f32(&mut pos)?;
+        let max_x = read_f32(&mut pos)?;
+        let max_y = read_f32(&mut pos)?;
+        let max_z = read_f32(&mut pos)?;
+
+        boxes.push(SplashBox {
+            name,
+            min: [min_x, min_y, min_z],
+            max: [max_x, max_y, max_z],
+        });
+    }
+
+    Ok(boxes)
+}
+
 /// Parse the struct fields of an IndicesPrototype (0x10 bytes).
 /// Returns (data_relptr, size_in_bytes, index_size).
 fn parse_indices_fields(input: &mut &[u8]) -> WResult<(i64, u32, u16)> {
@@ -514,6 +576,10 @@ fn parse_armor_data(data: &[u8]) -> Result<Vec<ArmorTriangle>, Report<GeometryEr
             break;
         }
 
+        // First entry of node header: byte 0 = collision material ID
+        let node_entry0_off = pos * ENTRY_SIZE;
+        let material_id = data[node_entry0_off];
+
         // Second entry of the node header has vertex_count at bytes 12..16
         let node_entry1_off = (pos + 1) * ENTRY_SIZE;
         let vertex_count = read_u32(node_entry1_off + 12) as usize;
@@ -536,6 +602,7 @@ fn parse_armor_data(data: &[u8]) -> Result<Vec<ArmorTriangle>, Report<GeometryEr
             let mut tri = ArmorTriangle {
                 vertices: [[0.0; 3]; 3],
                 normals: [[0.0; 3]; 3],
+                material_id,
             };
             for v in 0..3 {
                 let entry_off = (pos + t * 3 + v) * ENTRY_SIZE;

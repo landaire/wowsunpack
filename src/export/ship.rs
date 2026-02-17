@@ -662,10 +662,29 @@ impl ShipAssets {
                 .context_with(|| format!("Could not open geometry: {geom_full_path}"))?
                 .read_to_end(&mut geom_bytes)?;
 
+            // Try loading the .splash file (same directory, same base name).
+            let splash_bytes = if geom_full_path.ends_with(".geometry") {
+                let splash_path = format!(
+                    "{}.splash",
+                    &geom_full_path[..geom_full_path.len() - ".geometry".len()]
+                );
+                let mut buf = Vec::new();
+                match self.vfs.join(&splash_path).and_then(|p| p.open_file()) {
+                    Ok(mut f) => {
+                        let _ = f.read_to_end(&mut buf);
+                        Some(buf)
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             result.push(OwnedSubModel {
                 name: sub_name.clone(),
                 visual: vp,
                 geom_bytes,
+                splash_bytes,
             });
         }
 
@@ -866,6 +885,7 @@ impl ShipAssets {
             name: model_short_name.to_string(),
             visual: vp,
             geom_bytes,
+            splash_bytes: None,
         })
     }
 }
@@ -887,7 +907,7 @@ pub struct ShipModelContext {
     info: ShipInfo,
     options: ShipExportOptions,
     mat_camo_schemes: Vec<MatCamoScheme>,
-    /// Armor thickness map from GameParams: (model_index << 16 | tri_index) → mm.
+    /// Armor thickness map from GameParams: (model_index << 16 | material_id) → mm.
     armor_map: Option<HashMap<u32, f32>>,
 }
 
@@ -913,7 +933,7 @@ impl ShipModelContext {
     }
 
     /// Armor thickness map from GameParams.
-    /// Keys: `(model_index << 16) | triangle_index`, values: thickness in mm.
+    /// Keys: `(model_index << 16) | material_id`, values: thickness in mm.
     pub fn armor_map(&self) -> Option<&HashMap<u32, f32>> {
         self.armor_map.as_ref()
     }
@@ -924,6 +944,13 @@ impl ShipModelContext {
             .iter()
             .map(|p| p.geom_bytes.as_slice())
             .collect()
+    }
+
+    /// Raw splash file bytes for hull parts (if available).
+    pub fn hull_splash_bytes(&self) -> Option<&[u8]> {
+        self.hull_parts
+            .iter()
+            .find_map(|p| p.splash_bytes.as_deref())
     }
 
     /// Export the loaded ship model to GLB format.
@@ -956,6 +983,7 @@ impl ShipModelContext {
                 visual: &data.visual,
                 geometry: geom,
                 transform: None,
+                group: "Hull",
             });
         }
 
@@ -969,6 +997,7 @@ impl ShipModelContext {
                 visual: &turret_data.visual,
                 geometry: turret_geom,
                 transform: mount.transform,
+                group: mount_group(&mount.hp_name),
             });
         }
 
@@ -1076,7 +1105,7 @@ impl ShipModelContext {
         };
 
         // Collect armor meshes from hull geometries with thickness data.
-        // The armor map from GameParams uses (model_index << 16) | tri_index as keys.
+        // The armor map from GameParams uses (model_index << 16) | material_id as keys.
         // model_index is 1-based across all geometry files in the ship.
         let armor_map = self.armor_map.as_ref();
         let mut armor_model_index = 1u32; // 1-based
@@ -1085,10 +1114,10 @@ impl ShipModelContext {
             .flat_map(|geom| {
                 geom.armor_models
                     .iter()
-                    .map(|am| {
+                    .flat_map(|am| {
                         let idx = armor_model_index;
                         armor_model_index += 1;
-                        gltf_export::ArmorSubModel::from_armor_model(am, armor_map, idx)
+                        gltf_export::armor_sub_models_by_zone(am, armor_map, idx)
                     })
                     .collect::<Vec<_>>()
             })
@@ -1118,6 +1147,8 @@ struct OwnedSubModel {
     name: String,
     visual: VisualPrototype,
     geom_bytes: Vec<u8>,
+    /// Raw `.splash` file bytes (only present for base hull models).
+    splash_bytes: Option<Vec<u8>>,
 }
 
 /// A mount instance with resolved transform.
@@ -1241,6 +1272,30 @@ pub fn build_texture_set(mfm_infos: &[MfmInfo], vfs: &VfsPath) -> TextureSet {
         base,
         camo_schemes,
         tiled_uv_transforms: HashMap::new(),
+    }
+}
+
+/// Categorize a mount's hardpoint name into a display group.
+///
+/// Hardpoint prefixes:
+/// - `HP_AGM` — main gun turrets
+/// - `HP_AGS` — secondary gun turrets
+/// - `HP_AGA` — AA gun mounts
+/// - `HP_ATB` / `HP_AT` — torpedo tube mounts
+/// - `HP_AD` — decoration / depth charge
+/// - `HP_AF` — flags
+/// - `HP_ARF` / `HP_ARS` — rangefinders / radar
+fn mount_group(hp_name: &str) -> &'static str {
+    if hp_name.starts_with("HP_AGM") {
+        "Main Battery"
+    } else if hp_name.starts_with("HP_AGS") {
+        "Secondary Battery"
+    } else if hp_name.starts_with("HP_AGA") {
+        "AA Guns"
+    } else if hp_name.starts_with("HP_ATB") || hp_name.starts_with("HP_AT_") {
+        "Torpedoes"
+    } else {
+        "Other"
     }
 }
 

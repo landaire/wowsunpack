@@ -944,36 +944,52 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             })
     });
 
-    let hit_locations: Option<HashMap<String, HitLocation>> =
-        a_hull.as_ref().and_then(|hull_dict| {
-            hull_dict
-                .inner()
-                .get(&pk(keys::HIT_LOCATION_GROUPS))
-                .and_then(|v| v.dict_ref())
-                .map(|hlg_dict| {
-                    hlg_dict
-                        .inner()
-                        .iter()
-                        .filter_map(|(k, v)| {
-                            let name = k.string_ref()?.inner().to_string();
-                            let group_dict = v.dict_ref()?.inner();
-                            let max_hp = read_float(&group_dict, keys::MAX_HP).unwrap_or(0.0);
-                            let hl_type =
-                                read_string(&group_dict, keys::HL_TYPE).unwrap_or_default();
-                            let regenerated_hp_part =
-                                read_float(&group_dict, keys::REGENERATED_HP_PART).unwrap_or(0.0);
-                            Some((
-                                name,
-                                HitLocation::builder()
-                                    .max_hp(max_hp)
-                                    .hl_type(hl_type)
-                                    .regenerated_hp_part(regenerated_hp_part)
-                                    .build(),
-                            ))
-                        })
-                        .collect()
-                })
-        });
+    // Hit location zones are stored as top-level entries in A_Hull (e.g. Bow, Cit, SS).
+    // Each zone is a dict with an `hlType` field. We scan all entries and filter by that.
+    let hit_locations: Option<HashMap<String, HitLocation>> = a_hull.as_ref().map(|hull_dict| {
+        hull_dict
+            .inner()
+            .iter()
+            .filter_map(|(k, v)| {
+                let name = k.string_ref()?.inner().to_string();
+                let group_dict = v.dict_ref()?.inner();
+                // Only consider entries with hlType — that marks them as hit location zones.
+                let hl_type = read_string(&group_dict, keys::HL_TYPE)?;
+                let max_hp = read_float(&group_dict, keys::MAX_HP).unwrap_or(0.0);
+                let regenerated_hp_part =
+                    read_float(&group_dict, keys::REGENERATED_HP_PART).unwrap_or(0.0);
+                let thickness = read_float(&group_dict, keys::THICKNESS).unwrap_or(0.0);
+                let splash_boxes: Vec<String> = group_dict
+                    .get(&pk(keys::SPLASH_BOXES))
+                    .map(|v| {
+                        let extract = |items: &[Value]| -> Vec<String> {
+                            items
+                                .iter()
+                                .filter_map(|s| s.string_ref().map(|s| s.inner().to_string()))
+                                .collect()
+                        };
+                        if let Some(list) = v.list_ref() {
+                            extract(&list.inner())
+                        } else if let Some(tuple) = v.tuple_ref() {
+                            extract(&tuple.inner())
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default();
+                Some((
+                    name,
+                    HitLocation::builder()
+                        .max_hp(max_hp)
+                        .hl_type(hl_type)
+                        .regenerated_hp_part(regenerated_hp_part)
+                        .thickness(thickness)
+                        .splash_boxes(splash_boxes)
+                        .build(),
+                ))
+            })
+            .collect()
+    });
 
     let permoflages: Vec<String> = ship_data
         .get(&pk(keys::PERMOFLAGES))
