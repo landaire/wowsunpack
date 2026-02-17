@@ -1,7 +1,7 @@
 //! Export ship visual + geometry to glTF/GLB format.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use gltf_json as json;
@@ -53,14 +53,22 @@ struct DecodedPrimitive {
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     material_name: String,
+    /// MFM stem for texture lookup (e.g. "JSB039_Yamato_1945_Hull").
+    mfm_stem: Option<String>,
 }
 
 /// Export a visual + geometry pair to a GLB binary and write it.
+///
+/// `texture_set` contains base albedo PNGs and optional camouflage variant PNGs.
+/// Primitives whose MFM stem matches a key will have the texture applied as
+/// `baseColorTexture` on their material. Camo variants are exposed via
+/// `KHR_materials_variants` so users can switch in Blender.
 pub fn export_glb(
     visual: &VisualPrototype,
     geometry: &MergedGeometry,
     db: &PrototypeDatabase<'_>,
     lod: usize,
+    texture_set: &TextureSet,
     writer: &mut impl Write,
 ) -> Result<(), Report<ExportError>> {
     if visual.lods.is_empty() {
@@ -93,9 +101,11 @@ pub fn export_glb(
     // Accumulate all binary data into a single buffer.
     let mut bin_data: Vec<u8> = Vec::new();
     let mut gltf_primitives = Vec::new();
+    let mut mat_cache = MaterialCache::new();
 
     for prim in &primitives {
-        let gltf_prim = add_primitive_to_root(&mut root, &mut bin_data, prim)?;
+        let gltf_prim =
+            add_primitive_to_root(&mut root, &mut bin_data, prim, texture_set, &mut mat_cache)?;
         gltf_primitives.push(gltf_prim);
     }
 
@@ -142,6 +152,9 @@ pub fn export_glb(
         extras: Default::default(),
     });
     root.scene = Some(scene);
+
+    // Add KHR_materials_variants root extension if we have camo schemes.
+    add_variants_extension(&mut root, texture_set);
 
     // Serialize and write GLB.
     let json_string = json::serialize::to_string(&root)
@@ -316,12 +329,27 @@ fn collect_primitives(
             .unwrap_or("<unknown>")
             .to_string();
 
+        // Resolve MFM stem for texture lookup.
+        let self_id_index = db.build_self_id_index();
+        let mfm_stem = if rs.material_mfm_path_id != 0 {
+            self_id_index.get(&rs.material_mfm_path_id).map(|&idx| {
+                db.paths_storage[idx]
+                    .name
+                    .strip_suffix(".mfm")
+                    .unwrap_or(&db.paths_storage[idx].name)
+                    .to_string()
+            })
+        } else {
+            None
+        };
+
         result.push(DecodedPrimitive {
             positions,
             normals,
             uvs,
             indices,
             material_name,
+            mfm_stem,
         });
     }
 
@@ -383,12 +411,134 @@ fn unpack_vertices(
     (positions, normals, uvs)
 }
 
+/// All texture data for a ship export: base albedo + camouflage variants.
+pub struct TextureSet {
+    /// Base albedo PNGs keyed by MFM stem — the default ship appearance.
+    pub base: HashMap<String, Vec<u8>>,
+    /// Camouflage variant PNGs: scheme name → (MFM stem → PNG bytes).
+    /// Only stems that have a texture for this scheme are included.
+    pub camo_schemes: Vec<(String, HashMap<String, Vec<u8>>)>,
+}
+
+impl TextureSet {
+    pub fn empty() -> Self {
+        Self {
+            base: HashMap::new(),
+            camo_schemes: Vec::new(),
+        }
+    }
+}
+
+/// Cached material info for a given MFM stem / material name.
+struct CachedMaterial {
+    /// Default material index (base albedo or untextured).
+    default_mat: json::Index<json::Material>,
+    /// Variant material indices, one per camo scheme (same order as TextureSet::camo_schemes).
+    variant_mats: Vec<Option<json::Index<json::Material>>>,
+}
+
+/// Cache for deduplicating materials and textures across primitives.
+struct MaterialCache {
+    /// Maps cache key (MFM stem or material name) to cached material info.
+    materials: HashMap<String, CachedMaterial>,
+}
+
+impl MaterialCache {
+    fn new() -> Self {
+        Self {
+            materials: HashMap::new(),
+        }
+    }
+}
+
+/// Embed a PNG image in the glTF binary buffer and create a textured material.
+/// Returns the material index.
+fn create_textured_material(
+    root: &mut json::Root,
+    bin_data: &mut Vec<u8>,
+    png_bytes: &[u8],
+    material_name: &str,
+    image_name: Option<String>,
+) -> json::Index<json::Material> {
+    let byte_offset = bin_data.len();
+    bin_data.extend_from_slice(png_bytes);
+    pad_to_4(bin_data);
+    let byte_length = png_bytes.len();
+
+    let bv = root.push(json::buffer::View {
+        buffer: json::Index::new(0),
+        byte_length: USize64::from(byte_length),
+        byte_offset: Some(USize64::from(byte_offset)),
+        byte_stride: None,
+        target: None,
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let image = root.push(json::Image {
+        buffer_view: Some(bv),
+        mime_type: Some(json::image::MimeType("image/png".to_string())),
+        uri: None,
+        name: image_name,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let sampler = root.push(json::texture::Sampler {
+        mag_filter: Some(Valid(json::texture::MagFilter::Linear)),
+        min_filter: Some(Valid(json::texture::MinFilter::LinearMipmapLinear)),
+        wrap_s: Valid(json::texture::WrappingMode::Repeat),
+        wrap_t: Valid(json::texture::WrappingMode::Repeat),
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let texture = root.push(json::Texture {
+        source: image,
+        sampler: Some(sampler),
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let texture_info = json::texture::Info {
+        index: texture,
+        tex_coord: 0,
+        extensions: Default::default(),
+        extras: Default::default(),
+    };
+
+    root.push(json::Material {
+        name: Some(material_name.to_string()),
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_texture: Some(texture_info),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+/// Create an untextured material.
+fn create_untextured_material(
+    root: &mut json::Root,
+    material_name: &str,
+) -> json::Index<json::Material> {
+    root.push(json::Material {
+        name: Some(material_name.to_string()),
+        ..Default::default()
+    })
+}
+
 /// Add a decoded primitive's data to the glTF root and binary buffer.
 /// Returns the glTF Primitive JSON object.
 fn add_primitive_to_root(
     root: &mut json::Root,
     bin_data: &mut Vec<u8>,
     prim: &DecodedPrimitive,
+    texture_set: &TextureSet,
+    mat_cache: &mut MaterialCache,
 ) -> Result<json::mesh::Primitive, Report<ExportError>> {
     let mut attributes = BTreeMap::new();
 
@@ -405,7 +555,7 @@ fn add_primitive_to_root(
         let byte_length = bin_data.len() - byte_offset;
 
         let bv = root.push(json::buffer::View {
-            buffer: json::Index::new(0), // will be updated later
+            buffer: json::Index::new(0),
             byte_length: USize64::from(byte_length),
             byte_offset: Some(USize64::from(byte_offset)),
             byte_stride: None,
@@ -569,21 +719,118 @@ fn add_primitive_to_root(
         attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), uv);
     }
 
-    // Create material stub.
-    let material = root.push(json::Material {
-        name: Some(prim.material_name.clone()),
-        ..Default::default()
-    });
+    // Determine cache key: prefer MFM stem, fall back to material name.
+    let cache_key = prim
+        .mfm_stem
+        .clone()
+        .unwrap_or_else(|| prim.material_name.clone());
+
+    if !mat_cache.materials.contains_key(&cache_key) {
+        // Create the default material (base albedo or untextured).
+        let default_mat = if let Some(png_bytes) = prim
+            .mfm_stem
+            .as_ref()
+            .and_then(|stem| texture_set.base.get(stem))
+        {
+            create_textured_material(
+                root,
+                bin_data,
+                png_bytes,
+                &prim.material_name,
+                prim.mfm_stem.clone(),
+            )
+        } else {
+            create_untextured_material(root, &prim.material_name)
+        };
+
+        // Create variant materials for each camo scheme.
+        let variant_mats: Vec<Option<json::Index<json::Material>>> = texture_set
+            .camo_schemes
+            .iter()
+            .map(|(scheme_name, scheme_textures)| {
+                prim.mfm_stem
+                    .as_ref()
+                    .and_then(|stem| scheme_textures.get(stem))
+                    .map(|png_bytes| {
+                        create_textured_material(
+                            root,
+                            bin_data,
+                            png_bytes,
+                            &format!("{} [{}]", prim.material_name, scheme_name),
+                            prim.mfm_stem.as_ref().map(|s| format!("{s}_{scheme_name}")),
+                        )
+                    })
+            })
+            .collect();
+
+        mat_cache.materials.insert(
+            cache_key.clone(),
+            CachedMaterial {
+                default_mat,
+                variant_mats,
+            },
+        );
+    }
+
+    let cached = &mat_cache.materials[&cache_key];
+
+    // Build KHR_materials_variants mappings for this primitive.
+    let prim_variants_ext = if !texture_set.camo_schemes.is_empty() {
+        let mut mappings = Vec::new();
+        for (variant_idx, variant_mat) in cached.variant_mats.iter().enumerate() {
+            // Use the variant material if this stem has a camo texture for this scheme,
+            // otherwise fall back to the default material.
+            let mat_index = variant_mat.unwrap_or(cached.default_mat);
+            mappings.push(json::extensions::mesh::Mapping {
+                material: mat_index.value() as u32,
+                variants: vec![variant_idx as u32],
+            });
+        }
+        Some(json::extensions::mesh::KhrMaterialsVariants { mappings })
+    } else {
+        None
+    };
 
     Ok(json::mesh::Primitive {
         attributes,
         indices: indices_accessor,
-        material: Some(material),
+        material: Some(cached.default_mat),
         mode: Valid(json::mesh::Mode::Triangles),
         targets: None,
-        extensions: Default::default(),
+        extensions: Some(json::extensions::mesh::Primitive {
+            khr_materials_variants: prim_variants_ext,
+        }),
         extras: Default::default(),
     })
+}
+
+/// Add `KHR_materials_variants` root extension and `extensionsUsed` entry.
+///
+/// Creates variant definitions at the glTF root so that each camo scheme name
+/// appears as a selectable variant in viewers like Blender.
+fn add_variants_extension(root: &mut json::Root, texture_set: &TextureSet) {
+    if texture_set.camo_schemes.is_empty() {
+        return;
+    }
+
+    let variants: Vec<json::extensions::scene::khr_materials_variants::Variant> = texture_set
+        .camo_schemes
+        .iter()
+        .map(
+            |(name, _)| json::extensions::scene::khr_materials_variants::Variant {
+                name: name.clone(),
+            },
+        )
+        .collect();
+
+    let ext = json::extensions::root::KhrMaterialsVariants { variants };
+    root.extensions = Some(json::extensions::root::Root {
+        khr_materials_variants: Some(ext),
+        ..Default::default()
+    });
+
+    root.extensions_used
+        .push("KHR_materials_variants".to_string());
 }
 
 fn pad_to_4(data: &mut Vec<u8>) {
@@ -617,10 +864,12 @@ pub struct SubModel<'a> {
 /// Export multiple sub-models as a single GLB with separate named meshes/nodes.
 ///
 /// Each sub-model becomes a separate selectable object in Blender.
+/// `texture_set` contains base albedo + camo variant PNGs for material textures.
 pub fn export_ship_glb(
     sub_models: &[SubModel<'_>],
     db: &PrototypeDatabase<'_>,
     lod: usize,
+    texture_set: &TextureSet,
     writer: &mut impl Write,
 ) -> Result<(), Report<ExportError>> {
     let mut root = json::Root::default();
@@ -632,6 +881,7 @@ pub fn export_ship_glb(
 
     let mut bin_data: Vec<u8> = Vec::new();
     let mut scene_nodes = Vec::new();
+    let mut mat_cache = MaterialCache::new();
 
     for sub in sub_models {
         // Validate LOD — skip sub-models that don't have enough LODs.
@@ -658,7 +908,8 @@ pub fn export_ship_glb(
 
         let mut gltf_primitives = Vec::new();
         for prim in &primitives {
-            let gltf_prim = add_primitive_to_root(&mut root, &mut bin_data, prim)?;
+            let gltf_prim =
+                add_primitive_to_root(&mut root, &mut bin_data, prim, texture_set, &mut mat_cache)?;
             gltf_primitives.push(gltf_prim);
         }
 
@@ -709,6 +960,9 @@ pub fn export_ship_glb(
         extras: Default::default(),
     });
     root.scene = Some(scene);
+
+    // Add KHR_materials_variants root extension if we have camo schemes.
+    add_variants_extension(&mut root, texture_set);
 
     // Serialize and write GLB.
     let json_string = json::serialize::to_string(&root)

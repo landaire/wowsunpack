@@ -168,6 +168,14 @@ enum Commands {
         /// LOD level (0 = highest detail)
         #[arg(long, default_value = "0")]
         lod: usize,
+
+        /// Skip loading camouflage textures
+        #[arg(long)]
+        no_textures: bool,
+
+        /// List available camouflage texture schemes, then exit
+        #[arg(long)]
+        list_textures: bool,
     },
     /// Export all sub-models of a ship to a single GLB file.
     /// Each sub-model becomes a separate named object in Blender.
@@ -192,6 +200,14 @@ enum Commands {
         /// Accepts a prefix match against upgrade keys.
         #[arg(long)]
         hull: Option<String>,
+
+        /// Skip loading camouflage textures
+        #[arg(long)]
+        no_textures: bool,
+
+        /// List available camouflage texture schemes, then exit
+        #[arg(long)]
+        list_textures: bool,
     },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
@@ -896,12 +912,18 @@ fn run() -> Result<(), Report> {
             let file_data = read_file_data(&file, no_vfs, vfs.as_ref())?;
             run_geometry(&file_data, &file.to_string_lossy(), decode)?;
         }
-        Commands::ExportModel { name, output, lod } => {
+        Commands::ExportModel {
+            name,
+            output,
+            lod,
+            no_textures,
+            list_textures,
+        } => {
             let Some(vfs) = &vfs else {
                 bail!("VFS required for export-model. Use --game-dir to specify a game install.");
             };
 
-            run_export_model(vfs, &name, &output, lod)?;
+            run_export_model(vfs, &name, &output, lod, no_textures, list_textures)?;
         }
         Commands::ExportShip {
             name,
@@ -909,6 +931,8 @@ fn run() -> Result<(), Report> {
             lod,
             list_upgrades,
             hull,
+            no_textures,
+            list_textures,
         } => {
             let Some(vfs) = &vfs else {
                 bail!("VFS required for export-ship. Use --game-dir to specify a game install.");
@@ -923,6 +947,8 @@ fn run() -> Result<(), Report> {
                 game_version,
                 list_upgrades,
                 hull.as_deref(),
+                no_textures,
+                list_textures,
             )?;
         }
         Commands::AssetsBin {
@@ -1274,8 +1300,15 @@ fn run_assets_bin(
     Ok(())
 }
 
-fn run_export_model(vfs: &VfsPath, name: &str, output: &Path, lod: usize) -> Result<(), Report> {
-    use wowsunpack::export::gltf_export;
+fn run_export_model(
+    vfs: &VfsPath,
+    name: &str,
+    output: &Path,
+    lod: usize,
+    no_textures: bool,
+    list_textures: bool,
+) -> Result<(), Report> {
+    use wowsunpack::export::{gltf_export, texture};
     use wowsunpack::models::assets_bin;
     use wowsunpack::models::geometry;
     use wowsunpack::models::visual;
@@ -1318,6 +1351,22 @@ fn run_export_model(vfs: &VfsPath, name: &str, output: &Path, lod: usize) -> Res
         vp.nodes.name_ids.len()
     );
 
+    // Handle --list-textures.
+    if list_textures {
+        let mfm_infos = collect_mfm_info(&vp, &db);
+        let stems: Vec<String> = mfm_infos.iter().map(|i| i.stem.clone()).collect();
+        let schemes = texture::discover_texture_schemes(vfs, &stems);
+        if schemes.is_empty() {
+            println!("No camouflage textures found for this model.");
+        } else {
+            println!("Available camouflage schemes:");
+            for scheme in &schemes {
+                println!("  {scheme}");
+            }
+        }
+        return Ok(());
+    }
+
     // Resolve geometry path from mergedGeometryPathId.
     let geom_path_idx = self_id_index
         .get(&vp.merged_geometry_path_id)
@@ -1349,9 +1398,18 @@ fn run_export_model(vfs: &VfsPath, name: &str, output: &Path, lod: usize) -> Res
         geom.indices_mapping.len(),
     );
 
+    // Load textures.
+    let texture_set = if no_textures {
+        gltf_export::TextureSet::empty()
+    } else {
+        let mfm_infos = collect_mfm_info(&vp, &db);
+        build_texture_set(&mfm_infos, vfs)
+    };
+
     // Export to GLB.
     let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
-    gltf_export::export_glb(&vp, &geom, &db, lod, &mut out_file).context("Failed to export GLB")?;
+    gltf_export::export_glb(&vp, &geom, &db, lod, &texture_set, &mut out_file)
+        .context("Failed to export GLB")?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -1373,9 +1431,12 @@ fn run_export_ship(
     game_version: Option<u64>,
     list_upgrades: bool,
     hull_selection: Option<&str>,
+    no_textures: bool,
+    list_textures: bool,
 ) -> Result<(), Report> {
     use std::collections::HashMap;
     use wowsunpack::export::gltf_export::{self, SubModel};
+    use wowsunpack::export::texture;
     use wowsunpack::models::assets_bin;
     use wowsunpack::models::geometry;
     use wowsunpack::models::visual;
@@ -1502,6 +1563,9 @@ fn run_export_ship(
             geom_bytes,
         });
     }
+
+    // NOTE: --list-textures is handled after turret models are loaded,
+    // so that turret texture schemes are included in the listing.
 
     // --- Load component mounts (turrets, AA, etc.) from GameParams ---
 
@@ -1898,6 +1962,31 @@ fn run_export_ship(
         );
     }
 
+    // Handle --list-textures (after turret models are loaded so all stems are included).
+    if list_textures {
+        let mut all_stems = Vec::new();
+        for smd in &sub_model_data {
+            for info in collect_mfm_info(&smd.visual, &db) {
+                all_stems.push(info.stem);
+            }
+        }
+        for tmd in &turret_model_data {
+            for info in collect_mfm_info(&tmd.visual, &db) {
+                all_stems.push(info.stem);
+            }
+        }
+        let schemes = texture::discover_texture_schemes(vfs, &all_stems);
+        if schemes.is_empty() {
+            println!("No camouflage textures found for this ship.");
+        } else {
+            println!("Available camouflage schemes:");
+            for scheme in &schemes {
+                println!("  {scheme}");
+            }
+        }
+        return Ok(());
+    }
+
     // --- Build hardpoint transform maps from hull sub-model visuals ---
 
     // Collect all hardpoint transforms from all hull sub-model visuals.
@@ -1998,8 +2087,27 @@ fn run_export_ship(
         );
     }
 
+    // Load textures for all sub-models.
+    let texture_set = if no_textures {
+        gltf_export::TextureSet::empty()
+    } else {
+        let mut all_mfm_infos = Vec::new();
+        for sub in &sub_models {
+            all_mfm_infos.extend(collect_mfm_info(sub.visual, &db));
+        }
+        let ts = build_texture_set(&all_mfm_infos, vfs);
+        if !ts.base.is_empty() || !ts.camo_schemes.is_empty() {
+            println!(
+                "Loaded {} base textures, {} camo schemes",
+                ts.base.len(),
+                ts.camo_schemes.len()
+            );
+        }
+        ts
+    };
+
     let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
-    gltf_export::export_ship_glb(&sub_models, &db, lod, &mut out_file)
+    gltf_export::export_ship_glb(&sub_models, &db, lod, &texture_set, &mut out_file)
         .context("Failed to export ship GLB")?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
@@ -2012,6 +2120,115 @@ fn run_export_ship(
     );
 
     Ok(())
+}
+
+/// Resolved MFM info: stem (leaf name without `.mfm`) and full VFS path.
+struct MfmInfo {
+    stem: String,
+    full_path: String,
+}
+
+/// Collect MFM stems and full paths from a visual's render sets.
+fn collect_mfm_info(
+    visual: &wowsunpack::models::visual::VisualPrototype,
+    db: &wowsunpack::models::assets_bin::PrototypeDatabase<'_>,
+) -> Vec<MfmInfo> {
+    let self_id_index = db.build_self_id_index();
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for rs in &visual.render_sets {
+        if rs.material_mfm_path_id == 0 {
+            continue;
+        }
+        let Some(&path_idx) = self_id_index.get(&rs.material_mfm_path_id) else {
+            continue;
+        };
+        let mfm_name = &db.paths_storage[path_idx].name;
+        let stem = mfm_name.strip_suffix(".mfm").unwrap_or(mfm_name);
+
+        if seen.insert(stem.to_string()) {
+            let full_path = db.reconstruct_path(path_idx, &self_id_index);
+            result.push(MfmInfo {
+                stem: stem.to_string(),
+                full_path,
+            });
+        }
+    }
+
+    result
+}
+
+/// Build a `TextureSet` from a list of MFM infos: base albedo + all camo schemes.
+///
+/// Loads the `_a.dds` base albedo from each MFM's directory as the default
+/// material, then discovers and loads all camouflage scheme textures so they
+/// can be embedded as `KHR_materials_variants` in the GLB.
+fn build_texture_set(
+    mfm_infos: &[MfmInfo],
+    vfs: &VfsPath,
+) -> wowsunpack::export::gltf_export::TextureSet {
+    use wowsunpack::export::texture;
+
+    let mut base = std::collections::HashMap::new();
+
+    // Deduplicate stems.
+    let mut seen_stems = std::collections::HashSet::new();
+    let mut unique_infos: Vec<&MfmInfo> = Vec::new();
+    for info in mfm_infos {
+        if seen_stems.insert(info.stem.clone()) {
+            unique_infos.push(info);
+        }
+    }
+
+    // Load base albedo textures.
+    for info in &unique_infos {
+        if let Some(dds_bytes) = texture::load_base_albedo_bytes(vfs, &info.full_path) {
+            match texture::dds_to_png(&dds_bytes) {
+                Ok(png_bytes) => {
+                    base.insert(info.stem.clone(), png_bytes);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: failed to decode base texture for {}: {e}",
+                        info.stem
+                    );
+                }
+            }
+        }
+    }
+
+    // Discover available camo schemes across all stems.
+    let stems: Vec<String> = unique_infos.iter().map(|i| i.stem.clone()).collect();
+    let schemes = texture::discover_texture_schemes(vfs, &stems);
+
+    // Load camo textures for each scheme.
+    let mut camo_schemes = Vec::new();
+    for scheme in &schemes {
+        let mut scheme_textures = std::collections::HashMap::new();
+        for info in &unique_infos {
+            if let Some((_base_name, dds_bytes)) =
+                texture::load_texture_bytes(vfs, &info.stem, scheme)
+            {
+                match texture::dds_to_png(&dds_bytes) {
+                    Ok(png_bytes) => {
+                        scheme_textures.insert(info.stem.clone(), png_bytes);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  Warning: failed to decode camo texture {}_{}: {e}",
+                            info.stem, scheme
+                        );
+                    }
+                }
+            }
+        }
+        if !scheme_textures.is_empty() {
+            camo_schemes.push((scheme.clone(), scheme_textures));
+        }
+    }
+
+    wowsunpack::export::gltf_export::TextureSet { base, camo_schemes }
 }
 
 /// Resolve a ship display name to a model directory path via GameParams lookup.
