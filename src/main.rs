@@ -4,7 +4,7 @@ use pickled::HashableValue;
 use serde::Serialize;
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::{BufWriter, Read, Write, stdout},
     path::{Path, PathBuf},
@@ -16,7 +16,9 @@ use std::{
 };
 use thread_local::ThreadLocal;
 use vfs::VfsPath;
+use vfs::impls::overlay::OverlayFS;
 use wowsunpack::data::{
+    assets_bin_vfs::AssetsBinVfs,
     idx::{self, VfsEntry},
     idx_vfs::IdxVfs,
     serialization,
@@ -215,6 +217,48 @@ fn read_file_data(path: &Path, no_vfs: bool, vfs: Option<&VfsPath>) -> Result<Ve
     Ok(data)
 }
 
+/// Add entries from an AssetsBinVfs to the IDX file tree so list/extract can see them.
+fn add_vfs_entries_to_file_tree(
+    assets_vfs: &AssetsBinVfs,
+    file_tree: &mut BTreeMap<String, VfsEntry>,
+) -> HashSet<String> {
+    let mut assets_bin_paths = HashSet::new();
+
+    // Add directory entries (skip empty root).
+    for dir_path in assets_vfs.dirs() {
+        if !dir_path.is_empty() {
+            let path = dir_path.to_string();
+            assets_bin_paths.insert(path.clone());
+            file_tree.entry(path).or_insert(VfsEntry::Directory);
+        }
+    }
+
+    // Add file entries with stub FileInfo/Volume.
+    let stub_volume = idx::Volume {
+        volume_id: 0,
+        filename: String::new(),
+    };
+    for (file_path, size) in assets_vfs.files() {
+        let path = file_path.to_string();
+        assets_bin_paths.insert(path.clone());
+        file_tree.entry(path).or_insert(VfsEntry::File {
+            file_info: idx::FileInfo {
+                resource_id: 0,
+                volume_id: 0,
+                offset: 0,
+                compression_info: 0,
+                size: size as u32,
+                crc32: 0,
+                unpacked_size: size as u32,
+                padding: 0,
+            },
+            volume: stub_volume.clone(),
+        });
+    }
+
+    assets_bin_paths
+}
+
 fn run() -> Result<(), Report> {
     let mut args = Args::parse();
 
@@ -233,6 +277,7 @@ fn run() -> Result<(), Report> {
     // if no game dir is provided and no idx files exist, vfs will be None.
     let mut vfs: Option<VfsPath> = None;
     let mut file_tree = BTreeMap::new();
+    let mut assets_bin_paths = HashSet::new();
 
     if args.idx_files.is_empty() {
         let bin_dir = game_dir.join("bin");
@@ -312,11 +357,42 @@ fn run() -> Result<(), Report> {
         file_tree = idx::build_file_tree(&idx_files);
 
         // Build VFS for commands that need to read file contents
-        vfs = packages_dir.as_ref().map(|pkg_dir| {
+        if let Some(pkg_dir) = packages_dir.as_ref() {
             let pkg_source = MmapPkgSource::new(pkg_dir);
             let idx_vfs = IdxVfs::new(pkg_source, &idx_files);
-            VfsPath::new(idx_vfs)
-        });
+            let pkg_vfs = VfsPath::new(idx_vfs);
+
+            // Try to load assets.bin from the PKG VFS and overlay it.
+            let mut assets_bin_data = Vec::new();
+            let assets_loaded = pkg_vfs
+                .join("content/assets.bin")
+                .and_then(|p| p.open_file())
+                .and_then(|mut f| {
+                    f.read_to_end(&mut assets_bin_data)?;
+                    Ok(())
+                })
+                .is_ok();
+
+            if assets_loaded {
+                match AssetsBinVfs::new(assets_bin_data) {
+                    Ok(assets_vfs) => {
+                        // Add assets.bin entries to the file_tree so list/extract can find them.
+                        assets_bin_paths =
+                            add_vfs_entries_to_file_tree(&assets_vfs, &mut file_tree);
+
+                        let assets_layer = VfsPath::new(assets_vfs);
+                        let overlay = OverlayFS::new(&[assets_layer, pkg_vfs]);
+                        vfs = Some(VfsPath::new(overlay));
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to parse assets.bin for overlay VFS: {e}");
+                        vfs = Some(pkg_vfs);
+                    }
+                }
+            } else {
+                vfs = Some(pkg_vfs);
+            }
+        }
     }
 
     match args.command {
@@ -580,13 +656,15 @@ fn run() -> Result<(), Report> {
                     continue;
                 }
 
+                let from_assets_bin = assets_bin_paths.contains(path.as_str());
                 match entry {
                     VfsEntry::File { file_info, .. } => {
-                        println!("(F) {} {} bytes", path, file_info.unpacked_size);
+                        let tag = if from_assets_bin { "A" } else { "F" };
+                        println!("({tag}) {} {} bytes", path, file_info.unpacked_size);
                     }
                     VfsEntry::Directory => {
-                        print!("(D) {path}");
-                        println!();
+                        let tag = if from_assets_bin { "A" } else { "D" };
+                        println!("({tag}) {path}");
                     }
                 }
             }

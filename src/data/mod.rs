@@ -1,3 +1,6 @@
+/// VFS abstraction for reading files from an assets.bin PrototypeDatabase
+#[cfg(feature = "vfs")]
+pub mod assets_bin_vfs;
 /// Main logic for parsing the game's resource index files
 pub mod idx;
 /// VFS abstraction for reading files from IDX/PKG archives
