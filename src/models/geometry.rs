@@ -31,7 +31,21 @@ pub struct MergedGeometry<'a> {
     pub merged_vertices: Vec<VerticesPrototype<'a>>,
     pub merged_indices: Vec<IndicesPrototype<'a>>,
     pub collision_models: Vec<ModelPrototype<'a>>,
-    pub armor_models: Vec<ModelPrototype<'a>>,
+    pub armor_models: Vec<ArmorModel>,
+}
+
+/// A single triangle in an armor model.
+#[derive(Debug, Clone, Copy)]
+pub struct ArmorTriangle {
+    pub vertices: [[f32; 3]; 3],
+    pub normals: [[f32; 3]; 3],
+}
+
+/// A parsed armor model containing triangle geometry for hit detection.
+#[derive(Debug)]
+pub struct ArmorModel {
+    pub name: String,
+    pub triangles: Vec<ArmorTriangle>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,8 +287,12 @@ pub fn parse_geometry(file_data: &[u8]) -> Result<MergedGeometry<'_>, Report<Geo
         Vec::new()
     };
 
-    let am_offset = resolve_relptr(header_base, hdr.armor_models_ptr);
-    let armor_models = parse_model_array(file_data, am_offset, hdr.armor_model_count as usize)?;
+    let armor_models = if hdr.armor_model_count > 0 {
+        let am_offset = resolve_relptr(header_base, hdr.armor_models_ptr);
+        parse_armor_model_array(file_data, am_offset, hdr.armor_model_count as usize)?
+    } else {
+        Vec::new()
+    };
 
     Ok(MergedGeometry {
         vertices_mapping,
@@ -459,6 +477,128 @@ fn parse_model_fields(input: &mut &[u8]) -> WResult<(i64, u32)> {
     let size_in_bytes = le_u32.parse_next(input)?;
     let _padding = le_u32.parse_next(input)?;
     Ok((data_relptr, size_in_bytes))
+}
+
+/// Parse the BVH + triangle data from an armor model's raw 16-byte entry stream.
+///
+/// Format (all entries are 16 bytes):
+///   - 2 global header entries (bounding box + BVH node count)
+///   - N BVH node groups, each:
+///       - 2 entries: node header (flags, bbox min) + bbox max with vertex_count
+///       - vertex_count triangle vertices (groups of 3 = triangles)
+///   - Each vertex: f32 x, f32 y, f32 z, u8[3] packed_normal, u8 zero
+fn parse_armor_data(data: &[u8]) -> Result<Vec<ArmorTriangle>, Report<GeometryError>> {
+    const ENTRY_SIZE: usize = 16;
+
+    if data.len() < ENTRY_SIZE * 2 {
+        return Ok(Vec::new());
+    }
+
+    let entry_count = data.len() / ENTRY_SIZE;
+    if entry_count < 2 {
+        return Ok(Vec::new());
+    }
+
+    let read_f32 =
+        |off: usize| -> f32 { f32::from_le_bytes(data[off..off + 4].try_into().unwrap()) };
+    let read_u32 =
+        |off: usize| -> u32 { u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) };
+
+    // Skip 2-entry global header, then walk BVH node groups
+    let mut pos = 2; // entry index
+    let mut triangles = Vec::new();
+
+    while pos < entry_count {
+        // Each BVH node group: 2 header entries + vertex_count vertex entries
+        if pos + 1 >= entry_count {
+            break;
+        }
+
+        // Second entry of the node header has vertex_count at bytes 12..16
+        let node_entry1_off = (pos + 1) * ENTRY_SIZE;
+        let vertex_count = read_u32(node_entry1_off + 12) as usize;
+        pos += 2; // skip 2 node header entries
+
+        if vertex_count == 0 {
+            continue;
+        }
+        if pos + vertex_count > entry_count {
+            return Err(Report::new(GeometryError::ParseError(format!(
+                "armor BVH node claims {} vertices but only {} entries remain",
+                vertex_count,
+                entry_count - pos
+            ))));
+        }
+
+        // vertex_count should be divisible by 3 (triangle soup)
+        let tri_count = vertex_count / 3;
+        for t in 0..tri_count {
+            let mut tri = ArmorTriangle {
+                vertices: [[0.0; 3]; 3],
+                normals: [[0.0; 3]; 3],
+            };
+            for v in 0..3 {
+                let entry_off = (pos + t * 3 + v) * ENTRY_SIZE;
+                tri.vertices[v] = [
+                    read_f32(entry_off),
+                    read_f32(entry_off + 4),
+                    read_f32(entry_off + 8),
+                ];
+                // Packed normal: 3 bytes at offset 12, each maps [-1, 1]
+                let nx = data[entry_off + 12] as f32 / 127.5 - 1.0;
+                let ny = data[entry_off + 13] as f32 / 127.5 - 1.0;
+                let nz = data[entry_off + 14] as f32 / 127.5 - 1.0;
+                tri.normals[v] = [nx, ny, nz];
+            }
+            triangles.push(tri);
+        }
+
+        pos += vertex_count;
+    }
+
+    Ok(triangles)
+}
+
+/// Parse armor model array. Unlike collision models where data_relptr points to
+/// the start of the data, for armor models the actual data extends from right
+/// after the struct (struct_base + 0x20) to data_offset + size_in_bytes.
+fn parse_armor_model_array(
+    file_data: &[u8],
+    offset: usize,
+    count: usize,
+) -> Result<Vec<ArmorModel>, Report<GeometryError>> {
+    let mut result = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let struct_base = offset + i * 0x20;
+        let input = &mut &file_data[struct_base..];
+
+        let (data_relptr, size_in_bytes) = parse_model_fields(input)
+            .map_err(|e| Report::new(GeometryError::ParseError(format!("armor[{i}]: {e}"))))?;
+
+        let packed_string_base = struct_base + 0x08;
+        let name = parse_packed_string(file_data, packed_string_base).map_err(|e| {
+            Report::new(GeometryError::ParseError(format!(
+                "armor[{i}] packed string: {e}"
+            )))
+        })?;
+
+        // Armor data starts right after the struct and extends to where
+        // data_relptr + size_in_bytes points (relptr points near the end)
+        let data_start = struct_base + 0x20;
+        let data_end = resolve_relptr(struct_base, data_relptr) + size_in_bytes as usize;
+
+        if data_end > file_data.len() {
+            return Err(Report::new(GeometryError::OutOfBounds { offset: data_end }));
+        }
+
+        let armor_data = &file_data[data_start..data_end];
+        let triangles = parse_armor_data(armor_data)?;
+
+        result.push(ArmorModel { name, triangles });
+    }
+
+    Ok(result)
 }
 
 fn parse_model_array<'a>(

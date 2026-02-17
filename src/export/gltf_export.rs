@@ -858,6 +858,196 @@ fn add_primitive_to_root(
     })
 }
 
+/// Add an armor mesh primitive (positions + normals, untextured) to the glTF root.
+fn add_armor_primitive_to_root(
+    root: &mut json::Root,
+    bin_data: &mut Vec<u8>,
+    armor: &ArmorSubModel,
+) -> Result<json::mesh::Primitive, Report<ExportError>> {
+    let mut attributes = BTreeMap::new();
+
+    // --- Positions ---
+    let (min, max) = bounding_coords(&armor.positions);
+    let byte_offset = bin_data.len();
+    for pos in &armor.positions {
+        bin_data.extend_from_slice(&pos[0].to_le_bytes());
+        bin_data.extend_from_slice(&pos[1].to_le_bytes());
+        bin_data.extend_from_slice(&pos[2].to_le_bytes());
+    }
+    pad_to_4(bin_data);
+    let byte_length = bin_data.len() - byte_offset;
+
+    let pos_bv = root.push(json::buffer::View {
+        buffer: json::Index::new(0),
+        byte_length: USize64::from(byte_length),
+        byte_offset: Some(USize64::from(byte_offset)),
+        byte_stride: None,
+        target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let pos_acc = root.push(json::Accessor {
+        buffer_view: Some(pos_bv),
+        byte_offset: Some(USize64(0)),
+        count: USize64::from(armor.positions.len()),
+        component_type: Valid(json::accessor::GenericComponentType(
+            json::accessor::ComponentType::F32,
+        )),
+        type_: Valid(json::accessor::Type::Vec3),
+        min: Some(json::Value::from(min.to_vec())),
+        max: Some(json::Value::from(max.to_vec())),
+        name: None,
+        normalized: false,
+        sparse: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    attributes.insert(Valid(json::mesh::Semantic::Positions), pos_acc);
+
+    // --- Normals ---
+    let byte_offset = bin_data.len();
+    for n in &armor.normals {
+        bin_data.extend_from_slice(&n[0].to_le_bytes());
+        bin_data.extend_from_slice(&n[1].to_le_bytes());
+        bin_data.extend_from_slice(&n[2].to_le_bytes());
+    }
+    pad_to_4(bin_data);
+    let byte_length = bin_data.len() - byte_offset;
+
+    let norm_bv = root.push(json::buffer::View {
+        buffer: json::Index::new(0),
+        byte_length: USize64::from(byte_length),
+        byte_offset: Some(USize64::from(byte_offset)),
+        byte_stride: None,
+        target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let norm_acc = root.push(json::Accessor {
+        buffer_view: Some(norm_bv),
+        byte_offset: Some(USize64(0)),
+        count: USize64::from(armor.normals.len()),
+        component_type: Valid(json::accessor::GenericComponentType(
+            json::accessor::ComponentType::F32,
+        )),
+        type_: Valid(json::accessor::Type::Vec3),
+        min: None,
+        max: None,
+        name: None,
+        normalized: false,
+        sparse: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    attributes.insert(Valid(json::mesh::Semantic::Normals), norm_acc);
+
+    // --- Vertex Colors (COLOR_0) ---
+    if !armor.colors.is_empty() {
+        let byte_offset = bin_data.len();
+        for c in &armor.colors {
+            bin_data.extend_from_slice(&c[0].to_le_bytes());
+            bin_data.extend_from_slice(&c[1].to_le_bytes());
+            bin_data.extend_from_slice(&c[2].to_le_bytes());
+            bin_data.extend_from_slice(&c[3].to_le_bytes());
+        }
+        pad_to_4(bin_data);
+        let byte_length = bin_data.len() - byte_offset;
+
+        let color_bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(byte_length),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        let color_acc = root.push(json::Accessor {
+            buffer_view: Some(color_bv),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(armor.colors.len()),
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::F32,
+            )),
+            type_: Valid(json::accessor::Type::Vec4),
+            min: None,
+            max: None,
+            name: None,
+            normalized: false,
+            sparse: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        attributes.insert(Valid(json::mesh::Semantic::Colors(0)), color_acc);
+    }
+
+    // --- Indices ---
+    let byte_offset = bin_data.len();
+    for &idx in &armor.indices {
+        bin_data.extend_from_slice(&idx.to_le_bytes());
+    }
+    pad_to_4(bin_data);
+    let byte_length = bin_data.len() - byte_offset;
+
+    let idx_bv = root.push(json::buffer::View {
+        buffer: json::Index::new(0),
+        byte_length: USize64::from(byte_length),
+        byte_offset: Some(USize64::from(byte_offset)),
+        byte_stride: None,
+        target: Some(Valid(json::buffer::Target::ElementArrayBuffer)),
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let idx_acc = root.push(json::Accessor {
+        buffer_view: Some(idx_bv),
+        byte_offset: Some(USize64(0)),
+        count: USize64::from(armor.indices.len()),
+        component_type: Valid(json::accessor::GenericComponentType(
+            json::accessor::ComponentType::U32,
+        )),
+        type_: Valid(json::accessor::Type::Scalar),
+        min: None,
+        max: None,
+        name: None,
+        normalized: false,
+        sparse: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    // Untextured semi-transparent material for armor visualization.
+    let material = root.push(json::Material {
+        name: Some(format!("armor_{}", armor.name)),
+        alpha_mode: Valid(json::material::AlphaMode::Blend),
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_factor: json::material::PbrBaseColorFactor([0.2, 0.6, 1.0, 0.3]),
+            metallic_factor: json::material::StrengthFactor(0.0),
+            roughness_factor: json::material::StrengthFactor(0.8),
+            ..Default::default()
+        },
+        double_sided: true,
+        ..Default::default()
+    });
+
+    Ok(json::mesh::Primitive {
+        attributes,
+        indices: Some(idx_acc),
+        material: Some(material),
+        mode: Valid(json::mesh::Mode::Triangles),
+        targets: None,
+        extensions: None,
+        extras: Default::default(),
+    })
+}
+
 /// Add `KHR_materials_variants` root extension and `extensionsUsed` entry.
 ///
 /// Creates variant definitions at the glTF root so that each camo scheme name
@@ -910,6 +1100,97 @@ fn bounding_coords(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+/// An armor mesh ready for glTF export (triangle soup, no textures).
+pub struct ArmorSubModel {
+    pub name: String,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+    /// Per-vertex RGBA color encoding armor thickness.
+    /// All 3 vertices of a triangle share the same color.
+    pub colors: Vec<[f32; 4]>,
+}
+
+impl ArmorSubModel {
+    /// Build an `ArmorSubModel` from a parsed `ArmorModel`.
+    ///
+    /// `armor_map` is the GameParams armor thickness data:
+    ///   key = `(model_index << 16) | triangle_index`, value = thickness in mm.
+    /// `model_index` is the 1-based index of this armor model in the geometry file.
+    pub fn from_armor_model(
+        armor: &crate::models::geometry::ArmorModel,
+        armor_map: Option<&std::collections::HashMap<u32, f32>>,
+        model_index: u32,
+    ) -> Self {
+        let tri_count = armor.triangles.len();
+        let vert_count = tri_count * 3;
+        let mut positions = Vec::with_capacity(vert_count);
+        let mut normals = Vec::with_capacity(vert_count);
+        let mut indices = Vec::with_capacity(vert_count);
+        let mut colors = Vec::with_capacity(vert_count);
+
+        for (ti, tri) in armor.triangles.iter().enumerate() {
+            // Look up thickness for this triangle.
+            let key = (model_index << 16) | (ti as u32);
+            let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
+
+            // Map thickness to a color: blue (thin) → green → yellow → red (thick).
+            // 0mm = blue, ~200mm = green, ~400mm = red. Clamp at 650mm.
+            let color = thickness_to_color(thickness_mm);
+
+            for v in 0..3 {
+                positions.push(tri.vertices[v]);
+                normals.push(tri.normals[v]);
+                indices.push((ti * 3 + v) as u32);
+                colors.push(color);
+            }
+        }
+
+        Self {
+            name: armor.name.clone(),
+            positions,
+            normals,
+            indices,
+            colors,
+        }
+    }
+}
+
+/// Map armor thickness (mm) to an RGBA color for visualization.
+///
+/// Uses a blue → cyan → green → yellow → red heat map:
+///   0mm = blue, 100mm = cyan, 200mm = green, 400mm = yellow, 650mm+ = red.
+/// Alpha is 0.5 for all thicknesses (semi-transparent overlay).
+fn thickness_to_color(thickness_mm: f32) -> [f32; 4] {
+    let alpha = 0.5;
+    if thickness_mm <= 0.0 {
+        return [0.2, 0.2, 0.8, 0.3]; // dim blue for unmapped
+    }
+
+    // Normalize: 0..650 → 0..1
+    let t = (thickness_mm / 650.0).clamp(0.0, 1.0);
+
+    let (r, g, b) = if t < 0.25 {
+        // blue → cyan (0..~162mm)
+        let s = t / 0.25;
+        (0.0, s, 1.0)
+    } else if t < 0.5 {
+        // cyan → green (~162..~325mm)
+        let s = (t - 0.25) / 0.25;
+        (0.0, 1.0, 1.0 - s)
+    } else if t < 0.75 {
+        // green → yellow (~325..~487mm)
+        let s = (t - 0.5) / 0.25;
+        (s, 1.0, 0.0)
+    } else {
+        // yellow → red (~487..650mm+)
+        let s = (t - 0.75) / 0.25;
+        (1.0, 1.0 - s, 0.0)
+    };
+
+    [r, g, b, alpha]
+}
+
 /// A named sub-model for multi-model ship export.
 pub struct SubModel<'a> {
     pub name: String,
@@ -924,8 +1205,10 @@ pub struct SubModel<'a> {
 ///
 /// Each sub-model becomes a separate selectable object in Blender.
 /// `texture_set` contains base albedo + camo variant PNGs for material textures.
+/// `armor_models` are added as additional untextured semi-transparent meshes.
 pub fn export_ship_glb(
     sub_models: &[SubModel<'_>],
+    armor_models: &[ArmorSubModel],
     db: &PrototypeDatabase<'_>,
     lod: usize,
     texture_set: &TextureSet,
@@ -987,6 +1270,31 @@ pub fn export_ship_glb(
             mesh: Some(mesh),
             name: Some(sub.name.clone()),
             matrix: sub.transform,
+            ..Default::default()
+        });
+
+        scene_nodes.push(node);
+    }
+
+    // Add armor meshes as separate nodes.
+    for armor in armor_models {
+        if armor.positions.is_empty() {
+            continue;
+        }
+
+        let gltf_prim = add_armor_primitive_to_root(&mut root, &mut bin_data, armor)?;
+
+        let mesh = root.push(json::Mesh {
+            primitives: vec![gltf_prim],
+            weights: None,
+            name: Some(armor.name.clone()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        let node = root.push(json::Node {
+            mesh: Some(mesh),
+            name: Some(armor.name.clone()),
             ..Default::default()
         });
 

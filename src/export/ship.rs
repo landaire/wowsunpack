@@ -363,6 +363,9 @@ impl ShipAssets {
         let mut mat_camo_schemes = self.discover_mat_camo_schemes(&info.model_dir, ship_idx);
         mat_camo_schemes.extend(self.discover_universal_camo_schemes(ship_idx));
 
+        // Extract armor thickness map from GameParams.
+        let armor_map = vehicle.and_then(|v| v.armor().cloned());
+
         Ok(ShipModelContext {
             vfs: self.vfs.clone(),
             assets_bin_bytes: self.assets_bin_bytes.clone(),
@@ -372,6 +375,7 @@ impl ShipAssets {
             info,
             options: options.clone(),
             mat_camo_schemes,
+            armor_map,
         })
     }
 
@@ -883,6 +887,8 @@ pub struct ShipModelContext {
     info: ShipInfo,
     options: ShipExportOptions,
     mat_camo_schemes: Vec<MatCamoScheme>,
+    /// Armor thickness map from GameParams: (model_index << 16 | tri_index) → mm.
+    armor_map: Option<HashMap<u32, f32>>,
 }
 
 impl ShipModelContext {
@@ -904,6 +910,20 @@ impl ShipModelContext {
     /// Number of unique turret/mount 3D models.
     pub fn unique_turret_count(&self) -> usize {
         self.turret_models.len()
+    }
+
+    /// Armor thickness map from GameParams.
+    /// Keys: `(model_index << 16) | triangle_index`, values: thickness in mm.
+    pub fn armor_map(&self) -> Option<&HashMap<u32, f32>> {
+        self.armor_map.as_ref()
+    }
+
+    /// Raw geometry bytes for hull parts, for inspection.
+    pub fn hull_geom_bytes(&self) -> Vec<&[u8]> {
+        self.hull_parts
+            .iter()
+            .map(|p| p.geom_bytes.as_slice())
+            .collect()
     }
 
     /// Export the loaded ship model to GLB format.
@@ -1055,8 +1075,28 @@ impl ShipModelContext {
             TextureSet::empty()
         };
 
+        // Collect armor meshes from hull geometries with thickness data.
+        // The armor map from GameParams uses (model_index << 16) | tri_index as keys.
+        // model_index is 1-based across all geometry files in the ship.
+        let armor_map = self.armor_map.as_ref();
+        let mut armor_model_index = 1u32; // 1-based
+        let armor_meshes: Vec<gltf_export::ArmorSubModel> = hull_geoms
+            .iter()
+            .flat_map(|geom| {
+                geom.armor_models
+                    .iter()
+                    .map(|am| {
+                        let idx = armor_model_index;
+                        armor_model_index += 1;
+                        gltf_export::ArmorSubModel::from_armor_model(am, armor_map, idx)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         gltf_export::export_ship_glb(
             &sub_models,
+            &armor_meshes,
             &db,
             self.options.lod,
             &texture_set,

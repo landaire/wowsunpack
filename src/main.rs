@@ -217,6 +217,16 @@ enum Commands {
         #[arg(long)]
         list_textures: bool,
     },
+    /// Inspect armor model geometry and GameParams thickness data for a ship
+    Armor {
+        /// Ship name — either a model directory name (e.g. "JSB039_Yamato_1945")
+        /// or a translated display name (e.g. "Yamato") for fuzzy lookup
+        name: String,
+
+        /// Hull upgrade to use (e.g. "A" for stock, "B" for upgraded)
+        #[arg(long)]
+        hull: Option<String>,
+    },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
         /// Path to the assets.bin file (VFS path by default, disk path with --no-vfs)
@@ -970,6 +980,15 @@ fn run() -> Result<(), Report> {
                 list_textures,
             )?;
         }
+        Commands::Armor { name, hull } => {
+            let Some(vfs) = &vfs else {
+                bail!(
+                    "VFS required for armor inspection. Use --game-dir to specify a game install."
+                );
+            };
+
+            run_armor(vfs, &name, &game_dir, game_version, hull.as_deref())?;
+        }
         Commands::AssetsBin {
             file,
             filter,
@@ -1138,7 +1157,11 @@ fn run_geometry(file_data: &[u8], name: &str, decode: bool) -> Result<(), Report
 
     println!("Armor models: {}", geom.armor_models.len());
     for (i, am) in geom.armor_models.iter().enumerate() {
-        println!("  [{i}] name=\"{}\" size={}", am.name, am.size_in_bytes);
+        println!(
+            "  [{i}] name=\"{}\" triangles={}",
+            am.name,
+            am.triangles.len()
+        );
     }
 
     Ok(())
@@ -1524,6 +1547,165 @@ fn run_export_ship(
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!("Exported to {} ({} bytes)", output.display(), file_size);
+
+    Ok(())
+}
+
+fn run_armor(
+    vfs: &VfsPath,
+    name: &str,
+    game_dir: &Path,
+    game_version: Option<u64>,
+    hull_selection: Option<&str>,
+) -> Result<(), Report> {
+    use wowsunpack::export::ship::{ShipAssets, ShipExportOptions};
+    use wowsunpack::models::geometry;
+
+    let mut assets = ShipAssets::load(vfs)?;
+
+    // Load translations if available.
+    if let Some(version) = game_version {
+        let mo_path = wowsunpack::game_data::translations_path(game_dir, version as u32);
+        if let Ok(data) = std::fs::read(&mo_path) {
+            if let Ok(catalog) = gettext::Catalog::parse(&*data) {
+                assets.set_translations(catalog);
+            }
+        }
+    }
+
+    let options = ShipExportOptions {
+        hull: hull_selection.map(|s| s.to_string()),
+        textures: false,
+        ..Default::default()
+    };
+    let ctx = assets.load_ship(name, &options)?;
+    let info = ctx.info();
+    println!(
+        "Ship: {} ({})",
+        info.display_name.as_deref().unwrap_or("?"),
+        info.model_dir
+    );
+
+    let armor_map = ctx.armor_map();
+
+    // Parse geometry for each hull part to inspect armor models.
+    let mut armor_model_index = 1u32;
+    let mut total_tris = 0usize;
+
+    for (part_name, geom_bytes) in ctx.hull_part_names().iter().zip(ctx.hull_geom_bytes()) {
+        let geom = geometry::parse_geometry(geom_bytes)?;
+
+        if geom.armor_models.is_empty() {
+            continue;
+        }
+
+        println!("\nHull part: {part_name}");
+        for am in &geom.armor_models {
+            let mi = armor_model_index;
+            armor_model_index += 1;
+            total_tris += am.triangles.len();
+
+            // Compute bounding box.
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for tri in &am.triangles {
+                for v in &tri.vertices {
+                    for i in 0..3 {
+                        bmin[i] = bmin[i].min(v[i]);
+                        bmax[i] = bmax[i].max(v[i]);
+                    }
+                }
+            }
+
+            println!("  Armor model [{}]: \"{}\"", mi, am.name);
+            println!("    Triangles: {}", am.triangles.len());
+            println!(
+                "    Bounding box: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
+                bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]
+            );
+
+            // Show GameParams armor entries for this model index.
+            if let Some(ref amap) = armor_map {
+                let entries: Vec<(u32, f32)> = amap
+                    .iter()
+                    .filter(|&(&k, _)| (k >> 16) == mi)
+                    .map(|(&k, &v)| (k & 0xFFFF, v))
+                    .collect();
+
+                if entries.is_empty() {
+                    println!("    GameParams: no thickness entries for model_index={mi}");
+                } else {
+                    let nonzero: Vec<&(u32, f32)> =
+                        entries.iter().filter(|(_, v)| *v > 0.0).collect();
+                    let thicknesses: Vec<f32> = nonzero.iter().map(|(_, v)| *v).collect();
+                    let min_t = thicknesses.iter().cloned().reduce(f32::min).unwrap_or(0.0);
+                    let max_t = thicknesses.iter().cloned().reduce(f32::max).unwrap_or(0.0);
+
+                    println!(
+                        "    GameParams: {} entries ({} with thickness > 0), range: {:.0}..{:.0} mm",
+                        entries.len(),
+                        nonzero.len(),
+                        min_t,
+                        max_t
+                    );
+
+                    // Print per-triangle details sorted by index.
+                    let mut sorted = entries.clone();
+                    sorted.sort_by_key(|(ti, _)| *ti);
+                    for (ti, thickness) in &sorted {
+                        if *thickness > 0.0 {
+                            println!("      tri {:>5} = {:>6.1} mm", ti, thickness);
+                        }
+                    }
+                }
+            } else {
+                println!("    GameParams: no armor data available");
+            }
+        }
+    }
+
+    // Show model indices in the armor map that don't correspond to armor models.
+    if let Some(ref amap) = armor_map {
+        let model_indices: std::collections::BTreeSet<u32> = amap.keys().map(|k| k >> 16).collect();
+        let armor_indices: std::collections::BTreeSet<u32> = (1..armor_model_index).collect();
+        let extra: Vec<u32> = model_indices.difference(&armor_indices).copied().collect();
+        if !extra.is_empty() {
+            println!(
+                "\nGameParams armor entries for non-armor model indices: {:?}",
+                extra
+            );
+            for mi in &extra {
+                let entries: Vec<(u32, f32)> = amap
+                    .iter()
+                    .filter(|&(&k, _)| (k >> 16) == *mi)
+                    .map(|(&k, &v)| (k & 0xFFFF, v))
+                    .collect();
+                let nonzero = entries.iter().filter(|(_, v)| *v > 0.0).count();
+                println!(
+                    "  model_index={}: {} entries ({} nonzero)",
+                    mi,
+                    entries.len(),
+                    nonzero
+                );
+            }
+        }
+
+        let total_entries = amap.len();
+        let total_nonzero = amap.values().filter(|&&v| v > 0.0).count();
+        println!(
+            "\nSummary: {} armor triangles across {} model(s), GameParams: {} entries ({} nonzero)",
+            total_tris,
+            armor_model_index - 1,
+            total_entries,
+            total_nonzero
+        );
+    } else {
+        println!(
+            "\nSummary: {} armor triangles across {} model(s), no GameParams data",
+            total_tris,
+            armor_model_index - 1
+        );
+    }
 
     Ok(())
 }

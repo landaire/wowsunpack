@@ -929,8 +929,11 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                     .inner()
                     .iter()
                     .filter_map(|(k, v)| {
-                        let key_str = k.string_ref()?.inner();
-                        let key: u32 = key_str.parse().ok()?;
+                        // Keys may be strings ("131121") or integers (131121).
+                        let key: u32 = k
+                            .string_ref()
+                            .and_then(|s| s.inner().parse().ok())
+                            .or_else(|| k.i64_ref().map(|&i| i as u32))?;
                         let value = v
                             .f64_ref()
                             .map(|f| *f as f32)
