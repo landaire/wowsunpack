@@ -58,6 +58,9 @@ pub struct BoundingBox {
 pub struct RenderSet {
     pub name_id: u32,
     pub material_name_id: u32,
+    /// Unknown u64 at offset +0x08 in the RenderSet struct.
+    /// Hypothesis: low32=vertices_mapping_id, high32=indices_mapping_id.
+    pub unknown_u64: u64,
     /// selfId of the .mfm file in pathsStorage (u64 path hash).
     pub material_mfm_path_id: u64,
     pub skinned: bool,
@@ -281,6 +284,7 @@ fn parse_render_sets(
 
         let name_id = read_u32(blob_data, rs_base + 0x00);
         let material_name_id = read_u32(blob_data, rs_base + 0x04);
+        let unknown_u64 = read_u64(blob_data, rs_base + 0x08);
         let material_mfm_path_id = read_u64(blob_data, rs_base + 0x10);
         let skinned = blob_data[rs_base + 0x18] != 0;
         let nodes_count = blob_data[rs_base + 0x19] as usize;
@@ -295,6 +299,7 @@ fn parse_render_sets(
         result.push(RenderSet {
             name_id,
             material_name_id,
+            unknown_u64,
             material_mfm_path_id,
             skinned,
             node_name_ids,
@@ -395,10 +400,15 @@ impl VisualPrototype {
                 .get_string_by_id(rs.material_name_id)
                 .unwrap_or("<unknown>");
             let mfm_name = resolve_path_leaf(rs.material_mfm_path_id);
+            let low32 = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
+            let high32 = (rs.unknown_u64 >> 32) as u32;
             println!(
-                "    [{i}] name=\"{name}\" material=\"{mat_name}\" mfm=\"{mfm_name}\" skinned={} nodes={}",
+                "    [{i}] name=\"{name}\" material=\"{mat_name}\" mfm=\"{mfm_name}\" skinned={} nodes={}\n        unknown_u64=0x{:016X} (low32=0x{:08X} high32=0x{:08X})",
                 rs.skinned,
-                rs.node_name_ids.len()
+                rs.node_name_ids.len(),
+                rs.unknown_u64,
+                low32,
+                high32,
             );
         }
 
