@@ -432,4 +432,60 @@ impl VisualPrototype {
             );
         }
     }
+
+    /// Find the world-space transform for a named hardpoint node.
+    ///
+    /// Looks up `hp_name` in the visual's name_map by resolving each name_map_name_id
+    /// via the strings section, then composes transforms walking up the parent chain.
+    ///
+    /// Returns `None` if the node name is not found.
+    pub fn find_hardpoint_transform(
+        &self,
+        hp_name: &str,
+        strings: &StringsSection<'_>,
+    ) -> Option<[f32; 16]> {
+        // Find the node index for this hardpoint name.
+        let node_idx = self.find_node_index_by_name(hp_name, strings)?;
+
+        // Compose transforms walking up the parent chain.
+        let mut result = self.nodes.matrices[node_idx as usize].0;
+        let mut current = node_idx;
+        loop {
+            let parent = self.nodes.parent_ids[current as usize];
+            if parent == 0xFFFF || parent as usize >= self.nodes.matrices.len() {
+                break;
+            }
+            result = mat4_mul(&self.nodes.matrices[parent as usize].0, &result);
+            current = parent as u16;
+        }
+
+        Some(result)
+    }
+
+    /// Find the node index for a given node name string.
+    pub fn find_node_index_by_name(&self, name: &str, strings: &StringsSection<'_>) -> Option<u16> {
+        for (i, &name_id) in self.nodes.name_map_name_ids.iter().enumerate() {
+            if let Some(resolved) = strings.get_string_by_id(name_id) {
+                if resolved == name {
+                    return Some(self.nodes.name_map_node_ids[i]);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Multiply two 4x4 matrices (column-major order, as stored in BigWorld).
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut sum = 0.0;
+            for k in 0..4 {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            out[col * 4 + row] = sum;
+        }
+    }
+    out
 }
