@@ -139,7 +139,10 @@ impl AssetsBinVfs {
             register_path_in_dirs(&full_path, &mut dir_children);
         }
 
-        // Register directory-only path entries (those without prototype data).
+        // Register parent directories for path entries that have no prototype
+        // data (e.g. .geometry files that live in PKG archives but appear in
+        // pathsStorage). Only register parent dirs — NOT the leaf itself, which
+        // would shadow PKG files in the overlay VFS.
         for (i, entry) in db.paths_storage.iter().enumerate() {
             if db.lookup_r2p(entry.self_id).is_some() {
                 continue;
@@ -147,7 +150,6 @@ impl AssetsBinVfs {
             let full_path = db.reconstruct_path(i, &self_id_index);
             if !full_path.is_empty() {
                 register_path_in_dirs(&full_path, &mut dir_children);
-                dir_children.entry(full_path).or_default();
             }
         }
 

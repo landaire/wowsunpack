@@ -155,6 +155,20 @@ enum Commands {
         #[clap(long)]
         no_vfs: bool,
     },
+    /// Export a ship sub-model to GLB format
+    ExportModel {
+        /// Model name (e.g. "JSB039_Yamato_1945_Bow"). Resolves to {name}.visual
+        /// in assets.bin and its linked .geometry file.
+        name: String,
+
+        /// Output file path
+        #[arg(short, long, default_value = "output.glb")]
+        output: PathBuf,
+
+        /// LOD level (0 = highest detail)
+        #[arg(long, default_value = "0")]
+        lod: usize,
+    },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
         /// Path to the assets.bin file (VFS path by default, disk path with --no-vfs)
@@ -858,6 +872,13 @@ fn run() -> Result<(), Report> {
             let file_data = read_file_data(&file, no_vfs, vfs.as_ref())?;
             run_geometry(&file_data, &file.to_string_lossy(), decode)?;
         }
+        Commands::ExportModel { name, output, lod } => {
+            let Some(vfs) = &vfs else {
+                bail!("VFS required for export-model. Use --game-dir to specify a game install.");
+            };
+
+            run_export_model(vfs, &name, &output, lod)?;
+        }
         Commands::AssetsBin {
             file,
             filter,
@@ -1203,6 +1224,96 @@ fn run_assets_bin(
             entry.prototype_magic, entry.prototype_checksum, entry.record_count, entry.size
         );
     }
+
+    Ok(())
+}
+
+fn run_export_model(vfs: &VfsPath, name: &str, output: &Path, lod: usize) -> Result<(), Report> {
+    use wowsunpack::export::gltf_export;
+    use wowsunpack::models::assets_bin;
+    use wowsunpack::models::geometry;
+    use wowsunpack::models::visual;
+
+    // Load assets.bin from VFS.
+    let mut assets_bin_data = Vec::new();
+    vfs.join("content/assets.bin")
+        .context("VFS path error")?
+        .open_file()
+        .context("Could not find content/assets.bin in VFS")?
+        .read_to_end(&mut assets_bin_data)?;
+
+    let db = assets_bin::parse_assets_bin(&assets_bin_data)?;
+    let self_id_index = db.build_self_id_index();
+
+    // Resolve {name}.visual
+    let visual_suffix = format!("{name}.visual");
+    let (vis_location, vis_full_path) = db
+        .resolve_path(&visual_suffix, &self_id_index)
+        .context_with(|| format!("Could not resolve visual: {visual_suffix}"))?;
+
+    if vis_location.blob_index != 1 {
+        bail!(
+            "Path '{}' resolved to blob {} (expected VisualPrototype blob 1)",
+            visual_suffix,
+            vis_location.blob_index
+        );
+    }
+
+    let vis_data = db
+        .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
+        .context("Failed to get visual prototype data")?;
+    let vp = visual::parse_visual(vis_data).context("Failed to parse VisualPrototype")?;
+
+    println!("Visual: {vis_full_path}");
+    println!(
+        "  {} render sets, {} LODs, {} nodes",
+        vp.render_sets.len(),
+        vp.lods.len(),
+        vp.nodes.name_ids.len()
+    );
+
+    // Resolve geometry path from mergedGeometryPathId.
+    let geom_path_idx = self_id_index
+        .get(&vp.merged_geometry_path_id)
+        .ok_or_else(|| {
+            rootcause::report!(
+                "Could not resolve mergedGeometryPathId 0x{:016X}",
+                vp.merged_geometry_path_id
+            )
+        })?;
+    let geom_full_path = db.reconstruct_path(*geom_path_idx, &self_id_index);
+
+    println!("Geometry: {geom_full_path}");
+
+    // Load and parse geometry from VFS.
+    let mut geom_data = Vec::new();
+    vfs.join(&geom_full_path)
+        .context("VFS path error")?
+        .open_file()
+        .context_with(|| format!("Could not open geometry file: {geom_full_path}"))?
+        .read_to_end(&mut geom_data)?;
+
+    let geom = geometry::parse_geometry(&geom_data).context("Failed to parse geometry")?;
+
+    println!(
+        "  {} vertex buffers, {} index buffers, {} vertices mappings, {} indices mappings",
+        geom.merged_vertices.len(),
+        geom.merged_indices.len(),
+        geom.vertices_mapping.len(),
+        geom.indices_mapping.len(),
+    );
+
+    // Export to GLB.
+    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+    gltf_export::export_glb(&vp, &geom, &db, lod, &mut out_file).context("Failed to export GLB")?;
+
+    let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Exported LOD {} to {} ({} bytes)",
+        lod,
+        output.display(),
+        file_size
+    );
 
     Ok(())
 }
