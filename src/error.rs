@@ -10,59 +10,61 @@ pub struct Error {
 
 #[derive(Error, Debug)]
 pub enum ErrorKind {
-    #[error("Nom error")]
+    #[error("Nom error: {err:?}")]
     Nom {
         err: nom::error::ErrorKind,
-        input: Vec<u8>,
+        _input: Vec<u8>,
     },
     #[cfg(feature = "json")]
-    #[error("Error serializing or deserializing json")]
+    #[error("Error serializing or deserializing json: {err}")]
     SerdeJson {
         #[from]
         err: serde_json::Error,
     },
     #[cfg(feature = "cbor")]
-    #[error("Error serializing or deserializing cbor")]
+    #[error("Error serializing or deserializing cbor: {err}")]
     SerdeCbor {
         #[from]
         err: serde_cbor::Error,
     },
-    #[error("Error interpreting UTF-8 string")]
+    #[error("Error interpreting UTF-8 string: {err}")]
     Utf8Error {
         #[from]
         err: std::str::Utf8Error,
     },
-    #[error("Error interpreting UTF-8 string")]
+    #[error("Error interpreting UTF-8 string: {err}")]
     FromUtf8Error {
         #[from]
         err: std::string::FromUtf8Error,
     },
     #[error("Unsupported replay file version found")]
     UnsupportedReplayVersion(String),
-    #[error("Unable to process packet")]
+    #[error("Unable to process packet: supertype={supertype}, subtype={subtype}, reason={reason}")]
     UnableToProcessPacket {
         supertype: u32,
         subtype: u32,
         reason: String,
-        packet: Vec<u8>,
+        _packet: Vec<u8>,
     },
-    #[error("Could not parse RPC value")]
+    #[error(
+        "Could not parse RPC value: method={method}, arg {argnum} (type={argtype}), error={error}"
+    )]
     UnableToParseRpcValue {
         method: String,
         argnum: usize,
         argtype: String,
-        packet: Vec<u8>,
+        _packet: Vec<u8>,
         error: String,
     },
-    #[error("Unknown FixedDict flag")]
-    UnknownFixedDictFlag { flag: u8, packet: Vec<u8> },
-    #[error("Internal prop set on unsupported entity")]
+    #[error("Unknown FixedDict flag: {flag:#x}")]
+    UnknownFixedDictFlag { flag: u8, _packet: Vec<u8> },
+    #[error("Internal prop set on unsupported entity: id={entity_id}, type={entity_type}")]
     UnsupportedInternalPropSet {
         entity_id: u32,
         entity_type: String,
-        payload: Vec<u8>,
+        _payload: Vec<u8>,
     },
-    #[error("Data file not found")]
+    #[error("Data file not found: version={version:?}, path={path}")]
     DatafileNotFound { version: Version, path: String },
     #[error("Decoder ring failure")]
     DecoderRingFailure(String),
@@ -83,7 +85,7 @@ impl nom::error::ParseError<&[u8]> for Error {
         Self {
             kind: ErrorKind::Nom {
                 err: kind,
-                input: input.to_vec(),
+                _input: input.to_vec(),
             },
             backtrace: Vec::new(),
         }

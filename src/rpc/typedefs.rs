@@ -174,7 +174,6 @@ pub enum ArgValue<'argtype> {
     Tuple(Vec<ArgValue<'argtype>>),
 }
 
-
 impl<'argtype> ArgValue<'argtype> {
     /// Convert any integer variant to i32 (widening or narrowing as needed).
     pub fn as_i32(&self) -> Option<i32> {
@@ -431,7 +430,7 @@ impl ArgType {
                     } else if flag != 1 {
                         return Err(failure_from_kind(ErrorKind::UnknownFixedDictFlag {
                             flag,
-                            packet: i.to_vec(),
+                            _packet: i.to_vec(),
                         }));
                         //panic!("Unknown fixed dict flag {:?} in {:?}", flag, i);
                     }
