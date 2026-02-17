@@ -19,6 +19,8 @@ use crate::models::visual::VisualPrototype;
 pub enum ExportError {
     #[error("no LOD {0} in visual (max LOD: {1})")]
     LodOutOfRange(usize, usize),
+    #[error("no .visual files found in directory: {0}")]
+    NoVisualFiles(String),
     #[error("render set name 0x{0:08X} not found among render sets")]
     RenderSetNotFound(u32),
     #[error("vertices mapping id 0x{id:08X} not found in geometry")]
@@ -600,4 +602,130 @@ fn bounding_coords(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
         }
     }
     (min, max)
+}
+
+/// A named sub-model for multi-model ship export.
+pub struct SubModel<'a> {
+    pub name: String,
+    pub visual: &'a VisualPrototype,
+    pub geometry: &'a MergedGeometry<'a>,
+}
+
+/// Export multiple sub-models as a single GLB with separate named meshes/nodes.
+///
+/// Each sub-model becomes a separate selectable object in Blender.
+pub fn export_ship_glb(
+    sub_models: &[SubModel<'_>],
+    db: &PrototypeDatabase<'_>,
+    lod: usize,
+    writer: &mut impl Write,
+) -> Result<(), Report<ExportError>> {
+    let mut root = json::Root::default();
+    root.asset = json::Asset {
+        version: "2.0".to_string(),
+        generator: Some("wowsunpack".to_string()),
+        ..Default::default()
+    };
+
+    let mut bin_data: Vec<u8> = Vec::new();
+    let mut scene_nodes = Vec::new();
+
+    for sub in sub_models {
+        // Validate LOD — skip sub-models that don't have enough LODs.
+        if sub.visual.lods.is_empty() || lod >= sub.visual.lods.len() {
+            eprintln!(
+                "Warning: sub-model '{}' has {} LODs, skipping (requested LOD {})",
+                sub.name,
+                sub.visual.lods.len(),
+                lod
+            );
+            continue;
+        }
+
+        let lod_entry = &sub.visual.lods[lod];
+        let primitives = collect_primitives(sub.visual, sub.geometry, db, lod_entry)?;
+
+        if primitives.is_empty() {
+            eprintln!(
+                "Warning: sub-model '{}' has no primitives for LOD {lod}",
+                sub.name
+            );
+            continue;
+        }
+
+        let mut gltf_primitives = Vec::new();
+        for prim in &primitives {
+            let gltf_prim = add_primitive_to_root(&mut root, &mut bin_data, prim)?;
+            gltf_primitives.push(gltf_prim);
+        }
+
+        // Create a mesh named after the sub-model.
+        let mesh = root.push(json::Mesh {
+            primitives: gltf_primitives,
+            weights: None,
+            name: Some(sub.name.clone()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        // Create a node named after the sub-model, referencing the mesh.
+        let node = root.push(json::Node {
+            mesh: Some(mesh),
+            name: Some(sub.name.clone()),
+            ..Default::default()
+        });
+
+        scene_nodes.push(node);
+    }
+
+    // Pad binary data to 4-byte alignment.
+    while bin_data.len() % 4 != 0 {
+        bin_data.push(0);
+    }
+
+    // Set the buffer byte_length.
+    if !bin_data.is_empty() {
+        let buffer = root.push(json::Buffer {
+            byte_length: USize64::from(bin_data.len()),
+            uri: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        for bv in root.buffer_views.iter_mut() {
+            bv.buffer = buffer;
+        }
+    }
+
+    // Create scene with all sub-model nodes.
+    let scene = root.push(json::Scene {
+        nodes: scene_nodes,
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    root.scene = Some(scene);
+
+    // Serialize and write GLB.
+    let json_string = json::serialize::to_string(&root)
+        .map_err(|e| Report::new(ExportError::Serialize(e.to_string())))?;
+
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: 0,
+        },
+        json: Cow::Owned(json_string.into_bytes()),
+        bin: if bin_data.is_empty() {
+            None
+        } else {
+            Some(Cow::Owned(bin_data))
+        },
+    };
+
+    glb.to_writer(writer)
+        .map_err(|e| Report::new(ExportError::Io(e.to_string())))?;
+
+    Ok(())
 }

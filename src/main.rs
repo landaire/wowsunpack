@@ -169,6 +169,21 @@ enum Commands {
         #[arg(long, default_value = "0")]
         lod: usize,
     },
+    /// Export all sub-models of a ship to a single GLB file.
+    /// Each sub-model becomes a separate named object in Blender.
+    ExportShip {
+        /// Ship name — either a model directory name (e.g. "JSB039_Yamato_1945")
+        /// or a translated display name (e.g. "Yamato") for fuzzy lookup
+        name: String,
+
+        /// Output file path
+        #[arg(short, long, default_value = "output.glb")]
+        output: PathBuf,
+
+        /// LOD level (0 = highest detail)
+        #[arg(long, default_value = "0")]
+        lod: usize,
+    },
     /// Parse and inspect an assets.bin (PrototypeDatabase) file
     AssetsBin {
         /// Path to the assets.bin file (VFS path by default, disk path with --no-vfs)
@@ -879,6 +894,13 @@ fn run() -> Result<(), Report> {
 
             run_export_model(vfs, &name, &output, lod)?;
         }
+        Commands::ExportShip { name, output, lod } => {
+            let Some(vfs) = &vfs else {
+                bail!("VFS required for export-ship. Use --game-dir to specify a game install.");
+            };
+
+            run_export_ship(vfs, &name, &output, lod, &game_dir, game_version)?;
+        }
         Commands::AssetsBin {
             file,
             filter,
@@ -1316,6 +1338,279 @@ fn run_export_model(vfs: &VfsPath, name: &str, output: &Path, lod: usize) -> Res
     );
 
     Ok(())
+}
+
+fn run_export_ship(
+    vfs: &VfsPath,
+    name: &str,
+    output: &Path,
+    lod: usize,
+    game_dir: &Path,
+    game_version: Option<u64>,
+) -> Result<(), Report> {
+    use wowsunpack::export::gltf_export::{self, SubModel};
+    use wowsunpack::models::assets_bin;
+    use wowsunpack::models::geometry;
+    use wowsunpack::models::visual;
+
+    // Load assets.bin from VFS.
+    let mut assets_bin_data = Vec::new();
+    vfs.join("content/assets.bin")
+        .context("VFS path error")?
+        .open_file()
+        .context("Could not find content/assets.bin in VFS")?
+        .read_to_end(&mut assets_bin_data)?;
+
+    let db = assets_bin::parse_assets_bin(&assets_bin_data)?;
+    let self_id_index = db.build_self_id_index();
+
+    // Strategy 1: Try direct resolution — scan paths_storage for .visual files
+    // in a directory matching the user's name.
+    let needle = format!("/{name}/");
+    let mut visual_paths: Vec<(String, String)> = Vec::new(); // (sub_model_name, full_path)
+
+    for (i, entry) in db.paths_storage.iter().enumerate() {
+        if !entry.name.ends_with(".visual") {
+            continue;
+        }
+        let full_path = db.reconstruct_path(i, &self_id_index);
+        if full_path.contains(&needle) {
+            let sub_name = entry
+                .name
+                .strip_suffix(".visual")
+                .unwrap_or(&entry.name)
+                .to_string();
+            visual_paths.push((sub_name, full_path));
+        }
+    }
+
+    // Strategy 2: If no direct match, try name lookup via GameParams.
+    if visual_paths.is_empty() {
+        let model_dir = resolve_ship_name_to_model_dir(vfs, name, game_dir, game_version)?;
+
+        let dir_needle = format!("/{}/", model_dir.rsplit('/').next().unwrap_or(&model_dir));
+        for (i, entry) in db.paths_storage.iter().enumerate() {
+            if !entry.name.ends_with(".visual") {
+                continue;
+            }
+            let full_path = db.reconstruct_path(i, &self_id_index);
+            if full_path.contains(&dir_needle) {
+                let sub_name = entry
+                    .name
+                    .strip_suffix(".visual")
+                    .unwrap_or(&entry.name)
+                    .to_string();
+                visual_paths.push((sub_name, full_path));
+            }
+        }
+    }
+
+    if visual_paths.is_empty() {
+        bail!("No .visual files found for '{name}'. Try using the model directory name directly.");
+    }
+
+    visual_paths.sort_by(|a, b| a.0.cmp(&b.0));
+
+    println!("Found {} sub-models:", visual_paths.len());
+    for (sub_name, _) in &visual_paths {
+        println!("  {sub_name}");
+    }
+
+    // Parse each visual and its geometry.
+    struct SubModelData {
+        name: String,
+        visual: visual::VisualPrototype,
+        geom_bytes: Vec<u8>,
+    }
+
+    let mut sub_model_data: Vec<SubModelData> = Vec::new();
+
+    for (sub_name, _vis_full_path) in &visual_paths {
+        let visual_suffix = format!("{sub_name}.visual");
+        let (vis_location, _) = db
+            .resolve_path(&visual_suffix, &self_id_index)
+            .context_with(|| format!("Could not resolve visual: {visual_suffix}"))?;
+
+        if vis_location.blob_index != 1 {
+            eprintln!(
+                "Warning: '{visual_suffix}' resolved to blob {} (not VisualPrototype), skipping",
+                vis_location.blob_index
+            );
+            continue;
+        }
+
+        let vis_data = db
+            .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
+            .context("Failed to get visual prototype data")?;
+        let vp = visual::parse_visual(vis_data).context("Failed to parse VisualPrototype")?;
+
+        // Resolve geometry path from mergedGeometryPathId.
+        let geom_path_idx = self_id_index
+            .get(&vp.merged_geometry_path_id)
+            .ok_or_else(|| {
+                rootcause::report!(
+                    "Could not resolve mergedGeometryPathId 0x{:016X} for {}",
+                    vp.merged_geometry_path_id,
+                    sub_name
+                )
+            })?;
+        let geom_full_path = db.reconstruct_path(*geom_path_idx, &self_id_index);
+
+        let mut geom_bytes = Vec::new();
+        vfs.join(&geom_full_path)
+            .context("VFS path error")?
+            .open_file()
+            .context_with(|| format!("Could not open geometry: {geom_full_path}"))?
+            .read_to_end(&mut geom_bytes)?;
+
+        println!(
+            "  {sub_name}: {} render sets, geometry={}",
+            vp.render_sets.len(),
+            geom_full_path,
+        );
+
+        sub_model_data.push(SubModelData {
+            name: sub_name.clone(),
+            visual: vp,
+            geom_bytes,
+        });
+    }
+
+    // Parse geometries from stable byte vectors and build SubModel refs.
+    // MergedGeometry borrows from geom_bytes, so we need a two-phase approach.
+    let parsed_geoms: Vec<geometry::MergedGeometry<'_>> = sub_model_data
+        .iter()
+        .map(|d| geometry::parse_geometry(&d.geom_bytes).expect("Failed to parse geometry"))
+        .collect();
+
+    let sub_models: Vec<SubModel<'_>> = sub_model_data
+        .iter()
+        .zip(parsed_geoms.iter())
+        .map(|(data, geom)| SubModel {
+            name: data.name.clone(),
+            visual: &data.visual,
+            geometry: geom,
+        })
+        .collect();
+
+    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+    gltf_export::export_ship_glb(&sub_models, &db, lod, &mut out_file)
+        .context("Failed to export ship GLB")?;
+
+    let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Exported {} sub-models (LOD {}) to {} ({} bytes)",
+        sub_models.len(),
+        lod,
+        output.display(),
+        file_size
+    );
+
+    Ok(())
+}
+
+/// Resolve a ship display name to a model directory path via GameParams lookup.
+fn resolve_ship_name_to_model_dir(
+    vfs: &VfsPath,
+    name: &str,
+    game_dir: &Path,
+    game_version: Option<u64>,
+) -> Result<String, Report> {
+    use wowsunpack::data::ResourceLoader;
+    use wowsunpack::game_params::provider::GameMetadataProvider;
+    use wowsunpack::game_params::types::GameParamProvider;
+
+    let mut metadata = GameMetadataProvider::from_vfs(vfs)
+        .context("Failed to load GameParams for ship name lookup")?;
+
+    // Try to load translations.
+    if let Some(version) = game_version {
+        let mo_path = wowsunpack::game_data::translations_path(game_dir, version as u32);
+        if let Ok(mo_data) = std::fs::read(&mo_path) {
+            if let Ok(catalog) = gettext::Catalog::parse(&*mo_data) {
+                metadata.set_translations(catalog);
+            }
+        }
+    }
+
+    let normalized_input = unidecode::unidecode(name).to_lowercase();
+
+    let mut matches: Vec<(String, String, String)> = Vec::new(); // (display_name, index, model_path)
+
+    for param in metadata.params() {
+        let vehicle = match param.vehicle() {
+            Some(v) => v,
+            None => continue,
+        };
+        let model_path = match vehicle.model_path() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Try translated name first, fall back to param index.
+        let display_name = metadata
+            .localized_name_from_param(param)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| param.index().to_string());
+
+        let normalized_display = unidecode::unidecode(&display_name).to_lowercase();
+
+        if normalized_display.contains(&normalized_input) {
+            matches.push((
+                display_name,
+                param.index().to_string(),
+                model_path.to_string(),
+            ));
+        }
+    }
+
+    match matches.len() {
+        0 => bail!(
+            "No ship found matching '{name}'. Try using the model directory name directly \
+             (e.g. 'JSB039_Yamato_1945')."
+        ),
+        1 => {
+            let model_path = &matches[0].2;
+            let dir = model_path
+                .rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or(model_path);
+            println!("Resolved '{}' -> {} ({})", name, matches[0].0, dir);
+            Ok(dir.to_string())
+        }
+        _ => {
+            // If all matches resolve to the same model directory, just use it.
+            let dirs: Vec<&str> = matches
+                .iter()
+                .map(|(_, _, mp)| mp.rsplit_once('/').map(|(d, _)| d).unwrap_or(mp.as_str()))
+                .collect();
+            let unique_dirs: std::collections::HashSet<&&str> = dirs.iter().collect();
+            if unique_dirs.len() == 1 {
+                let dir = dirs[0];
+                println!(
+                    "Resolved '{}' -> {} ({} variants, same model dir)",
+                    name,
+                    matches[0].0,
+                    matches.len()
+                );
+                return Ok(dir.to_string());
+            }
+
+            eprintln!("Multiple ships match '{name}':");
+            for (display, index, model_path) in &matches {
+                let dir = model_path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d)
+                    .unwrap_or(model_path);
+                let dir_name = dir.rsplit('/').next().unwrap_or(dir);
+                eprintln!("  {display} ({index}) -> {dir_name}");
+            }
+            bail!(
+                "Multiple ships match '{name}'. Please refine your search or use \
+                 the model directory name directly."
+            );
+        }
+    }
 }
 
 fn main() -> Result<(), Report> {
