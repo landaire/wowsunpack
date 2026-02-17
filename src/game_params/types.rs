@@ -781,11 +781,18 @@ pub struct Exterior {
     /// Camouflage texture scheme ID, e.g. "camo_permanent_1".
     #[cfg_attr(feature = "serde", serde(default))]
     camouflage: Option<String>,
+    /// Translation key for display name, e.g. "IDS_PJES360_Yamato_Golden".
+    #[cfg_attr(feature = "serde", serde(default))]
+    title: Option<String>,
 }
 
 impl Exterior {
     pub fn camouflage(&self) -> Option<&str> {
         self.camouflage.as_deref()
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 }
 
@@ -929,6 +936,8 @@ pub struct Vehicle {
     armor: Option<HashMap<u32, f32>>,
     #[cfg_attr(feature = "serde", serde(default))]
     hit_locations: Option<HashMap<String, HitLocation>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    permoflages: Vec<String>,
 }
 
 impl Vehicle {
@@ -962,6 +971,10 @@ impl Vehicle {
 
     pub fn hit_locations(&self) -> Option<&HashMap<String, HitLocation>> {
         self.hit_locations.as_ref()
+    }
+
+    pub fn permoflages(&self) -> &[String] {
+        &self.permoflages
     }
 
     /// Look up a specific hull upgrade config by name.

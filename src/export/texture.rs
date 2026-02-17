@@ -41,6 +41,14 @@ pub fn dds_to_png(dds_bytes: &[u8]) -> Result<Vec<u8>, Report<TextureError>> {
 
 const TEXTURE_BASE: &str = "content/gameplay/common/camouflage/textures";
 
+/// Load raw DDS bytes from an absolute VFS path.
+pub fn load_dds_from_vfs(vfs: &vfs::VfsPath, path: &str) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut file = vfs.join(path).ok()?.open_file().ok()?;
+    std::io::Read::read_to_end(&mut file, &mut data).ok()?;
+    if data.is_empty() { None } else { Some(data) }
+}
+
 /// MFM name suffixes that don't appear in texture filenames.
 ///
 /// E.g. MFM `AGM034_16in50_Mk7_skinned.mfm` → texture `AGM034_16in50_Mk7_camo_01.dds`.
@@ -64,10 +72,20 @@ pub fn texture_base_names(mfm_stem: &str) -> Vec<String> {
     names
 }
 
-/// Load a texture for a given MFM stem and scheme from a VFS.
+/// Texture channel suffixes that indicate a multi-channel camo scheme.
 ///
-/// Given an MFM leaf like `JSB039_Yamato_1945_Hull` and scheme like `camo_01`,
-/// tries `{stem}_{scheme}.dd0` first (highest res), then `.dds`.
+/// When a scheme is discovered as e.g. `GW_a`, the `_a` suffix means it's the albedo
+/// channel of scheme `GW`. The `_mg` and `_mgn` suffixes are metallic/gloss channels.
+/// These are stripped during discovery to group channels into a single scheme.
+const TEXTURE_CHANNEL_SUFFIXES: &[&str] = &["_a", "_mg", "_mgn"];
+
+/// Load the albedo texture for a given MFM stem and camo scheme from the VFS.
+///
+/// Given an MFM leaf like `JSB039_Yamato_1945_Hull` and scheme like `GW`,
+/// tries multiple naming conventions in order:
+/// 1. `{stem}_{scheme}_a.dd0/dds` — explicit albedo channel (e.g. `Hull_GW_a.dds`)
+/// 2. `{stem}_{scheme}.dd0/dds` — direct replacement (e.g. `Hull_camo_01.dds`)
+///
 /// Also tries with known MFM suffixes stripped (e.g. `_skinned`) to handle
 /// turret models where the texture name differs from the MFM name.
 ///
@@ -78,7 +96,10 @@ pub fn load_texture_bytes(
     scheme: &str,
 ) -> Option<(String, Vec<u8>)> {
     for base in texture_base_names(mfm_stem) {
+        // Try explicit albedo channel first ({base}_{scheme}_a), then direct ({base}_{scheme}).
         let candidates = [
+            format!("{TEXTURE_BASE}/{base}_{scheme}_a.dd0"),
+            format!("{TEXTURE_BASE}/{base}_{scheme}_a.dds"),
             format!("{TEXTURE_BASE}/{base}_{scheme}.dd0"),
             format!("{TEXTURE_BASE}/{base}_{scheme}.dds"),
         ];
@@ -130,9 +151,24 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
     None
 }
 
+/// Strip texture channel suffixes (`_a`, `_mg`, `_mgn`) from a raw scheme name.
+///
+/// E.g. `GW_a` → `GW`, `camo_01` → `camo_01` (no channel suffix).
+fn strip_channel_suffix(scheme: &str) -> &str {
+    for suffix in TEXTURE_CHANNEL_SUFFIXES {
+        if let Some(stripped) = scheme.strip_suffix(suffix) {
+            if !stripped.is_empty() {
+                return stripped;
+            }
+        }
+    }
+    scheme
+}
+
 /// Discover available texture schemes for a set of MFM stems by scanning the VFS.
 ///
-/// Returns sorted, deduplicated scheme names (e.g. `["camo_01", "GW_a"]`).
+/// Multi-channel schemes (e.g. `GW_a` + `GW_mg`) are grouped into a single scheme
+/// name (`GW`). Returns sorted, deduplicated scheme names.
 pub fn discover_texture_schemes(vfs: &vfs::VfsPath, mfm_stems: &[String]) -> Vec<String> {
     let mut schemes = std::collections::BTreeSet::new();
 
@@ -160,8 +196,9 @@ pub fn discover_texture_schemes(vfs: &vfs::VfsPath, mfm_stems: &[String]) -> Vec
             let prefix = format!("{base}_");
             for name in &dds_names {
                 if let Some(rest) = name.strip_prefix(&prefix) {
-                    if let Some(scheme) = rest.strip_suffix(".dds") {
-                        if !scheme.is_empty() {
+                    if let Some(raw_scheme) = rest.strip_suffix(".dds") {
+                        if !raw_scheme.is_empty() {
+                            let scheme = strip_channel_suffix(raw_scheme);
                             schemes.insert(scheme.to_string());
                         }
                     }
