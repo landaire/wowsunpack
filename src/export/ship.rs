@@ -30,7 +30,7 @@ use crate::models::assets_bin::{self, PrototypeDatabase};
 use crate::models::geometry;
 use crate::models::visual::{self, VisualPrototype};
 
-use super::camouflage::CamouflageDb;
+use super::camouflage::{self, CamouflageDb};
 use super::gltf_export::{self, SubModel, TextureSet};
 use super::texture;
 
@@ -308,14 +308,16 @@ impl ShipAssets {
         let mut schemes = texture::discover_texture_schemes(&self.vfs, &all_stems);
 
         // Also include material-based camo scheme display names.
-        let mat_camos = self.discover_mat_camo_schemes(&info.model_dir);
+        let ship_index = self.find_ship_index(&info.model_dir);
+        let ship_idx = ship_index.as_deref();
+        let mat_camos = self.discover_mat_camo_schemes(&info.model_dir, ship_idx);
         for scheme in &mat_camos {
             let tag = if scheme.tiled { "tiled" } else { "mat_camo" };
             schemes.push(format!("{} ({})", scheme.display_name, tag));
         }
 
         // Include universal camos (PCEC entries available to all ships).
-        let universal = self.discover_universal_camo_schemes();
+        let universal = self.discover_universal_camo_schemes(ship_idx);
         for scheme in &universal {
             let tag = if scheme.tiled { "tiled" } else { "mat_camo" };
             schemes.push(format!("{} (universal/{})", scheme.display_name, tag));
@@ -356,8 +358,10 @@ impl ShipAssets {
             self.load_mounts(&db, &self_id_index, &mount_points, &hull_parts)?;
 
         // Resolve material-based camouflage schemes (ship-specific + universal).
-        let mut mat_camo_schemes = self.discover_mat_camo_schemes(&info.model_dir);
-        mat_camo_schemes.extend(self.discover_universal_camo_schemes());
+        let ship_index = self.find_ship_index(&info.model_dir);
+        let ship_idx = ship_index.as_deref();
+        let mut mat_camo_schemes = self.discover_mat_camo_schemes(&info.model_dir, ship_idx);
+        mat_camo_schemes.extend(self.discover_universal_camo_schemes(ship_idx));
 
         Ok(ShipModelContext {
             vfs: self.vfs.clone(),
@@ -377,7 +381,11 @@ impl ShipAssets {
     ///
     /// Follows: Vehicle.permoflages → Exterior.camouflage → camouflages.xml entry.
     /// Returns owned `MatCamoScheme` data (no lifetimes).
-    fn discover_mat_camo_schemes(&self, model_dir: &str) -> Vec<MatCamoScheme> {
+    fn discover_mat_camo_schemes(
+        &self,
+        model_dir: &str,
+        ship_index: Option<&str>,
+    ) -> Vec<MatCamoScheme> {
         let camo_db = match &self.camo_db {
             Some(db) => db,
             None => return Vec::new(),
@@ -411,7 +419,7 @@ impl ShipAssets {
                 continue;
             }
 
-            let Some(entry) = camo_db.get(camo_name) else {
+            let Some(entry) = camo_db.get(camo_name, ship_index) else {
                 continue;
             };
             if entry.textures.is_empty() {
@@ -460,6 +468,7 @@ impl ShipAssets {
                 texture_paths: unique_paths,
                 tiled: entry.tiled,
                 color_scheme_colors,
+                uv_transforms: entry.uv_transforms.clone(),
             });
         }
 
@@ -470,7 +479,7 @@ impl ShipAssets {
     ///
     /// These are not referenced by any ship's `permoflages` list — they're
     /// universally applicable. Deduplicated by camouflage name.
-    fn discover_universal_camo_schemes(&self) -> Vec<MatCamoScheme> {
+    fn discover_universal_camo_schemes(&self, ship_index: Option<&str>) -> Vec<MatCamoScheme> {
         let camo_db = match &self.camo_db {
             Some(db) => db,
             None => return Vec::new(),
@@ -494,7 +503,7 @@ impl ShipAssets {
                 continue;
             }
 
-            let Some(entry) = camo_db.get(camo_name) else {
+            let Some(entry) = camo_db.get(camo_name, ship_index) else {
                 continue;
             };
             if entry.textures.is_empty() {
@@ -531,6 +540,7 @@ impl ShipAssets {
                 texture_paths: unique_paths,
                 tiled: entry.tiled,
                 color_scheme_colors,
+                uv_transforms: entry.uv_transforms.clone(),
             });
         }
 
@@ -555,6 +565,20 @@ impl ShipAssets {
                     .unwrap_or(false)
             })
             .ok_or_else(|| rootcause::report!("Ship '{}' not found in GameParams", model_dir))
+    }
+
+    /// Find the ship param's index name (e.g. "PJSB018_Yamato_1944") from model directory.
+    fn find_ship_index(&self, model_dir: &str) -> Option<String> {
+        self.metadata
+            .params()
+            .iter()
+            .find(|p| {
+                p.vehicle()
+                    .and_then(|v| v.model_path())
+                    .map(|mp| mp.contains(model_dir))
+                    .unwrap_or(false)
+            })
+            .map(|p| p.index().to_string())
     }
 
     /// Scan paths_storage for .visual files in a directory matching the name.
@@ -1000,7 +1024,21 @@ impl ShipModelContext {
                             .camo_schemes
                             .push((scheme.display_name.clone(), scheme_textures));
                         if scheme.tiled {
-                            tex_set.tiled_scheme_indices.insert(scheme_idx);
+                            // Store per-stem UV transforms for this tiled scheme.
+                            for stem in &stems {
+                                let cat = camouflage::classify_part_category(stem);
+                                if let Some(xform) = scheme.uv_transforms.get(cat) {
+                                    tex_set.tiled_uv_transforms.insert(
+                                        (scheme_idx, stem.clone()),
+                                        [
+                                            xform.scale[0],
+                                            xform.scale[1],
+                                            xform.offset[0],
+                                            xform.offset[1],
+                                        ],
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1055,10 +1093,12 @@ struct MatCamoScheme {
     display_name: String,
     /// Albedo texture VFS paths from camouflages.xml.
     texture_paths: Vec<String>,
-    /// Whether this is a tiled camo (uses UV2 / TEXCOORD_1).
+    /// Whether this is a tiled camo (uses UV tiling via KHR_texture_transform).
     tiled: bool,
     /// Resolved color scheme colors for tiled camos (4 RGBA colors, linear space).
     color_scheme_colors: Option<[[f32; 4]; 4]>,
+    /// Per-part UV transforms for tiled camos. Key = part category (lowercase).
+    uv_transforms: HashMap<String, camouflage::UvTransform>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1160,7 +1200,7 @@ pub fn build_texture_set(mfm_infos: &[MfmInfo], vfs: &VfsPath) -> TextureSet {
     TextureSet {
         base,
         camo_schemes,
-        tiled_scheme_indices: HashSet::new(),
+        tiled_uv_transforms: HashMap::new(),
     }
 }
 

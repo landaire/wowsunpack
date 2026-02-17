@@ -1,7 +1,7 @@
 //! Export ship visual + geometry to glTF/GLB format.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use gltf_json as json;
@@ -51,8 +51,6 @@ struct DecodedPrimitive {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
-    /// Second UV channel (TexCoord1) for tiled camouflage textures.
-    uvs2: Vec<[f32; 2]>,
     indices: Vec<u32>,
     material_name: String,
     /// MFM stem for texture lookup (e.g. "JSB039_Yamato_1945_Hull").
@@ -352,7 +350,7 @@ fn collect_primitives(
         // (items_offset is applied when extracting the vertex slice).
 
         // Unpack vertex attributes.
-        let (positions, normals, uvs, uvs2) = unpack_vertices(vert_slice, stride, &format);
+        let (positions, normals, uvs) = unpack_vertices(vert_slice, stride, &format);
 
         // Material name for this render set.
         let material_name = db
@@ -379,7 +377,6 @@ fn collect_primitives(
             positions,
             normals,
             uvs,
-            uvs2,
             indices,
             material_name,
             mfm_stem,
@@ -389,17 +386,16 @@ fn collect_primitives(
     Ok(result)
 }
 
-/// Unpack vertex data into separate position, normal, UV, and UV2 arrays.
+/// Unpack vertex data into separate position, normal, and UV arrays.
 fn unpack_vertices(
     data: &[u8],
     stride: usize,
     format: &VertexFormat,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 2]>) {
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>) {
     let count = data.len() / stride;
     let mut positions = Vec::with_capacity(count);
     let mut normals = Vec::with_capacity(count);
     let mut uvs = Vec::with_capacity(count);
-    let mut uvs2 = Vec::new();
 
     // Find attribute offsets.
     let pos_attr = format
@@ -414,14 +410,6 @@ fn unpack_vertices(
         .attributes
         .iter()
         .find(|a| a.semantic == AttributeSemantic::TexCoord0);
-    let uv2_attr = format
-        .attributes
-        .iter()
-        .find(|a| a.semantic == AttributeSemantic::TexCoord1);
-
-    if uv2_attr.is_some() {
-        uvs2.reserve(count);
-    }
 
     for i in 0..count {
         let base = i * stride;
@@ -448,16 +436,9 @@ fn unpack_vertices(
             let packed = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
             uvs.push(vertex_format::unpack_uv(packed));
         }
-
-        // UV2: packed 4 bytes (2 x float16) — tiling UV for camouflage
-        if let Some(attr) = uv2_attr {
-            let off = base + attr.offset;
-            let packed = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-            uvs2.push(vertex_format::unpack_uv(packed));
-        }
     }
 
-    (positions, normals, uvs, uvs2)
+    (positions, normals, uvs)
 }
 
 /// All texture data for a ship export: base albedo + camouflage variants.
@@ -467,8 +448,9 @@ pub struct TextureSet {
     /// Camouflage variant PNGs: scheme name → (MFM stem → PNG bytes).
     /// Only stems that have a texture for this scheme are included.
     pub camo_schemes: Vec<(String, HashMap<String, Vec<u8>>)>,
-    /// Indices into `camo_schemes` for tiled camos (use TEXCOORD_1 instead of TEXCOORD_0).
-    pub tiled_scheme_indices: HashSet<usize>,
+    /// UV scale/offset for tiled camo schemes. Key = `(scheme_index, mfm_stem)`.
+    /// Only present for tiled camos; non-tiled camos use default UVs.
+    pub tiled_uv_transforms: HashMap<(usize, String), [f32; 4]>,
 }
 
 impl TextureSet {
@@ -476,7 +458,7 @@ impl TextureSet {
         Self {
             base: HashMap::new(),
             camo_schemes: Vec::new(),
-            tiled_scheme_indices: HashSet::new(),
+            tiled_uv_transforms: HashMap::new(),
         }
     }
 }
@@ -506,15 +488,15 @@ impl MaterialCache {
 /// Embed a PNG image in the glTF binary buffer and create a textured material.
 /// Returns the material index.
 ///
-/// `tex_coord` selects which UV channel the texture samples from:
-/// 0 = TEXCOORD_0 (default UV), 1 = TEXCOORD_1 (tiling UV for tiled camos).
+/// `uv_transform` is an optional `[scale_x, scale_y, offset_x, offset_y]` applied
+/// via `KHR_texture_transform` for tiled camouflage textures.
 fn create_textured_material(
     root: &mut json::Root,
     bin_data: &mut Vec<u8>,
     png_bytes: &[u8],
     material_name: &str,
     image_name: Option<String>,
-    tex_coord: u32,
+    uv_transform: Option<[f32; 4]>,
 ) -> json::Index<json::Material> {
     let byte_offset = bin_data.len();
     bin_data.extend_from_slice(png_bytes);
@@ -559,10 +541,21 @@ fn create_textured_material(
         extras: Default::default(),
     });
 
+    let tex_transform_ext = uv_transform.map(|t| json::extensions::texture::Info {
+        texture_transform: Some(json::extensions::texture::TextureTransform {
+            scale: json::extensions::texture::TextureTransformScale(t[0..2].try_into().unwrap()),
+            offset: json::extensions::texture::TextureTransformOffset(t[2..4].try_into().unwrap()),
+            rotation: Default::default(),
+            tex_coord: Some(0),
+            extras: Default::default(),
+        }),
+        ..Default::default()
+    });
+
     let texture_info = json::texture::Info {
         index: texture,
-        tex_coord,
-        extensions: Default::default(),
+        tex_coord: 0,
+        extensions: tex_transform_ext,
         extras: Default::default(),
     };
 
@@ -724,47 +717,6 @@ fn add_primitive_to_root(
         None
     };
 
-    // --- UV2 (TexCoord1) for tiled camo ---
-    let uv2_accessor = if !prim.uvs2.is_empty() {
-        let byte_offset = bin_data.len();
-        for uv in &prim.uvs2 {
-            bin_data.extend_from_slice(&uv[0].to_le_bytes());
-            bin_data.extend_from_slice(&uv[1].to_le_bytes());
-        }
-        pad_to_4(bin_data);
-        let byte_length = bin_data.len() - byte_offset;
-
-        let bv = root.push(json::buffer::View {
-            buffer: json::Index::new(0),
-            byte_length: USize64::from(byte_length),
-            byte_offset: Some(USize64::from(byte_offset)),
-            byte_stride: None,
-            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
-            name: None,
-            extensions: Default::default(),
-            extras: Default::default(),
-        });
-
-        Some(root.push(json::Accessor {
-            buffer_view: Some(bv),
-            byte_offset: Some(USize64(0)),
-            count: USize64::from(prim.uvs2.len()),
-            component_type: Valid(json::accessor::GenericComponentType(
-                json::accessor::ComponentType::F32,
-            )),
-            type_: Valid(json::accessor::Type::Vec2),
-            min: None,
-            max: None,
-            name: None,
-            normalized: false,
-            sparse: None,
-            extensions: Default::default(),
-            extras: Default::default(),
-        }))
-    } else {
-        None
-    };
-
     // --- Indices ---
     let indices_accessor = if !prim.indices.is_empty() {
         let byte_offset = bin_data.len();
@@ -815,9 +767,6 @@ fn add_primitive_to_root(
     if let Some(uv) = uv_accessor {
         attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), uv);
     }
-    if let Some(uv2) = uv2_accessor {
-        attributes.insert(Valid(json::mesh::Semantic::TexCoords(1)), uv2);
-    }
 
     // Determine cache key: prefer MFM stem, fall back to material name.
     let cache_key = prim
@@ -838,7 +787,7 @@ fn add_primitive_to_root(
                 png_bytes,
                 &prim.material_name,
                 prim.mfm_stem.clone(),
-                0,
+                None,
             )
         } else {
             create_untextured_material(root, &prim.material_name)
@@ -850,24 +799,21 @@ fn add_primitive_to_root(
             .iter()
             .enumerate()
             .map(|(scheme_idx, (scheme_name, scheme_textures))| {
-                let tex_coord = if texture_set.tiled_scheme_indices.contains(&scheme_idx) {
-                    1
-                } else {
-                    0
-                };
-                prim.mfm_stem
-                    .as_ref()
-                    .and_then(|stem| scheme_textures.get(stem))
-                    .map(|png_bytes| {
-                        create_textured_material(
-                            root,
-                            bin_data,
-                            png_bytes,
-                            &format!("{} [{}]", prim.material_name, scheme_name),
-                            prim.mfm_stem.as_ref().map(|s| format!("{s}_{scheme_name}")),
-                            tex_coord,
-                        )
-                    })
+                prim.mfm_stem.as_ref().and_then(|stem| {
+                    let png_bytes = scheme_textures.get(stem)?;
+                    let uv_xform = texture_set
+                        .tiled_uv_transforms
+                        .get(&(scheme_idx, stem.clone()))
+                        .copied();
+                    Some(create_textured_material(
+                        root,
+                        bin_data,
+                        png_bytes,
+                        &format!("{} [{}]", prim.material_name, scheme_name),
+                        Some(format!("{stem}_{scheme_name}")),
+                        uv_xform,
+                    ))
+                })
             })
             .collect();
 
@@ -939,6 +885,11 @@ fn add_variants_extension(root: &mut json::Root, texture_set: &TextureSet) {
 
     root.extensions_used
         .push("KHR_materials_variants".to_string());
+
+    if !texture_set.tiled_uv_transforms.is_empty() {
+        root.extensions_used
+            .push("KHR_texture_transform".to_string());
+    }
 }
 
 fn pad_to_4(data: &mut Vec<u8>) {
