@@ -116,7 +116,8 @@ impl ShipAssets {
             .context("Could not find content/assets.bin in VFS")?
             .read_to_end(&mut assets_bin_bytes)?;
 
-        let metadata = Arc::new(GameMetadataProvider::from_vfs(vfs).context("Failed to load GameParams")?);
+        let metadata =
+            Arc::new(GameMetadataProvider::from_vfs(vfs).context("Failed to load GameParams")?);
 
         let camo_db = CamouflageDb::load(vfs);
 
@@ -132,7 +133,10 @@ impl ShipAssets {
     ///
     /// This skips the expensive GameParams parse that [`Self::load`] performs,
     /// making it suitable when the caller already has metadata available.
-    pub fn from_vfs_with_metadata(vfs: &VfsPath, metadata: Arc<GameMetadataProvider>) -> Result<Self, Report> {
+    pub fn from_vfs_with_metadata(
+        vfs: &VfsPath,
+        metadata: Arc<GameMetadataProvider>,
+    ) -> Result<Self, Report> {
         let mut assets_bin_bytes = Vec::new();
         vfs.join("content/assets.bin")
             .context("VFS path error")?
@@ -887,7 +891,6 @@ impl ShipAssets {
             mounts.push(ResolvedMount {
                 hp_name: mi.hp_name().to_string(),
                 turret_model_index: model_idx,
-                visual_transform: transform.map(apply_y180_rotation),
                 transform,
                 mount_armor: mi.mount_armor().cloned(),
             });
@@ -1177,7 +1180,7 @@ impl ShipModelContext {
             let mut meshes =
                 gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
             for mesh in &mut meshes {
-                mesh.transform = mount.visual_transform;
+                mesh.transform = mount.transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
             }
             result.extend(meshes);
@@ -1275,7 +1278,7 @@ impl ShipModelContext {
                 name: format!("{} ({})", mount.hp_name, turret_data.name),
                 visual: &turret_data.visual,
                 geometry: turret_geom,
-                transform: mount.visual_transform,
+                transform: mount.transform,
                 group: mount_group(&mount.hp_name),
             });
         }
@@ -1443,12 +1446,8 @@ struct OwnedSubModel {
 struct ResolvedMount {
     hp_name: String,
     turret_model_index: usize,
-    /// Raw hardpoint transform (no rotation correction). Used for armor meshes
-    /// whose vertices are already in the correct coordinate space.
+    /// Hardpoint transform (world-space placement from the hull visual's node tree).
     transform: Option<[f32; 16]>,
-    /// Hardpoint transform with 180° Y rotation applied. Used for visual hull
-    /// meshes that need BigWorld → glTF coordinate conversion.
-    visual_transform: Option<[f32; 16]>,
     /// Per-mount armor map for turret shell surfaces (from `A_Artillery.HP_XXX.armor`).
     mount_armor: Option<crate::game_params::types::ArmorMap>,
 }
@@ -1592,28 +1591,6 @@ fn mount_group(hp_name: &str) -> &'static str {
     } else {
         "Other"
     }
-}
-
-/// Apply 180° Y rotation to a column-major 4×4 transform matrix.
-///
-/// Turret visual meshes are authored with barrels pointing +Z (BigWorld forward).
-/// In glTF's right-handed coordinate system +Z points backward, so we
-/// post-multiply by Ry(180°) which negates columns 0 and 2.
-///
-/// This is only applied to visual mesh transforms, NOT armor mesh transforms
-/// (armor vertices are already in the correct coordinate space).
-fn apply_y180_rotation(mut m: [f32; 16]) -> [f32; 16] {
-    // Negate column 0 (indices 0..3)
-    m[0] = -m[0];
-    m[1] = -m[1];
-    m[2] = -m[2];
-    m[3] = -m[3];
-    // Negate column 2 (indices 8..11)
-    m[8] = -m[8];
-    m[9] = -m[9];
-    m[10] = -m[10];
-    m[11] = -m[11];
-    m
 }
 
 // ---------------------------------------------------------------------------
