@@ -219,7 +219,28 @@ impl ShipAssets {
             });
         }
 
-        // Strategy 2: fuzzy display name match via GameParams.
+        // Strategy 2: exact param index match via GameParams.
+        if let Some(param) = self.metadata.game_param_by_index(name) {
+            if let Some(vehicle) = param.vehicle() {
+                if let Some(model_path) = vehicle.model_path() {
+                    let dir = model_path
+                        .rsplit_once('/')
+                        .map(|(d, _)| d)
+                        .unwrap_or(model_path);
+                    let model_dir = dir.rsplit('/').next().unwrap_or(dir);
+                    return Ok(ShipInfo {
+                        model_dir: model_dir.to_string(),
+                        display_name: self
+                            .metadata
+                            .localized_name_from_param(&param)
+                            .map(|s: &str| s.to_string()),
+                        param_index: param.index().to_string(),
+                    });
+                }
+            }
+        }
+
+        // Strategy 3: fuzzy display name match via GameParams.
         let normalized_input = unidecode::unidecode(name).to_lowercase();
         let mut matches: Vec<(String, String, String)> = Vec::new();
 
