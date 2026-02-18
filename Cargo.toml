@@ -2,7 +2,7 @@
 name = "wowsunpack"
 description = "Utility for interacting with World of Warships game assets"
 license = "MIT"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 exclude = [".github/", "./format_templates/"]
 repository = "https://github.com/landaire/wowsunpack"
