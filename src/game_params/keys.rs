@@ -59,6 +59,7 @@ pub const MAX_HP: &str = "maxHP";
 pub const REGENERATED_HP_PART: &str = "regeneratedHPPart";
 pub const SPLASH_BOXES: &str = "splashBoxes";
 pub const THICKNESS: &str = "thickness";
+pub const DRAFT: &str = "draft";
 pub const VISIBILITY_FACTOR: &str = "visibilityFactor";
 pub const VISIBILITY_FACTOR_BY_PLANE: &str = "visibilityFactorByPlane";
 pub const MAX_DIST: &str = "maxDist";

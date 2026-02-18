@@ -846,6 +846,9 @@ pub struct HullUpgradeConfig {
     /// Model path from the hull component for this upgrade.
     #[cfg_attr(feature = "serde", serde(default))]
     pub hull_model_path: Option<String>,
+    /// Ship draft (depth below waterline) in meters, from the hull component.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub draft: Option<Meters>,
     /// Mount points grouped by component type key.
     #[cfg_attr(feature = "serde", serde(default))]
     pub mounts_by_type: HashMap<String, ComponentMounts>,
@@ -860,6 +863,11 @@ impl HullUpgradeConfig {
     /// Get the hull model path for this upgrade.
     pub fn hull_model_path(&self) -> Option<&str> {
         self.hull_model_path.as_deref()
+    }
+
+    /// Get the ship draft in meters.
+    pub fn draft(&self) -> Option<Meters> {
+        self.draft
     }
 
     /// Get mount points for a specific component type.

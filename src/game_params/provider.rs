@@ -817,6 +817,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                     read_float(&hull_data, keys::VISIBILITY_FACTOR_BY_PLANE).unwrap_or(0.0),
                 );
                 config.hull_model_path = read_string(&hull_data, keys::MODEL);
+                config.draft = read_float(&hull_data, keys::DRAFT).map(Meters::from);
             }
         }
 
