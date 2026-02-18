@@ -421,8 +421,9 @@ impl ShipAssets {
         let mut mat_camo_schemes = self.discover_mat_camo_schemes(&info.model_dir, ship_idx);
         mat_camo_schemes.extend(self.discover_universal_camo_schemes(ship_idx));
 
-        // Extract armor thickness map from GameParams.
+        // Extract armor thickness map and hit locations from GameParams.
         let armor_map = vehicle.and_then(|v| v.armor().cloned());
+        let hit_locations = vehicle.and_then(|v| v.hit_locations().cloned());
 
         Ok(ShipModelContext {
             vfs: self.vfs.clone(),
@@ -434,6 +435,7 @@ impl ShipAssets {
             options: options.clone(),
             mat_camo_schemes,
             armor_map,
+            hit_locations,
         })
     }
 
@@ -967,6 +969,8 @@ pub struct ShipModelContext {
     mat_camo_schemes: Vec<MatCamoScheme>,
     /// Armor thickness map from GameParams: (model_index << 16 | material_id) → mm.
     armor_map: Option<HashMap<u32, f32>>,
+    /// Hit location zones from GameParams, keyed by zone name (e.g. "Citadel").
+    hit_locations: Option<HashMap<String, crate::game_params::types::HitLocation>>,
 }
 
 impl ShipModelContext {
@@ -1004,6 +1008,26 @@ impl ShipModelContext {
             .collect()
     }
 
+    /// Raw geometry bytes for unique turret/mount models.
+    pub fn turret_geom_bytes(&self) -> Vec<&[u8]> {
+        self.turret_models
+            .iter()
+            .map(|p| p.geom_bytes.as_slice())
+            .collect()
+    }
+
+    /// Names of unique turret/mount models.
+    pub fn turret_model_names(&self) -> Vec<&str> {
+        self.turret_models.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    /// Hit location zones from GameParams (e.g. "Citadel" → HitLocation).
+    pub fn hit_locations(
+        &self,
+    ) -> Option<&HashMap<String, crate::game_params::types::HitLocation>> {
+        self.hit_locations.as_ref()
+    }
+
     /// Raw splash file bytes for hull parts (if available).
     pub fn hull_splash_bytes(&self) -> Option<&[u8]> {
         self.hull_parts
@@ -1019,19 +1043,68 @@ impl ShipModelContext {
     /// 1:1 with triangles, so a viewer can look up material name, thickness,
     /// and zone on hover/click.
     pub fn interactive_armor_meshes(&self) -> Result<Vec<InteractiveArmorMesh>, Report> {
+        // Parse splash boxes for spatial zone fallback.
+        let splash_boxes = self
+            .hull_splash_bytes()
+            .and_then(|b| geometry::parse_splash_file(b).ok());
+        let splash_ref = splash_boxes.as_deref();
+        let hl_ref = self.hit_locations.as_ref();
+
         let mut result = Vec::new();
-        for hull_part in &self.hull_parts {
-            let geom = geometry::parse_geometry(&hull_part.geom_bytes)
-                .context("Failed to parse geometry for interactive armor")?;
-            for (i, armor_model) in geom.armor_models.iter().enumerate() {
-                let model_index = (i + 1) as u32; // 1-based
+        let mut model_index = 1u32; // 1-based, continuous across hull + turret
+
+        // Hull armor (already in world space).
+        for part in &self.hull_parts {
+            let geom = geometry::parse_geometry(&part.geom_bytes)
+                .context("Failed to parse hull geometry for interactive armor")?;
+            for armor_model in &geom.armor_models {
                 result.push(InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
                     model_index,
+                    splash_ref,
+                    hl_ref,
                 ));
+                model_index += 1;
             }
         }
+
+        // Turret armor: assign model indices to unique turret models,
+        // then instance per mount with that mount's transform.
+        let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
+        for part in &self.turret_models {
+            let geom = geometry::parse_geometry(&part.geom_bytes)
+                .context("Failed to parse turret geometry for interactive armor")?;
+            let base = model_index;
+            let count = geom.armor_models.len();
+            for _ in 0..count {
+                model_index += 1;
+            }
+            turret_armor_indices.push((base, count));
+        }
+        for mount in &self.mounts {
+            let (base_idx, count) = turret_armor_indices[mount.turret_model_index];
+            if count == 0 {
+                continue;
+            }
+            let part = &self.turret_models[mount.turret_model_index];
+            let geom = geometry::parse_geometry(&part.geom_bytes)
+                .context("Failed to parse turret geometry for interactive armor")?;
+            for (ai, armor_model) in geom.armor_models.iter().enumerate() {
+                let idx = base_idx + ai as u32;
+                let mut mesh = InteractiveArmorMesh::from_armor_model(
+                    armor_model,
+                    self.armor_map.as_ref(),
+                    idx,
+                    splash_ref,
+                    hl_ref,
+                );
+                mesh.transform = mount.transform;
+                mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
+                result.push(mesh);
+            }
+        }
+
         Ok(result)
     }
 
@@ -1186,24 +1259,58 @@ impl ShipModelContext {
             TextureSet::empty()
         };
 
-        // Collect armor meshes from hull geometries with thickness data.
+        // Collect armor meshes from hull AND turret geometries with thickness data.
         // The armor map from GameParams uses (model_index << 16) | material_id as keys.
-        // model_index is 1-based across all geometry files in the ship.
+        // model_index is 1-based across all geometry files in the ship:
+        // hull armor models first, then turret armor models.
         let armor_map = self.armor_map.as_ref();
+        let splash_boxes = self
+            .hull_splash_bytes()
+            .and_then(|b| geometry::parse_splash_file(b).ok());
+        let splash_ref = splash_boxes.as_deref();
+        let hl_ref = self.hit_locations.as_ref();
         let mut armor_model_index = 1u32; // 1-based
-        let armor_meshes: Vec<gltf_export::ArmorSubModel> = hull_geoms
-            .iter()
-            .flat_map(|geom| {
-                geom.armor_models
-                    .iter()
-                    .flat_map(|am| {
-                        let idx = armor_model_index;
-                        armor_model_index += 1;
-                        gltf_export::armor_sub_models_by_zone(am, armor_map, idx)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let mut armor_meshes: Vec<gltf_export::ArmorSubModel> = Vec::new();
+
+        // Hull armor (already in world space, no transform needed).
+        for geom in &hull_geoms {
+            for am in &geom.armor_models {
+                let idx = armor_model_index;
+                armor_model_index += 1;
+                armor_meshes.extend(gltf_export::armor_sub_models_by_zone(
+                    am, armor_map, idx, splash_ref, hl_ref,
+                ));
+            }
+        }
+
+        // Turret armor: assign model indices to unique turret models first,
+        // then instance per mount with that mount's transform.
+        let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
+        for geom in &turret_geoms {
+            let base = armor_model_index;
+            let count = geom.armor_models.len();
+            for _ in 0..count {
+                armor_model_index += 1;
+            }
+            turret_armor_indices.push((base, count));
+        }
+        for mount in &self.mounts {
+            let (base_idx, count) = turret_armor_indices[mount.turret_model_index];
+            if count == 0 {
+                continue;
+            }
+            let turret_geom = &turret_geoms[mount.turret_model_index];
+            for (ai, am) in turret_geom.armor_models.iter().enumerate() {
+                let idx = base_idx + ai as u32;
+                let mut subs =
+                    gltf_export::armor_sub_models_by_zone(am, armor_map, idx, splash_ref, hl_ref);
+                for s in &mut subs {
+                    s.transform = mount.transform;
+                    s.name = format!("{} [{}]", s.name, mount.hp_name);
+                }
+                armor_meshes.extend(subs);
+            }
+        }
 
         gltf_export::export_ship_glb(
             &sub_models,

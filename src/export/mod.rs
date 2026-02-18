@@ -1,8 +1,8 @@
-#[cfg(feature = "bin")]
+#[cfg(feature = "models")]
 pub mod camouflage;
-#[cfg(feature = "bin")]
+#[cfg(feature = "models")]
 pub mod gltf_export;
-#[cfg(feature = "bin")]
+#[cfg(feature = "models")]
 pub mod ship;
-#[cfg(feature = "bin")]
+#[cfg(feature = "models")]
 pub mod texture;

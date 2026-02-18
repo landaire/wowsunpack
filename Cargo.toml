@@ -72,6 +72,15 @@ rkyv = ["dep:rkyv"]
 json = ["dep:serde_json", "serde"]
 vfs = ["arc", "dep:vfs", "dep:oval"]
 async_vfs = ["vfs/async-vfs", "arc", "vfs", "dep:futures", "dep:async-std", "dep:async-trait"]
+models = [
+    "dep:gltf-json",
+    "dep:gltf",
+    "dep:half",
+    "dep:image_dds",
+    "dep:image",
+    "dep:unidecode",
+    "vfs",
+]
 bin = [
     "dep:clap",
     "dep:csv",
@@ -80,12 +89,7 @@ bin = [
     "dep:regex",
     "dep:indicatif",
     "dep:thread_local",
-    "dep:gltf-json",
-    "dep:gltf",
-    "dep:half",
-    "dep:image_dds",
-    "dep:image",
-    "dep:unidecode",
+    "models",
     "arc",
     "json",
     "vfs",

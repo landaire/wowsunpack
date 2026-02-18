@@ -67,11 +67,19 @@ struct Args {
 enum Commands {
     /// List files in a directory
     List {
+        /// Only show files from assets.bin (not idx/pkg)
+        #[clap(long)]
+        assets: bool,
+
         /// Directory name to list
         dir: Option<String>,
     },
     /// Extract files to an output directory
     Extract {
+        /// Only extract files from assets.bin (not idx/pkg)
+        #[clap(long)]
+        assets: bool,
+
         /// Flatten the file structure when writing files. For example, if the
         /// given output directory is `res` and the target file is `content/GameParams.data`,
         /// the file will normally be written to `res/content/GameParams.data`.
@@ -469,6 +477,7 @@ fn run() -> Result<(), Report> {
 
     match args.command {
         Commands::Extract {
+            assets,
             flatten,
             files,
             out_dir,
@@ -489,6 +498,10 @@ fn run() -> Result<(), Report> {
             let matching: Vec<(&str, &VfsEntry)> = file_tree
                 .iter()
                 .filter(|(path, entry)| {
+                    // When --assets is set, only include files from assets.bin.
+                    if assets && !assets_bin_paths.contains(path.as_str()) {
+                        return false;
+                    }
                     let path_str = path.as_str();
                     let mut matches = false;
                     for glob in &globs {
@@ -718,7 +731,7 @@ fn run() -> Result<(), Report> {
 
             println!("GameParams written to {out_file:?}");
         }
-        Commands::List { dir } => {
+        Commands::List { assets, dir } => {
             for (path, entry) in &file_tree {
                 let matches = dir
                     .as_ref()
@@ -729,6 +742,9 @@ fn run() -> Result<(), Report> {
                 }
 
                 let from_assets_bin = assets_bin_paths.contains(path.as_str());
+                if assets && !from_assets_bin {
+                    continue;
+                }
                 match entry {
                     VfsEntry::File { file_info, .. } => {
                         let tag = if from_assets_bin { "A" } else { "F" };
@@ -1690,18 +1706,149 @@ fn run_armor(
         }
     }
 
-    // Zone classification by collision material ID.
+    // Turret armor models.
+    let turret_names = ctx.turret_model_names();
+    for (turret_name, geom_bytes) in turret_names.iter().zip(ctx.turret_geom_bytes()) {
+        let geom = geometry::parse_geometry(geom_bytes)?;
+
+        if geom.armor_models.is_empty() {
+            continue;
+        }
+
+        println!("\nTurret model: {turret_name}");
+        for am in &geom.armor_models {
+            let mi = armor_model_index;
+            armor_model_index += 1;
+            total_tris += am.triangles.len();
+
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for tri in &am.triangles {
+                for v in &tri.vertices {
+                    for i in 0..3 {
+                        bmin[i] = bmin[i].min(v[i]);
+                        bmax[i] = bmax[i].max(v[i]);
+                    }
+                }
+            }
+
+            println!("  Armor model [{}]: \"{}\"", mi, am.name);
+            println!("    Triangles: {}", am.triangles.len());
+            println!(
+                "    Bounding box: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
+                bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]
+            );
+
+            if let Some(ref amap) = armor_map {
+                let entries: Vec<(u32, f32)> = amap
+                    .iter()
+                    .filter(|&(&k, _)| (k >> 16) == mi)
+                    .map(|(&k, &v)| (k & 0xFFFF, v))
+                    .collect();
+
+                if entries.is_empty() {
+                    println!("    GameParams: no thickness entries for model_index={mi}");
+                } else {
+                    let nonzero: Vec<&(u32, f32)> =
+                        entries.iter().filter(|(_, v)| *v > 0.0).collect();
+                    let thicknesses: Vec<f32> = nonzero.iter().map(|(_, v)| *v).collect();
+                    let min_t = thicknesses.iter().cloned().reduce(f32::min).unwrap_or(0.0);
+                    let max_t = thicknesses.iter().cloned().reduce(f32::max).unwrap_or(0.0);
+
+                    println!(
+                        "    GameParams: {} entries ({} with thickness > 0), range: {:.0}..{:.0} mm",
+                        entries.len(),
+                        nonzero.len(),
+                        min_t,
+                        max_t
+                    );
+
+                    let mut sorted = entries.clone();
+                    sorted.sort_by_key(|(mid, _)| *mid);
+                    for (mid, thickness) in &sorted {
+                        if *thickness > 0.0 {
+                            let mat_name = collision_material_name(*mid as u8);
+                            println!(
+                                "      mat {:>3} ({:<20}) = {:>6.1} mm",
+                                mid, mat_name, thickness
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Zone classification by collision material ID (with splash-box fallback).
     {
-        use wowsunpack::export::gltf_export::zone_from_material_name;
+        use wowsunpack::export::gltf_export::{zone_from_material_name, zone_from_splash_boxes};
         println!("\nZone classification (by collision material):");
-        let mut zone_counts: std::collections::BTreeMap<&str, usize> =
+
+        let splash_bytes = ctx.hull_splash_bytes();
+        let splash_boxes = splash_bytes.and_then(|b| geometry::parse_splash_file(b).ok());
+        let splash_ref = splash_boxes.as_deref();
+        let hl_ref = ctx.hit_locations();
+
+        if let Some(sbs) = &splash_boxes {
+            println!("  Splash boxes ({}):", sbs.len());
+            for sb in sbs {
+                println!(
+                    "    {:30} ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
+                    sb.name, sb.min[0], sb.min[1], sb.min[2], sb.max[0], sb.max[1], sb.max[2]
+                );
+            }
+        } else {
+            println!(
+                "  No splash boxes found (splash_bytes={})",
+                splash_bytes.is_some()
+            );
+        }
+        if let Some(hls) = hl_ref {
+            println!("  Hit locations ({}):", hls.len());
+            for (name, hl) in hls {
+                println!("    {:20} splash_boxes={:?}", name, hl.splash_boxes());
+            }
+        } else {
+            println!("  No hit locations found");
+        }
+
+        let mut zone_counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        for geom_bytes in ctx.hull_geom_bytes() {
+        let all_geom_bytes: Vec<&[u8]> = ctx
+            .hull_geom_bytes()
+            .into_iter()
+            .chain(ctx.turret_geom_bytes())
+            .collect();
+        for geom_bytes in all_geom_bytes {
             if let Ok(geom) = geometry::parse_geometry(geom_bytes) {
                 for am in &geom.armor_models {
                     for tri in &am.triangles {
                         let mat_name = collision_material_name(tri.material_id);
-                        let zone = zone_from_material_name(mat_name);
+                        let mut zone = zone_from_material_name(mat_name).to_string();
+                        if zone == "Other" {
+                            if let (Some(sbs), Some(hls)) = (splash_ref, hl_ref) {
+                                let centroid = [
+                                    (tri.vertices[0][0] + tri.vertices[1][0] + tri.vertices[2][0])
+                                        / 3.0,
+                                    (tri.vertices[0][1] + tri.vertices[1][1] + tri.vertices[2][1])
+                                        / 3.0,
+                                    (tri.vertices[0][2] + tri.vertices[1][2] + tri.vertices[2][2])
+                                        / 3.0,
+                                ];
+                                if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
+                                    zone = z.to_string();
+                                } else {
+                                    eprintln!(
+                                        "    [DEBUG] Other: mat={} ({}) centroid=({:.2}, {:.2}, {:.2})",
+                                        tri.material_id,
+                                        mat_name,
+                                        centroid[0],
+                                        centroid[1],
+                                        centroid[2]
+                                    );
+                                }
+                            }
+                        }
                         *zone_counts.entry(zone).or_default() += 1;
                     }
                 }
@@ -1719,7 +1866,7 @@ fn run_armor(
         let extra: Vec<u32> = model_indices.difference(&armor_indices).copied().collect();
         if !extra.is_empty() {
             println!(
-                "\nGameParams armor entries for non-armor model indices: {:?}",
+                "\nGameParams armor entries with no matching geometry (phantom armor): {:?}",
                 extra
             );
             for mi in &extra {
@@ -1735,6 +1882,15 @@ fn run_armor(
                     entries.len(),
                     nonzero
                 );
+                for (mat_id, thickness) in &entries {
+                    if *thickness > 0.0 {
+                        let mat_name = collision_material_name(*mat_id as u8);
+                        println!(
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm",
+                            mat_id, mat_name, thickness
+                        );
+                    }
+                }
             }
         }
 

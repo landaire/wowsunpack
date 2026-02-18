@@ -246,7 +246,6 @@ pub fn unpack_normal(packed: u32) -> [f32; 3] {
 ///
 /// The packed format is 2 x float16 (IEEE 754 half-precision), stored as
 /// `[u_half, v_half]` in little-endian order.
-#[cfg(feature = "bin")]
 pub fn unpack_uv(packed: u32) -> [f32; 2] {
     let bytes = packed.to_le_bytes();
     let u_bits = u16::from_le_bytes([bytes[0], bytes[1]]);

@@ -1116,6 +1116,10 @@ pub struct ArmorTriangleInfo {
     pub zone: String,
     /// Armor thickness in millimeters from GameParams (0.0 if unassigned).
     pub thickness_mm: f32,
+    /// `true` when the triangle's material ID was unknown and its zone was
+    /// determined via splash-box spatial lookup rather than the material table.
+    /// These plates are not shown in the game's armor viewer.
+    pub hidden: bool,
     /// RGBA color [0.0–1.0] encoding the thickness via the game's color scale.
     pub color: [f32; 4],
 }
@@ -1143,6 +1147,11 @@ pub struct InteractiveArmorMesh {
     /// Per-triangle metadata. `triangle_info[i]` corresponds to
     /// `indices[i*3..i*3+3]`. Length = `indices.len() / 3`.
     pub triangle_info: Vec<ArmorTriangleInfo>,
+    /// Optional world-space transform (column-major 4×4).
+    /// Used for turret armor instances positioned at mount points.
+    /// Hull armor meshes have `None` (already in world space).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub transform: Option<[f32; 16]>,
 }
 
 impl InteractiveArmorMesh {
@@ -1155,6 +1164,8 @@ impl InteractiveArmorMesh {
         armor: &crate::models::geometry::ArmorModel,
         armor_map: Option<&std::collections::HashMap<u32, f32>>,
         model_index: u32,
+        splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
+        hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
     ) -> Self {
         let tri_count = armor.triangles.len();
         let vert_count = tri_count * 3;
@@ -1169,7 +1180,19 @@ impl InteractiveArmorMesh {
             let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
             let color = thickness_to_color(thickness_mm);
             let mat_name = collision_material_name(tri.material_id);
-            let zone = zone_from_material_name(mat_name);
+            let mut zone = zone_from_material_name(mat_name).to_string();
+            let mut hidden = false;
+
+            // Splash-box fallback for unknown materials — these are hidden plates.
+            if zone == "Other" {
+                if let (Some(sbs), Some(hls)) = (splash_boxes, hit_locations) {
+                    let centroid = triangle_centroid(&tri.vertices);
+                    if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
+                        zone = z.to_string();
+                        hidden = true;
+                    }
+                }
+            }
 
             for v in 0..3 {
                 positions.push(tri.vertices[v]);
@@ -1181,8 +1204,9 @@ impl InteractiveArmorMesh {
             triangle_info.push(ArmorTriangleInfo {
                 material_id: tri.material_id,
                 material_name: mat_name.to_string(),
-                zone: zone.to_string(),
+                zone,
                 thickness_mm,
+                hidden,
                 color,
             });
         }
@@ -1194,6 +1218,7 @@ impl InteractiveArmorMesh {
             indices,
             colors,
             triangle_info,
+            transform: None,
         }
     }
 }
@@ -1207,6 +1232,9 @@ pub struct ArmorSubModel {
     /// Per-vertex RGBA color encoding armor thickness.
     /// All 3 vertices of a triangle share the same color.
     pub colors: Vec<[f32; 4]>,
+    /// Optional world-space transform (column-major 4×4).
+    /// Used for turret armor instances positioned at mount points.
+    pub transform: Option<[f32; 16]>,
 }
 
 impl ArmorSubModel {
@@ -1248,6 +1276,7 @@ impl ArmorSubModel {
             normals,
             indices,
             colors,
+            transform: None,
         }
     }
 }
@@ -1348,13 +1377,14 @@ pub fn armor_color_legend() -> Vec<ArmorLegendEntry> {
 /// `Tur1GkBar`, `RudderAft`, etc. The prefix before the first `_` determines
 /// the zone, with special handling for turret and rudder names.
 pub fn zone_from_material_name(mat_name: &str) -> &'static str {
+    // Collision material prefixes.
     if mat_name.starts_with("Bow") {
         return "Bow";
     }
-    if mat_name.starts_with("St_") {
+    if mat_name.starts_with("St_") || mat_name == "St" {
         return "Stern";
     }
-    if mat_name.starts_with("Cit") {
+    if mat_name.starts_with("Cit") || mat_name.starts_with("Ammo") {
         return "Citadel";
     }
     if mat_name.starts_with("Cas") {
@@ -1366,17 +1396,88 @@ pub fn zone_from_material_name(mat_name: &str) -> &'static str {
     if mat_name.starts_with("Tur") {
         return "Turret";
     }
-    if mat_name.starts_with("Rudder") {
+    if mat_name.starts_with("Rudder") || mat_name == "SG" {
         return "SteeringGear";
     }
     if mat_name.starts_with("Bulge") {
         return "TorpedoProtection";
     }
     match mat_name {
-        "Deck" | "ConstrSide" => "Hull",
+        "Deck" | "ConstrSide" | "Hull" => "Hull",
         "common" | "zero" => "Default",
         _ => "Other",
     }
+}
+
+/// Classify an armor triangle into a hit-location zone using splash-box AABBs.
+///
+/// For each splash box, tests whether `centroid` lies inside the AABB.
+/// If a match is found, looks up which `HitLocation` lists that box name
+/// and returns the normalized zone name. The hit location key from GameParams
+/// (e.g. "Cit", "Cas", "SS") is passed through `zone_from_material_name` to
+/// produce standard zone names (e.g. "Citadel", "Casemate", "Superstructure").
+pub fn zone_from_splash_boxes(
+    centroid: [f32; 3],
+    splash_boxes: &[crate::models::geometry::SplashBox],
+    hit_locations: &HashMap<String, crate::game_params::types::HitLocation>,
+) -> Option<&'static str> {
+    // Armor triangles on splash-box boundaries (bulkheads, hull transitions) have
+    // centroids exactly on the AABB face. Use a small tolerance so they still match.
+    const EPS: f32 = 0.15;
+    for sb in splash_boxes {
+        let inside =
+            (0..3).all(|i| centroid[i] >= sb.min[i] - EPS && centroid[i] <= sb.max[i] + EPS);
+        if !inside {
+            continue;
+        }
+        // Found a splash box containing this point — find which hit location owns it.
+        for (zone_key, hl) in hit_locations {
+            if hl.splash_boxes().iter().any(|name| name == &sb.name) {
+                let normalized = zone_from_material_name(zone_key);
+                if normalized != "Other" {
+                    return Some(normalized);
+                }
+                // If the key itself doesn't match prefix rules, try hl_type.
+                let from_type = zone_from_material_name(hl.hl_type());
+                if from_type != "Other" {
+                    return Some(from_type);
+                }
+                return Some(normalized);
+            }
+        }
+        // No hit location claims this box — infer zone from the splash box name.
+        // Names follow the pattern "CM_SB_<zone>_<rest>".
+        if let Some(zone) = zone_from_splash_box_name(&sb.name) {
+            return Some(zone);
+        }
+    }
+    None
+}
+
+/// Infer a zone from a splash box name like `CM_SB_bow_1`, `CM_SB_gk_2_1`, etc.
+fn zone_from_splash_box_name(name: &str) -> Option<&'static str> {
+    let suffix = name.strip_prefix("CM_SB_")?;
+    let tag = suffix.split('_').next()?;
+    match tag {
+        "bow" => Some("Bow"),
+        "stern" => Some("Stern"),
+        "cit" => Some("Citadel"),
+        "cas" => Some("Casemate"),
+        "ss" => Some("Superstructure"),
+        "ruder" => Some("SteeringGear"),
+        "gk" => Some("Turret"),
+        "engine" => Some("Citadel"),
+        _ => None,
+    }
+}
+
+/// Compute the centroid of a triangle from its three vertices.
+fn triangle_centroid(verts: &[[f32; 3]; 3]) -> [f32; 3] {
+    [
+        (verts[0][0] + verts[1][0] + verts[2][0]) / 3.0,
+        (verts[0][1] + verts[1][1] + verts[2][1]) / 3.0,
+        (verts[0][2] + verts[1][2] + verts[2][2]) / 3.0,
+    ]
 }
 
 /// The built-in collision material name table.
@@ -1510,6 +1611,8 @@ pub fn armor_sub_models_by_zone(
     armor: &crate::models::geometry::ArmorModel,
     armor_map: Option<&std::collections::HashMap<u32, f32>>,
     model_index: u32,
+    splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
+    hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
 ) -> Vec<ArmorSubModel> {
     // Group triangles by zone name.
     let mut zone_tris: std::collections::BTreeMap<
@@ -1522,14 +1625,21 @@ pub fn armor_sub_models_by_zone(
         let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
 
         let mat_name = collision_material_name(tri.material_id);
-        let zone_name = zone_from_material_name(mat_name);
+        let mut zone_name = zone_from_material_name(mat_name).to_string();
+
+        // Splash-box fallback for unknown materials.
+        if zone_name == "Other" {
+            if let (Some(sbs), Some(hls)) = (splash_boxes, hit_locations) {
+                let centroid = triangle_centroid(&tri.vertices);
+                if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
+                    zone_name = z.to_string();
+                }
+            }
+        }
 
         let color = thickness_to_color(thickness_mm);
 
-        zone_tris
-            .entry(zone_name.to_string())
-            .or_default()
-            .push((tri, color));
+        zone_tris.entry(zone_name).or_default().push((tri, color));
     }
 
     // Build one ArmorSubModel per zone.
@@ -1557,6 +1667,7 @@ pub fn armor_sub_models_by_zone(
                 normals,
                 indices,
                 colors,
+                transform: None,
             }
         })
         .collect()
@@ -1671,6 +1782,7 @@ pub fn export_ship_glb(
         let node = root.push(json::Node {
             mesh: Some(mesh),
             name: Some(armor.name.clone()),
+            matrix: armor.transform,
             ..Default::default()
         });
 
