@@ -194,7 +194,7 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
     let stem = mfm_filename.strip_suffix(".mfm")?;
 
     for base in texture_base_names(stem) {
-        let candidates = [format!("{dir}/{base}_a.dd0"), format!("{dir}/{base}_a.dds")];
+        let candidates = [format!("{dir}/{base}_a.dds"), format!("{dir}/{base}_a.dd0")];
         for path in &candidates {
             if let Ok(vfs_path) = vfs.join(path) {
                 if let Ok(mut file) = vfs_path.open_file() {

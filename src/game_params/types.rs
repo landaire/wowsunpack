@@ -11,6 +11,14 @@ use super::provider::GameMetadataProvider;
 /// Conversion factor: 1 BigWorld unit = 30 meters.
 const BW_TO_METERS: f32 = 30.0;
 
+/// Per-material armor thickness map.
+///
+/// Key = collision material ID (0–254).  Value = per-layer thicknesses in mm.
+/// The game registers the same geometry multiple times with different
+/// `model_index` values; each registration represents a separate armor layer.
+/// Layers are ordered by ascending model_index.
+pub type ArmorMap = HashMap<u32, Vec<f32>>;
+
 /// Distance in meters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -720,6 +728,13 @@ pub struct MountPoint {
     hp_name: String,
     /// Model path, e.g. "content/gameplay/.../JGM178.model".
     model_path: String,
+    /// Per-mount armor thickness map from GameParams (e.g. `A_Artillery.HP_XXX.armor`).
+    /// See [`ArmorMap`] for key/value semantics.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    mount_armor: Option<ArmorMap>,
 }
 
 impl MountPoint {
@@ -727,6 +742,15 @@ impl MountPoint {
         Self {
             hp_name,
             model_path,
+            mount_armor: None,
+        }
+    }
+
+    pub fn with_armor(hp_name: String, model_path: String, mount_armor: Option<ArmorMap>) -> Self {
+        Self {
+            hp_name,
+            model_path,
+            mount_armor,
         }
     }
 
@@ -736,6 +760,10 @@ impl MountPoint {
 
     pub fn model_path(&self) -> &str {
         &self.model_path
+    }
+
+    pub fn mount_armor(&self) -> Option<&ArmorMap> {
+        self.mount_armor.as_ref()
     }
 }
 
@@ -947,7 +975,7 @@ pub struct Vehicle {
     #[cfg_attr(feature = "serde", serde(default))]
     model_path: Option<String>,
     #[cfg_attr(feature = "serde", serde(default))]
-    armor: Option<HashMap<u32, f32>>,
+    armor: Option<ArmorMap>,
     #[cfg_attr(feature = "serde", serde(default))]
     hit_locations: Option<HashMap<String, HitLocation>>,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -979,7 +1007,7 @@ impl Vehicle {
         self.model_path.as_deref()
     }
 
-    pub fn armor(&self) -> Option<&HashMap<u32, f32>> {
+    pub fn armor(&self) -> Option<&ArmorMap> {
         self.armor.as_ref()
     }
 

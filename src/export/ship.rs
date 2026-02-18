@@ -26,7 +26,7 @@ use vfs::VfsPath;
 use crate::data::ResourceLoader;
 use crate::game_params::keys;
 use crate::game_params::provider::GameMetadataProvider;
-use crate::game_params::types::{GameParamProvider, MountPoint, Vehicle};
+use crate::game_params::types::{ArmorMap, GameParamProvider, MountPoint, Vehicle};
 use crate::models::assets_bin::{self, PrototypeDatabase};
 use crate::models::geometry;
 use crate::models::visual::{self, VisualPrototype};
@@ -839,6 +839,7 @@ impl ShipAssets {
                 turret_model_index: model_idx,
                 visual_transform: transform.map(apply_y180_rotation),
                 transform,
+                mount_armor: mi.mount_armor().cloned(),
             });
         }
 
@@ -965,8 +966,8 @@ pub struct ShipModelContext {
     info: ShipInfo,
     options: ShipExportOptions,
     mat_camo_schemes: Vec<MatCamoScheme>,
-    /// Armor thickness map from GameParams: (model_index << 16 | material_id) → mm.
-    armor_map: Option<HashMap<u32, f32>>,
+    /// Armor thickness map from GameParams.  See [`ArmorMap`].
+    armor_map: Option<ArmorMap>,
     /// Hit location zones from GameParams, keyed by zone name (e.g. "Citadel").
     hit_locations: Option<HashMap<String, crate::game_params::types::HitLocation>>,
 }
@@ -992,9 +993,8 @@ impl ShipModelContext {
         self.turret_models.len()
     }
 
-    /// Armor thickness map from GameParams.
-    /// Keys: `(model_index << 16) | material_id`, values: thickness in mm.
-    pub fn armor_map(&self) -> Option<&HashMap<u32, f32>> {
+    /// Armor thickness map from GameParams.  See [`ArmorMap`].
+    pub fn armor_map(&self) -> Option<&ArmorMap> {
         self.armor_map.as_ref()
     }
 
@@ -1053,38 +1053,39 @@ impl ShipModelContext {
                     armor_model,
                     self.armor_map.as_ref(),
                     model_index,
+                    None,
                 ));
                 model_index += 1;
             }
         }
 
-        // Turret armor: assign model indices to unique turret models,
+        // Turret armor: pre-parse geometries to count armor models,
         // then instance per mount with that mount's transform.
-        let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
-        for part in &self.turret_models {
-            let geom = geometry::parse_geometry(&part.geom_bytes)
-                .context("Failed to parse turret geometry for interactive armor")?;
-            let base = model_index;
-            let count = geom.armor_models.len();
-            for _ in 0..count {
-                model_index += 1;
-            }
-            turret_armor_indices.push((base, count));
+        let turret_geoms: Vec<_> = self
+            .turret_models
+            .iter()
+            .map(|part| {
+                geometry::parse_geometry(&part.geom_bytes)
+                    .context("Failed to parse turret geometry for interactive armor")
+            })
+            .collect::<Result<_, _>>()?;
+
+        let mut turret_armor_bases: Vec<u32> = Vec::new();
+        for geom in &turret_geoms {
+            turret_armor_bases.push(model_index);
+            model_index += geom.armor_models.len() as u32;
         }
+
         for mount in &self.mounts {
-            let (base_idx, count) = turret_armor_indices[mount.turret_model_index];
-            if count == 0 {
-                continue;
-            }
-            let part = &self.turret_models[mount.turret_model_index];
-            let geom = geometry::parse_geometry(&part.geom_bytes)
-                .context("Failed to parse turret geometry for interactive armor")?;
+            let geom = &turret_geoms[mount.turret_model_index];
+            let base_idx = turret_armor_bases[mount.turret_model_index];
             for (ai, armor_model) in geom.armor_models.iter().enumerate() {
                 let idx = base_idx + ai as u32;
                 let mut mesh = InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
                     idx,
+                    mount.mount_armor.as_ref(),
                 );
                 mesh.transform = mount.transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
@@ -1099,7 +1100,10 @@ impl ShipModelContext {
     ///
     /// Returns one [`InteractiveHullMesh`](gltf_export::InteractiveHullMesh) per
     /// render set (hull parts + mounted turrets). LOD 0 is used.
+    /// Base albedo textures are baked into per-vertex colors when available.
     pub fn interactive_hull_meshes(&self) -> Result<Vec<gltf_export::InteractiveHullMesh>, Report> {
+        use std::io::Cursor;
+
         let db = assets_bin::parse_assets_bin(&self.assets_bin_bytes)
             .context("Failed to parse assets.bin for hull meshes")?;
 
@@ -1127,6 +1131,52 @@ impl ShipModelContext {
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
             }
             result.extend(meshes);
+        }
+
+        // Bake base albedo textures into per-vertex colors.
+        // Cache decoded images by MFM path to avoid re-loading the same texture.
+        let mut texture_cache: HashMap<String, Option<image_dds::image::RgbaImage>> =
+            HashMap::new();
+
+        for mesh in &mut result {
+            let mfm_path = match &mesh.mfm_path {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            if mesh.uvs.len() != mesh.positions.len() {
+                continue;
+            }
+
+            let image = texture_cache.entry(mfm_path.clone()).or_insert_with(|| {
+                let dds_bytes = texture::load_base_albedo_bytes(&self.vfs, &mfm_path)?;
+                let dds = image_dds::ddsfile::Dds::read(&mut Cursor::new(&dds_bytes)).ok()?;
+                image_dds::image_from_dds(&dds, 0).ok()
+            });
+
+            if let Some(img) = image {
+                let width = img.width();
+                let height = img.height();
+                if width == 0 || height == 0 {
+                    continue;
+                }
+
+                let mut colors = Vec::with_capacity(mesh.uvs.len());
+                for uv in &mesh.uvs {
+                    // Wrap UVs into [0, 1) range and sample the image.
+                    let u = uv[0].rem_euclid(1.0);
+                    let v = uv[1].rem_euclid(1.0);
+                    let x = ((u * width as f32) as u32).min(width - 1);
+                    let y = ((v * height as f32) as u32).min(height - 1);
+                    let pixel = img.get_pixel(x, y);
+                    colors.push([
+                        pixel[0] as f32 / 255.0,
+                        pixel[1] as f32 / 255.0,
+                        pixel[2] as f32 / 255.0,
+                        1.0, // alpha will be set by the viewer
+                    ]);
+                }
+                mesh.colors = colors;
+            }
         }
 
         Ok(result)
@@ -1284,42 +1334,25 @@ impl ShipModelContext {
         };
 
         // Collect armor meshes from hull AND turret geometries with thickness data.
-        // The armor map from GameParams uses (model_index << 16) | material_id as keys.
-        // model_index is 1-based across all geometry files in the ship:
-        // hull armor models first, then turret armor models.
         let armor_map = self.armor_map.as_ref();
-        let mut armor_model_index = 1u32; // 1-based
         let mut armor_meshes: Vec<gltf_export::ArmorSubModel> = Vec::new();
 
         // Hull armor (already in world space, no transform needed).
         for geom in &hull_geoms {
             for am in &geom.armor_models {
-                let idx = armor_model_index;
-                armor_model_index += 1;
-                armor_meshes.extend(gltf_export::armor_sub_models_by_zone(am, armor_map, idx));
+                armor_meshes.extend(gltf_export::armor_sub_models_by_zone(am, armor_map, None));
             }
         }
 
-        // Turret armor: assign model indices to unique turret models first,
-        // then instance per mount with that mount's transform.
-        let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
-        for geom in &turret_geoms {
-            let base = armor_model_index;
-            let count = geom.armor_models.len();
-            for _ in 0..count {
-                armor_model_index += 1;
-            }
-            turret_armor_indices.push((base, count));
-        }
+        // Turret armor: instance per mount with that mount's transform.
         for mount in &self.mounts {
-            let (base_idx, count) = turret_armor_indices[mount.turret_model_index];
-            if count == 0 {
-                continue;
-            }
             let turret_geom = &turret_geoms[mount.turret_model_index];
-            for (ai, am) in turret_geom.armor_models.iter().enumerate() {
-                let idx = base_idx + ai as u32;
-                let mut subs = gltf_export::armor_sub_models_by_zone(am, armor_map, idx);
+            for am in &turret_geom.armor_models {
+                let mut subs = gltf_export::armor_sub_models_by_zone(
+                    am,
+                    armor_map,
+                    mount.mount_armor.as_ref(),
+                );
                 for s in &mut subs {
                     s.transform = mount.transform;
                     s.name = format!("{} [{}]", s.name, mount.hp_name);
@@ -1366,6 +1399,8 @@ struct ResolvedMount {
     /// Hardpoint transform with 180° Y rotation applied. Used for visual hull
     /// meshes that need BigWorld → glTF coordinate conversion.
     visual_transform: Option<[f32; 16]>,
+    /// Per-mount armor map for turret shell surfaces (from `A_Artillery.HP_XXX.armor`).
+    mount_armor: Option<crate::game_params::types::ArmorMap>,
 }
 
 /// Pre-resolved material-based camouflage scheme (owned data, no lifetimes).

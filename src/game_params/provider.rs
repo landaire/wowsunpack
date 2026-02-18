@@ -616,6 +616,47 @@ fn read_string(dict: &BTreeMap<HashableValue, Value>, key: &str) -> Option<Strin
         .map(|s| s.inner().to_string())
 }
 
+/// Parse a raw GameParams armor dict into an [`ArmorMap`].
+///
+/// Raw keys are `(model_index << 16) | material_id`.  We group by `material_id`
+/// and collect per-layer thicknesses ordered by ascending `model_index`.
+fn parse_armor_dict(dict: &BTreeMap<HashableValue, Value>) -> ArmorMap {
+    use std::collections::BTreeMap;
+
+    // First pass: collect (model_index, material_id) → thickness.
+    let mut by_material: HashMap<u32, BTreeMap<u32, f32>> = HashMap::new();
+    for (k, v) in dict.iter() {
+        let raw_key: u32 = match k
+            .string_ref()
+            .and_then(|s| s.inner().parse().ok())
+            .or_else(|| k.i64_ref().map(|&i| i as u32))
+        {
+            Some(k) => k,
+            None => continue,
+        };
+        let value = match v
+            .f64_ref()
+            .map(|f| *f as f32)
+            .or_else(|| v.i64_ref().map(|i| *i as f32))
+        {
+            Some(v) => v,
+            None => continue,
+        };
+        let model_index = raw_key >> 16;
+        let material_id = raw_key & 0xFFFF;
+        by_material
+            .entry(material_id)
+            .or_default()
+            .insert(model_index, value);
+    }
+
+    // Second pass: flatten BTreeMap values into Vec<f32> (sorted by model_index).
+    by_material
+        .into_iter()
+        .map(|(mat_id, layers)| (mat_id, layers.into_values().collect()))
+        .collect()
+}
+
 /// Extract mount points (HP_* entries with model paths) from a component dict.
 fn extract_mounts(
     ship_data: &BTreeMap<HashableValue, Value>,
@@ -637,8 +678,20 @@ fn extract_mounts(
                 return None;
             }
             let mount_dict = v.dict_ref()?;
-            let model_path = read_string(&mount_dict.inner(), keys::MODEL)?;
-            Some(MountPoint::new(key_str.clone(), model_path))
+            let mount_inner = mount_dict.inner();
+            let model_path = read_string(&mount_inner, keys::MODEL)?;
+
+            // Extract per-mount armor map (turret shell thickness).
+            let mount_armor: Option<ArmorMap> = mount_inner
+                .get(&pk(keys::ARMOR))
+                .and_then(|v| v.dict_ref())
+                .map(|d| parse_armor_dict(&d.inner()));
+
+            Some(MountPoint::with_armor(
+                key_str.clone(),
+                model_path,
+                mount_armor,
+            ))
         })
         .collect()
 }
@@ -919,29 +972,12 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         .as_ref()
         .and_then(|hull_dict| read_string(&hull_dict.inner(), keys::MODEL));
 
-    let armor: Option<HashMap<u32, f32>> = a_hull.as_ref().and_then(|hull_dict| {
+    let armor: Option<ArmorMap> = a_hull.as_ref().and_then(|hull_dict| {
         hull_dict
             .inner()
             .get(&pk(keys::ARMOR))
             .and_then(|v| v.dict_ref())
-            .map(|armor_dict| {
-                armor_dict
-                    .inner()
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        // Keys may be strings ("131121") or integers (131121).
-                        let key: u32 = k
-                            .string_ref()
-                            .and_then(|s| s.inner().parse().ok())
-                            .or_else(|| k.i64_ref().map(|&i| i as u32))?;
-                        let value = v
-                            .f64_ref()
-                            .map(|f| *f as f32)
-                            .or_else(|| v.i64_ref().map(|i| *i as f32))?;
-                        Some((key, value))
-                    })
-                    .collect()
-            })
+            .map(|d| parse_armor_dict(&d.inner()))
     });
 
     // Hit location zones are stored as top-level entries in A_Hull (e.g. Bow, Cit, SS).

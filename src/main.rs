@@ -1626,8 +1626,44 @@ fn run_armor(
 
     use wowsunpack::export::gltf_export::collision_material_name;
 
+    // Helper to print armor layer info for materials found in a geometry.
+    fn print_armor_layers(
+        geom_mat_ids: &std::collections::BTreeSet<u8>,
+        amap: &std::collections::HashMap<u32, Vec<f32>>,
+    ) {
+        let mut matched = 0usize;
+        for &mid in geom_mat_ids {
+            if let Some(layers) = amap.get(&(mid as u32)) {
+                let total: f32 = layers.iter().sum();
+                if total > 0.0 {
+                    matched += 1;
+                    let mat_name = collision_material_name(mid);
+                    if layers.len() == 1 {
+                        println!(
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm",
+                            mid, mat_name, total
+                        );
+                    } else {
+                        let layer_str: Vec<String> =
+                            layers.iter().map(|v| format!("{v:.0}")).collect();
+                        println!(
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm  (layers: [{}])",
+                            mid,
+                            mat_name,
+                            total,
+                            layer_str.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+        if matched == 0 {
+            println!("      (no GameParams thickness entries for these materials)");
+        }
+    }
+
     // Parse geometry for each hull part to inspect armor models.
-    let mut armor_model_index = 1u32;
+    let mut armor_model_count = 0u32;
     let mut total_tris = 0usize;
 
     for (part_name, geom_bytes) in ctx.hull_part_names().iter().zip(ctx.hull_geom_bytes()) {
@@ -1639,14 +1675,15 @@ fn run_armor(
 
         println!("\nHull part: {part_name}");
         for am in &geom.armor_models {
-            let mi = armor_model_index;
-            armor_model_index += 1;
+            armor_model_count += 1;
             total_tris += am.triangles.len();
 
-            // Compute bounding box.
+            // Compute bounding box and collect material IDs.
             let mut bmin = [f32::MAX; 3];
             let mut bmax = [f32::MIN; 3];
+            let mut geom_mat_ids = std::collections::BTreeSet::new();
             for tri in &am.triangles {
+                geom_mat_ids.insert(tri.material_id);
                 for v in &tri.vertices {
                     for i in 0..3 {
                         bmin[i] = bmin[i].min(v[i]);
@@ -1655,51 +1692,20 @@ fn run_armor(
                 }
             }
 
-            println!("  Armor model [{}]: \"{}\"", mi, am.name);
+            println!("  Armor model: \"{}\"", am.name);
             println!("    Triangles: {}", am.triangles.len());
             println!(
                 "    Bounding box: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
                 bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]
             );
+            println!(
+                "    Materials: {:?}",
+                geom_mat_ids.iter().collect::<Vec<_>>()
+            );
 
-            // Show GameParams armor entries for this model index.
             if let Some(ref amap) = armor_map {
-                let entries: Vec<(u32, f32)> = amap
-                    .iter()
-                    .filter(|&(&k, _)| (k >> 16) == mi)
-                    .map(|(&k, &v)| (k & 0xFFFF, v))
-                    .collect();
-
-                if entries.is_empty() {
-                    println!("    GameParams: no thickness entries for model_index={mi}");
-                } else {
-                    let nonzero: Vec<&(u32, f32)> =
-                        entries.iter().filter(|(_, v)| *v > 0.0).collect();
-                    let thicknesses: Vec<f32> = nonzero.iter().map(|(_, v)| *v).collect();
-                    let min_t = thicknesses.iter().cloned().reduce(f32::min).unwrap_or(0.0);
-                    let max_t = thicknesses.iter().cloned().reduce(f32::max).unwrap_or(0.0);
-
-                    println!(
-                        "    GameParams: {} entries ({} with thickness > 0), range: {:.0}..{:.0} mm",
-                        entries.len(),
-                        nonzero.len(),
-                        min_t,
-                        max_t
-                    );
-
-                    // Print per-material details sorted by material ID.
-                    let mut sorted = entries.clone();
-                    sorted.sort_by_key(|(mid, _)| *mid);
-                    for (mid, thickness) in &sorted {
-                        if *thickness > 0.0 {
-                            let mat_name = collision_material_name(*mid as u8);
-                            println!(
-                                "      mat {:>3} ({:<20}) = {:>6.1} mm",
-                                mid, mat_name, thickness
-                            );
-                        }
-                    }
-                }
+                println!("    GameParams thickness:");
+                print_armor_layers(&geom_mat_ids, amap);
             } else {
                 println!("    GameParams: no armor data available");
             }
@@ -1717,13 +1723,14 @@ fn run_armor(
 
         println!("\nTurret model: {turret_name}");
         for am in &geom.armor_models {
-            let mi = armor_model_index;
-            armor_model_index += 1;
+            armor_model_count += 1;
             total_tris += am.triangles.len();
 
             let mut bmin = [f32::MAX; 3];
             let mut bmax = [f32::MIN; 3];
+            let mut geom_mat_ids = std::collections::BTreeSet::new();
             for tri in &am.triangles {
+                geom_mat_ids.insert(tri.material_id);
                 for v in &tri.vertices {
                     for i in 0..3 {
                         bmin[i] = bmin[i].min(v[i]);
@@ -1732,49 +1739,20 @@ fn run_armor(
                 }
             }
 
-            println!("  Armor model [{}]: \"{}\"", mi, am.name);
+            println!("  Armor model: \"{}\"", am.name);
             println!("    Triangles: {}", am.triangles.len());
             println!(
                 "    Bounding box: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
                 bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]
             );
+            println!(
+                "    Materials: {:?}",
+                geom_mat_ids.iter().collect::<Vec<_>>()
+            );
 
             if let Some(ref amap) = armor_map {
-                let entries: Vec<(u32, f32)> = amap
-                    .iter()
-                    .filter(|&(&k, _)| (k >> 16) == mi)
-                    .map(|(&k, &v)| (k & 0xFFFF, v))
-                    .collect();
-
-                if entries.is_empty() {
-                    println!("    GameParams: no thickness entries for model_index={mi}");
-                } else {
-                    let nonzero: Vec<&(u32, f32)> =
-                        entries.iter().filter(|(_, v)| *v > 0.0).collect();
-                    let thicknesses: Vec<f32> = nonzero.iter().map(|(_, v)| *v).collect();
-                    let min_t = thicknesses.iter().cloned().reduce(f32::min).unwrap_or(0.0);
-                    let max_t = thicknesses.iter().cloned().reduce(f32::max).unwrap_or(0.0);
-
-                    println!(
-                        "    GameParams: {} entries ({} with thickness > 0), range: {:.0}..{:.0} mm",
-                        entries.len(),
-                        nonzero.len(),
-                        min_t,
-                        max_t
-                    );
-
-                    let mut sorted = entries.clone();
-                    sorted.sort_by_key(|(mid, _)| *mid);
-                    for (mid, thickness) in &sorted {
-                        if *thickness > 0.0 {
-                            let mat_name = collision_material_name(*mid as u8);
-                            println!(
-                                "      mat {:>3} ({:<20}) = {:>6.1} mm",
-                                mid, mat_name, thickness
-                            );
-                        }
-                    }
-                }
+                println!("    GameParams thickness:");
+                print_armor_layers(&geom_mat_ids, amap);
             }
         }
     }
@@ -1807,56 +1785,43 @@ fn run_armor(
         }
     }
 
-    // Show model indices in the armor map that don't correspond to armor models.
+    // Summary.
     if let Some(ref amap) = armor_map {
-        let model_indices: std::collections::BTreeSet<u32> = amap.keys().map(|k| k >> 16).collect();
-        let armor_indices: std::collections::BTreeSet<u32> = (1..armor_model_index).collect();
-        let extra: Vec<u32> = model_indices.difference(&armor_indices).copied().collect();
-        if !extra.is_empty() {
-            println!(
-                "\nGameParams armor entries with no matching geometry (phantom armor): {:?}",
-                extra
-            );
-            for mi in &extra {
-                let entries: Vec<(u32, f32)> = amap
-                    .iter()
-                    .filter(|&(&k, _)| (k >> 16) == *mi)
-                    .map(|(&k, &v)| (k & 0xFFFF, v))
-                    .collect();
-                let nonzero = entries.iter().filter(|(_, v)| *v > 0.0).count();
-                println!(
-                    "  model_index={}: {} entries ({} nonzero)",
-                    mi,
-                    entries.len(),
-                    nonzero
-                );
-                for (mat_id, thickness) in &entries {
-                    if *thickness > 0.0 {
-                        let mat_name = collision_material_name(*mat_id as u8);
-                        println!(
-                            "      mat {:>3} ({:<20}) = {:>6.1} mm",
-                            mat_id, mat_name, thickness
-                        );
-                    }
-                }
-            }
-        }
-
-        let total_entries = amap.len();
-        let total_nonzero = amap.values().filter(|&&v| v > 0.0).count();
+        let total_materials = amap.len();
+        let multi_layer = amap.values().filter(|v| v.len() > 1).count();
         println!(
-            "\nSummary: {} armor triangles across {} model(s), GameParams: {} entries ({} nonzero)",
-            total_tris,
-            armor_model_index - 1,
-            total_entries,
-            total_nonzero
+            "\nSummary: {} armor triangles across {} model(s), GameParams: {} materials ({} multi-layer)",
+            total_tris, armor_model_count, total_materials, multi_layer
         );
     } else {
         println!(
             "\nSummary: {} armor triangles across {} model(s), no GameParams data",
-            total_tris,
-            armor_model_index - 1
+            total_tris, armor_model_count
         );
+    }
+
+    // Show per-triangle material breakdown for turret armor models.
+    println!("\nTurret armor triangle materials:");
+    let interactive = ctx.interactive_armor_meshes()?;
+    for mesh in &interactive {
+        if mesh.transform.is_none() {
+            continue; // skip hull
+        }
+        let mut mat_summary: std::collections::BTreeMap<(u8, String), (usize, f32)> =
+            Default::default();
+        for ti in &mesh.triangle_info {
+            let entry = mat_summary
+                .entry((ti.material_id, ti.material_name.clone()))
+                .or_insert((0, ti.thickness_mm));
+            entry.0 += 1;
+        }
+        println!("  {}:", mesh.name);
+        for ((mid, mname), (count, thickness)) in &mat_summary {
+            println!(
+                "    mat {:>3} ({:<24}) x{:<4} = {:>6.1} mm",
+                mid, mname, count, thickness
+            );
+        }
     }
 
     Ok(())
