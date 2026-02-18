@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use rootcause::prelude::*;
 use vfs::VfsPath;
@@ -98,7 +99,7 @@ pub struct HullUpgradeInfo {
 pub struct ShipAssets {
     assets_bin_bytes: Vec<u8>,
     vfs: VfsPath,
-    metadata: GameMetadataProvider,
+    metadata: Arc<GameMetadataProvider>,
     camo_db: Option<CamouflageDb>,
 }
 
@@ -115,7 +116,29 @@ impl ShipAssets {
             .context("Could not find content/assets.bin in VFS")?
             .read_to_end(&mut assets_bin_bytes)?;
 
-        let metadata = GameMetadataProvider::from_vfs(vfs).context("Failed to load GameParams")?;
+        let metadata = Arc::new(GameMetadataProvider::from_vfs(vfs).context("Failed to load GameParams")?);
+
+        let camo_db = CamouflageDb::load(vfs);
+
+        Ok(Self {
+            assets_bin_bytes,
+            vfs: vfs.clone(),
+            metadata,
+            camo_db,
+        })
+    }
+
+    /// Load shared assets from the VFS, reusing an already-loaded [`GameMetadataProvider`].
+    ///
+    /// This skips the expensive GameParams parse that [`Self::load`] performs,
+    /// making it suitable when the caller already has metadata available.
+    pub fn from_vfs_with_metadata(vfs: &VfsPath, metadata: Arc<GameMetadataProvider>) -> Result<Self, Report> {
+        let mut assets_bin_bytes = Vec::new();
+        vfs.join("content/assets.bin")
+            .context("VFS path error")?
+            .open_file()
+            .context("Could not find content/assets.bin in VFS")?
+            .read_to_end(&mut assets_bin_bytes)?;
 
         let camo_db = CamouflageDb::load(vfs);
 
@@ -140,8 +163,14 @@ impl ShipAssets {
     }
 
     /// Set translations for display name resolution.
+    ///
+    /// # Panics
+    /// Panics if the inner metadata Arc has been cloned (i.e. there are other owners).
+    /// Call this before sharing the assets.
     pub fn set_translations(&mut self, catalog: gettext::Catalog) {
-        self.metadata.set_translations(catalog);
+        Arc::get_mut(&mut self.metadata)
+            .expect("cannot set translations: GameMetadataProvider is shared")
+            .set_translations(catalog);
     }
 
     /// Access the underlying `GameMetadataProvider`.
