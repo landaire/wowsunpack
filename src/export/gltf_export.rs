@@ -1120,10 +1120,6 @@ pub struct ArmorTriangleInfo {
     pub zone: String,
     /// Armor thickness in millimeters from GameParams (0.0 if unassigned).
     pub thickness_mm: f32,
-    /// `true` when the triangle's material ID was unknown and its zone was
-    /// determined via splash-box spatial lookup rather than the material table.
-    /// These plates are not shown in the game's armor viewer.
-    pub hidden: bool,
     /// RGBA color [0.0–1.0] encoding the thickness via the game's color scale.
     pub color: [f32; 4],
 }
@@ -1168,9 +1164,6 @@ impl InteractiveArmorMesh {
         armor: &crate::models::geometry::ArmorModel,
         armor_map: Option<&std::collections::HashMap<u32, f32>>,
         model_index: u32,
-        splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
-        hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
-        zone_thicknesses: Option<&HashMap<String, f32>>,
     ) -> Self {
         let tri_count = armor.triangles.len();
         let vert_count = tri_count * 3;
@@ -1180,34 +1173,13 @@ impl InteractiveArmorMesh {
         let mut colors = Vec::with_capacity(vert_count);
         let mut triangle_info = Vec::with_capacity(tri_count);
 
-        // For zone-based thickness fallback: max thickness across all zones.
-        let fallback_thickness = zone_thicknesses
-            .map(|zt| zt.values().cloned().fold(0.0f32, f32::max))
-            .unwrap_or(0.0);
-
         for (ti, tri) in armor.triangles.iter().enumerate() {
             let mat_name = collision_material_name(tri.material_id);
-            let mut zone = zone_from_material_name(mat_name).to_string();
+            let zone = zone_from_material_name(mat_name).to_string();
 
-            // Splash-box fallback for unknown materials.
-            if zone == "Other" {
-                if let (Some(sbs), Some(hls)) = (splash_boxes, hit_locations) {
-                    let centroid = triangle_centroid(&tri.vertices);
-                    if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
-                        zone = z.to_string();
-                    }
-                }
-            }
-
-            // Thickness: use zone-based lookup for turret armor, material_id for hull.
-            let thickness_mm = if let Some(zt) = zone_thicknesses {
-                zt.get(&zone).copied().unwrap_or(fallback_thickness)
-            } else {
-                let key = (model_index << 16) | (tri.material_id as u32);
-                armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0)
-            };
+            let key = (model_index << 16) | (tri.material_id as u32);
+            let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
             let color = thickness_to_color(thickness_mm);
-            let hidden = tri.material_id > 101;
 
             for v in 0..3 {
                 positions.push(tri.vertices[v]);
@@ -1223,7 +1195,6 @@ impl InteractiveArmorMesh {
                 material_name: mat_name.to_string(),
                 zone,
                 thickness_mm,
-                hidden,
                 color,
             });
         }
@@ -1417,7 +1388,9 @@ pub fn collect_hull_meshes(
         if vert_end > decoded_vertices.len() {
             return Err(Report::new(ExportError::VertexDecode(format!(
                 "vertex range {}..{} exceeds buffer size {}",
-                vert_start, vert_end, decoded_vertices.len()
+                vert_start,
+                vert_end,
+                decoded_vertices.len()
             ))));
         }
         let vert_slice = &decoded_vertices[vert_start..vert_end];
@@ -1431,7 +1404,9 @@ pub fn collect_hull_meshes(
         if idx_end > decoded_indices.len() {
             return Err(Report::new(ExportError::IndexDecode(format!(
                 "index range {}..{} exceeds buffer size {}",
-                idx_start, idx_end, decoded_indices.len()
+                idx_start,
+                idx_end,
+                decoded_indices.len()
             ))));
         }
         let idx_slice = &decoded_indices[idx_start..idx_end];
@@ -1464,28 +1439,6 @@ pub fn collect_hull_meshes(
     }
 
     Ok(result)
-}
-
-/// Build a zone-to-thickness map for a given armor model index.
-///
-/// Used for turret armor where material IDs don't reliably map to GameParams keys.
-pub fn zone_thickness_map(
-    armor_map: &std::collections::HashMap<u32, f32>,
-    model_index: u32,
-) -> HashMap<String, f32> {
-    let mut result = HashMap::new();
-    for (&key, &thickness) in armor_map {
-        if (key >> 16) == model_index {
-            let mat_id = (key & 0xFF) as u8;
-            let mat_name = collision_material_name(mat_id);
-            let zone = zone_from_material_name(mat_name);
-            let entry = result.entry(zone.to_string()).or_insert(0.0f32);
-            if thickness > *entry {
-                *entry = thickness;
-            }
-        }
-    }
-    result
 }
 
 /// Game's exact armor thickness color scale.
@@ -1584,6 +1537,20 @@ pub fn armor_color_legend() -> Vec<ArmorLegendEntry> {
 /// `Tur1GkBar`, `RudderAft`, etc. The prefix before the first `_` determines
 /// the zone, with special handling for turret and rudder names.
 pub fn zone_from_material_name(mat_name: &str) -> &'static str {
+    // Dual-zone materials: Dual_<primary>_<secondary>_<part>.
+    // Use the first zone identifier after "Dual_" as the primary.
+    if let Some(rest) = mat_name.strip_prefix("Dual_") {
+        if rest.starts_with("SSC") {
+            return "Superstructure";
+        }
+        if rest.starts_with("Cas") {
+            return "Casemate";
+        }
+        if rest.starts_with("Cit") {
+            return "Citadel";
+        }
+        return "Other";
+    }
     // Collision material prefixes.
     if mat_name.starts_with("Bow") {
         return "Bow";
@@ -1609,82 +1576,17 @@ pub fn zone_from_material_name(mat_name: &str) -> &'static str {
     if mat_name.starts_with("Bulge") {
         return "TorpedoProtection";
     }
+    if mat_name.starts_with("Bridge") {
+        return "Superstructure";
+    }
+    if mat_name.starts_with("DD_") || mat_name.starts_with("Mid_") || mat_name.starts_with("CV_") {
+        return "Hull";
+    }
     match mat_name {
-        "Deck" | "ConstrSide" | "Hull" => "Hull",
+        "Deck" | "ConstrSide" | "Hull" | "Side" | "Bottom" | "Top" => "Hull",
         "common" | "zero" => "Default",
         _ => "Other",
     }
-}
-
-/// Classify an armor triangle into a hit-location zone using splash-box AABBs.
-///
-/// For each splash box, tests whether `centroid` lies inside the AABB.
-/// If a match is found, looks up which `HitLocation` lists that box name
-/// and returns the normalized zone name. The hit location key from GameParams
-/// (e.g. "Cit", "Cas", "SS") is passed through `zone_from_material_name` to
-/// produce standard zone names (e.g. "Citadel", "Casemate", "Superstructure").
-pub fn zone_from_splash_boxes(
-    centroid: [f32; 3],
-    splash_boxes: &[crate::models::geometry::SplashBox],
-    hit_locations: &HashMap<String, crate::game_params::types::HitLocation>,
-) -> Option<&'static str> {
-    // Armor triangles on splash-box boundaries (bulkheads, hull transitions) have
-    // centroids exactly on the AABB face. Use a small tolerance so they still match.
-    const EPS: f32 = 0.15;
-    for sb in splash_boxes {
-        let inside =
-            (0..3).all(|i| centroid[i] >= sb.min[i] - EPS && centroid[i] <= sb.max[i] + EPS);
-        if !inside {
-            continue;
-        }
-        // Found a splash box containing this point — find which hit location owns it.
-        for (zone_key, hl) in hit_locations {
-            if hl.splash_boxes().iter().any(|name| name == &sb.name) {
-                let normalized = zone_from_material_name(zone_key);
-                if normalized != "Other" {
-                    return Some(normalized);
-                }
-                // If the key itself doesn't match prefix rules, try hl_type.
-                let from_type = zone_from_material_name(hl.hl_type());
-                if from_type != "Other" {
-                    return Some(from_type);
-                }
-                return Some(normalized);
-            }
-        }
-        // No hit location claims this box — infer zone from the splash box name.
-        // Names follow the pattern "CM_SB_<zone>_<rest>".
-        if let Some(zone) = zone_from_splash_box_name(&sb.name) {
-            return Some(zone);
-        }
-    }
-    None
-}
-
-/// Infer a zone from a splash box name like `CM_SB_bow_1`, `CM_SB_gk_2_1`, etc.
-fn zone_from_splash_box_name(name: &str) -> Option<&'static str> {
-    let suffix = name.strip_prefix("CM_SB_")?;
-    let tag = suffix.split('_').next()?;
-    match tag {
-        "bow" => Some("Bow"),
-        "stern" => Some("Stern"),
-        "cit" => Some("Citadel"),
-        "cas" => Some("Casemate"),
-        "ss" => Some("Superstructure"),
-        "ruder" => Some("SteeringGear"),
-        "gk" => Some("Turret"),
-        "engine" => Some("Citadel"),
-        _ => None,
-    }
-}
-
-/// Compute the centroid of a triangle from its three vertices.
-fn triangle_centroid(verts: &[[f32; 3]; 3]) -> [f32; 3] {
-    [
-        (verts[0][0] + verts[1][0] + verts[2][0]) / 3.0,
-        (verts[0][1] + verts[1][1] + verts[2][1]) / 3.0,
-        (verts[0][2] + verts[1][2] + verts[2][2]) / 3.0,
-    ]
 }
 
 /// The built-in collision material name table.
@@ -1818,9 +1720,6 @@ pub fn armor_sub_models_by_zone(
     armor: &crate::models::geometry::ArmorModel,
     armor_map: Option<&std::collections::HashMap<u32, f32>>,
     model_index: u32,
-    splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
-    hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
-    zone_thicknesses: Option<&HashMap<String, f32>>,
 ) -> Vec<ArmorSubModel> {
     // Group triangles by zone name.
     let mut zone_tris: std::collections::BTreeMap<
@@ -1828,30 +1727,12 @@ pub fn armor_sub_models_by_zone(
         Vec<(&crate::models::geometry::ArmorTriangle, [f32; 4])>,
     > = std::collections::BTreeMap::new();
 
-    let fallback_thickness = zone_thicknesses
-        .map(|zt| zt.values().cloned().fold(0.0f32, f32::max))
-        .unwrap_or(0.0);
-
     for tri in &armor.triangles {
         let mat_name = collision_material_name(tri.material_id);
-        let mut zone_name = zone_from_material_name(mat_name).to_string();
+        let zone_name = zone_from_material_name(mat_name).to_string();
 
-        // Splash-box fallback for unknown materials.
-        if zone_name == "Other" {
-            if let (Some(sbs), Some(hls)) = (splash_boxes, hit_locations) {
-                let centroid = triangle_centroid(&tri.vertices);
-                if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
-                    zone_name = z.to_string();
-                }
-            }
-        }
-
-        let thickness_mm = if let Some(zt) = zone_thicknesses {
-            zt.get(&zone_name).copied().unwrap_or(fallback_thickness)
-        } else {
-            let key = (model_index << 16) | (tri.material_id as u32);
-            armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0)
-        };
+        let key = (model_index << 16) | (tri.material_id as u32);
+        let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
         let color = thickness_to_color(thickness_mm);
 
         zone_tris.entry(zone_name).or_default().push((tri, color));

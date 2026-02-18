@@ -834,12 +834,10 @@ impl ShipAssets {
                 continue;
             }
 
-            // Apply 180° Y rotation for BigWorld → glTF coordinate conversion.
-            let transform = transform.map(apply_turret_rotation);
-
             mounts.push(ResolvedMount {
                 hp_name: mi.hp_name().to_string(),
                 turret_model_index: model_idx,
+                visual_transform: transform.map(apply_y180_rotation),
                 transform,
             });
         }
@@ -1043,13 +1041,6 @@ impl ShipModelContext {
     /// 1:1 with triangles, so a viewer can look up material name, thickness,
     /// and zone on hover/click.
     pub fn interactive_armor_meshes(&self) -> Result<Vec<InteractiveArmorMesh>, Report> {
-        // Parse splash boxes for spatial zone fallback.
-        let splash_boxes = self
-            .hull_splash_bytes()
-            .and_then(|b| geometry::parse_splash_file(b).ok());
-        let splash_ref = splash_boxes.as_deref();
-        let hl_ref = self.hit_locations.as_ref();
-
         let mut result = Vec::new();
         let mut model_index = 1u32; // 1-based, continuous across hull + turret
 
@@ -1062,9 +1053,6 @@ impl ShipModelContext {
                     armor_model,
                     self.armor_map.as_ref(),
                     model_index,
-                    splash_ref,
-                    hl_ref,
-                    None,
                 ));
                 model_index += 1;
             }
@@ -1072,8 +1060,6 @@ impl ShipModelContext {
 
         // Turret armor: assign model indices to unique turret models,
         // then instance per mount with that mount's transform.
-        // Turret geometry uses local material IDs that don't match GameParams,
-        // so we use zone-based thickness lookup instead.
         let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
         for part in &self.turret_models {
             let geom = geometry::parse_geometry(&part.geom_bytes)
@@ -1095,17 +1081,10 @@ impl ShipModelContext {
                 .context("Failed to parse turret geometry for interactive armor")?;
             for (ai, armor_model) in geom.armor_models.iter().enumerate() {
                 let idx = base_idx + ai as u32;
-                let zt = self
-                    .armor_map
-                    .as_ref()
-                    .map(|am| gltf_export::zone_thickness_map(am, idx));
                 let mut mesh = InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
                     idx,
-                    splash_ref,
-                    hl_ref,
-                    zt.as_ref(),
                 );
                 mesh.transform = mount.transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
@@ -1144,7 +1123,7 @@ impl ShipModelContext {
             let mut meshes =
                 gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
             for mesh in &mut meshes {
-                mesh.transform = mount.transform;
+                mesh.transform = mount.visual_transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
             }
             result.extend(meshes);
@@ -1196,7 +1175,7 @@ impl ShipModelContext {
                 name: format!("{} ({})", mount.hp_name, turret_data.name),
                 visual: &turret_data.visual,
                 geometry: turret_geom,
-                transform: mount.transform,
+                transform: mount.visual_transform,
                 group: mount_group(&mount.hp_name),
             });
         }
@@ -1309,11 +1288,6 @@ impl ShipModelContext {
         // model_index is 1-based across all geometry files in the ship:
         // hull armor models first, then turret armor models.
         let armor_map = self.armor_map.as_ref();
-        let splash_boxes = self
-            .hull_splash_bytes()
-            .and_then(|b| geometry::parse_splash_file(b).ok());
-        let splash_ref = splash_boxes.as_deref();
-        let hl_ref = self.hit_locations.as_ref();
         let mut armor_model_index = 1u32; // 1-based
         let mut armor_meshes: Vec<gltf_export::ArmorSubModel> = Vec::new();
 
@@ -1322,9 +1296,7 @@ impl ShipModelContext {
             for am in &geom.armor_models {
                 let idx = armor_model_index;
                 armor_model_index += 1;
-                armor_meshes.extend(gltf_export::armor_sub_models_by_zone(
-                    am, armor_map, idx, splash_ref, hl_ref, None,
-                ));
+                armor_meshes.extend(gltf_export::armor_sub_models_by_zone(am, armor_map, idx));
             }
         }
 
@@ -1347,15 +1319,7 @@ impl ShipModelContext {
             let turret_geom = &turret_geoms[mount.turret_model_index];
             for (ai, am) in turret_geom.armor_models.iter().enumerate() {
                 let idx = base_idx + ai as u32;
-                let zt = armor_map.map(|am_map| gltf_export::zone_thickness_map(am_map, idx));
-                let mut subs = gltf_export::armor_sub_models_by_zone(
-                    am,
-                    armor_map,
-                    idx,
-                    splash_ref,
-                    hl_ref,
-                    zt.as_ref(),
-                );
+                let mut subs = gltf_export::armor_sub_models_by_zone(am, armor_map, idx);
                 for s in &mut subs {
                     s.transform = mount.transform;
                     s.name = format!("{} [{}]", s.name, mount.hp_name);
@@ -1396,7 +1360,12 @@ struct OwnedSubModel {
 struct ResolvedMount {
     hp_name: String,
     turret_model_index: usize,
+    /// Raw hardpoint transform (no rotation correction). Used for armor meshes
+    /// whose vertices are already in the correct coordinate space.
     transform: Option<[f32; 16]>,
+    /// Hardpoint transform with 180° Y rotation applied. Used for visual hull
+    /// meshes that need BigWorld → glTF coordinate conversion.
+    visual_transform: Option<[f32; 16]>,
 }
 
 /// Pre-resolved material-based camouflage scheme (owned data, no lifetimes).
@@ -1540,34 +1509,15 @@ fn mount_group(hp_name: &str) -> &'static str {
     }
 }
 
-/// Transform a point by a column-major 4×4 matrix (affine).
-fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
-    [
-        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
-        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
-        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
-    ]
-}
-
-/// Transform a normal by the upper-left 3×3 of a column-major 4×4 matrix.
-fn transform_normal(m: &[f32; 16], n: [f32; 3]) -> [f32; 3] {
-    let x = m[0] * n[0] + m[4] * n[1] + m[8] * n[2];
-    let y = m[1] * n[0] + m[5] * n[1] + m[9] * n[2];
-    let z = m[2] * n[0] + m[6] * n[1] + m[10] * n[2];
-    let len = (x * x + y * y + z * z).sqrt();
-    if len > 0.0 {
-        [x / len, y / len, z / len]
-    } else {
-        [0.0, 0.0, 0.0]
-    }
-}
-
 /// Apply 180° Y rotation to a column-major 4×4 transform matrix.
 ///
-/// Turret meshes are authored with barrels pointing +Z (BigWorld forward).
+/// Turret visual meshes are authored with barrels pointing +Z (BigWorld forward).
 /// In glTF's right-handed coordinate system +Z points backward, so we
 /// post-multiply by Ry(180°) which negates columns 0 and 2.
-fn apply_turret_rotation(mut m: [f32; 16]) -> [f32; 16] {
+///
+/// This is only applied to visual mesh transforms, NOT armor mesh transforms
+/// (armor vertices are already in the correct coordinate space).
+fn apply_y180_rotation(mut m: [f32; 16]) -> [f32; 16] {
     // Negate column 0 (indices 0..3)
     m[0] = -m[0];
     m[1] = -m[1];

@@ -1779,15 +1779,10 @@ fn run_armor(
         }
     }
 
-    // Zone classification by collision material ID (with splash-box fallback).
+    // Zone classification by collision material ID.
     {
-        use wowsunpack::export::gltf_export::{zone_from_material_name, zone_from_splash_boxes};
+        use wowsunpack::export::gltf_export::zone_from_material_name;
         println!("\nZone classification (by collision material):");
-
-        let splash_bytes = ctx.hull_splash_bytes();
-        let splash_boxes = splash_bytes.and_then(|b| geometry::parse_splash_file(b).ok());
-        let splash_ref = splash_boxes.as_deref();
-        let hl_ref = ctx.hit_locations();
 
         let mut zone_counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
@@ -1796,27 +1791,12 @@ fn run_armor(
             .into_iter()
             .chain(ctx.turret_geom_bytes())
             .collect();
-        for geom_bytes in all_geom_bytes {
+        for geom_bytes in &all_geom_bytes {
             if let Ok(geom) = geometry::parse_geometry(geom_bytes) {
                 for am in &geom.armor_models {
                     for tri in &am.triangles {
                         let mat_name = collision_material_name(tri.material_id);
-                        let mut zone = zone_from_material_name(mat_name).to_string();
-                        if zone == "Other" {
-                            if let (Some(sbs), Some(hls)) = (splash_ref, hl_ref) {
-                                let centroid = [
-                                    (tri.vertices[0][0] + tri.vertices[1][0] + tri.vertices[2][0])
-                                        / 3.0,
-                                    (tri.vertices[0][1] + tri.vertices[1][1] + tri.vertices[2][1])
-                                        / 3.0,
-                                    (tri.vertices[0][2] + tri.vertices[1][2] + tri.vertices[2][2])
-                                        / 3.0,
-                                ];
-                                if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
-                                    zone = z.to_string();
-                                }
-                            }
-                        }
+                        let zone = zone_from_material_name(mat_name).to_string();
                         *zone_counts.entry(zone).or_default() += 1;
                     }
                 }
