@@ -1064,6 +1064,7 @@ impl ShipModelContext {
                     model_index,
                     splash_ref,
                     hl_ref,
+                    None,
                 ));
                 model_index += 1;
             }
@@ -1071,6 +1072,8 @@ impl ShipModelContext {
 
         // Turret armor: assign model indices to unique turret models,
         // then instance per mount with that mount's transform.
+        // Turret geometry uses local material IDs that don't match GameParams,
+        // so we use zone-based thickness lookup instead.
         let mut turret_armor_indices: Vec<(u32, usize)> = Vec::new();
         for part in &self.turret_models {
             let geom = geometry::parse_geometry(&part.geom_bytes)
@@ -1092,17 +1095,59 @@ impl ShipModelContext {
                 .context("Failed to parse turret geometry for interactive armor")?;
             for (ai, armor_model) in geom.armor_models.iter().enumerate() {
                 let idx = base_idx + ai as u32;
+                let zt = self
+                    .armor_map
+                    .as_ref()
+                    .map(|am| gltf_export::zone_thickness_map(am, idx));
                 let mut mesh = InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
                     idx,
                     splash_ref,
                     hl_ref,
+                    zt.as_ref(),
                 );
                 mesh.transform = mount.transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
                 result.push(mesh);
             }
+        }
+
+        Ok(result)
+    }
+
+    /// Collect hull visual meshes for interactive display.
+    ///
+    /// Returns one [`InteractiveHullMesh`](gltf_export::InteractiveHullMesh) per
+    /// render set (hull parts + mounted turrets). LOD 0 is used.
+    pub fn interactive_hull_meshes(&self) -> Result<Vec<gltf_export::InteractiveHullMesh>, Report> {
+        let db = assets_bin::parse_assets_bin(&self.assets_bin_bytes)
+            .context("Failed to parse assets.bin for hull meshes")?;
+
+        let lod = self.options.lod;
+        let damaged = self.options.damaged;
+        let mut result = Vec::new();
+
+        // Hull parts (no transform, already in world space).
+        for part in &self.hull_parts {
+            let geom = geometry::parse_geometry(&part.geom_bytes)
+                .context("Failed to parse hull geometry for hull meshes")?;
+            let meshes = gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
+            result.extend(meshes);
+        }
+
+        // Mounted turrets (with mount transforms).
+        for mount in &self.mounts {
+            let part = &self.turret_models[mount.turret_model_index];
+            let geom = geometry::parse_geometry(&part.geom_bytes)
+                .context("Failed to parse turret geometry for hull meshes")?;
+            let mut meshes =
+                gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
+            for mesh in &mut meshes {
+                mesh.transform = mount.transform;
+                mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
+            }
+            result.extend(meshes);
         }
 
         Ok(result)
@@ -1278,7 +1323,7 @@ impl ShipModelContext {
                 let idx = armor_model_index;
                 armor_model_index += 1;
                 armor_meshes.extend(gltf_export::armor_sub_models_by_zone(
-                    am, armor_map, idx, splash_ref, hl_ref,
+                    am, armor_map, idx, splash_ref, hl_ref, None,
                 ));
             }
         }
@@ -1302,8 +1347,15 @@ impl ShipModelContext {
             let turret_geom = &turret_geoms[mount.turret_model_index];
             for (ai, am) in turret_geom.armor_models.iter().enumerate() {
                 let idx = base_idx + ai as u32;
-                let mut subs =
-                    gltf_export::armor_sub_models_by_zone(am, armor_map, idx, splash_ref, hl_ref);
+                let zt = armor_map.map(|am_map| gltf_export::zone_thickness_map(am_map, idx));
+                let mut subs = gltf_export::armor_sub_models_by_zone(
+                    am,
+                    armor_map,
+                    idx,
+                    splash_ref,
+                    hl_ref,
+                    zt.as_ref(),
+                );
                 for s in &mut subs {
                     s.transform = mount.transform;
                     s.name = format!("{} [{}]", s.name, mount.hp_name);
@@ -1485,6 +1537,28 @@ fn mount_group(hp_name: &str) -> &'static str {
         "Torpedoes"
     } else {
         "Other"
+    }
+}
+
+/// Transform a point by a column-major 4×4 matrix (affine).
+fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+}
+
+/// Transform a normal by the upper-left 3×3 of a column-major 4×4 matrix.
+fn transform_normal(m: &[f32; 16], n: [f32; 3]) -> [f32; 3] {
+    let x = m[0] * n[0] + m[4] * n[1] + m[8] * n[2];
+    let y = m[1] * n[0] + m[5] * n[1] + m[9] * n[2];
+    let z = m[2] * n[0] + m[6] * n[1] + m[10] * n[2];
+    let len = (x * x + y * y + z * z).sqrt();
+    if len > 0.0 {
+        [x / len, y / len, z / len]
+    } else {
+        [0.0, 0.0, 0.0]
     }
 }
 

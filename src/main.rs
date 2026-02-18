@@ -1789,29 +1789,6 @@ fn run_armor(
         let splash_ref = splash_boxes.as_deref();
         let hl_ref = ctx.hit_locations();
 
-        if let Some(sbs) = &splash_boxes {
-            println!("  Splash boxes ({}):", sbs.len());
-            for sb in sbs {
-                println!(
-                    "    {:30} ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
-                    sb.name, sb.min[0], sb.min[1], sb.min[2], sb.max[0], sb.max[1], sb.max[2]
-                );
-            }
-        } else {
-            println!(
-                "  No splash boxes found (splash_bytes={})",
-                splash_bytes.is_some()
-            );
-        }
-        if let Some(hls) = hl_ref {
-            println!("  Hit locations ({}):", hls.len());
-            for (name, hl) in hls {
-                println!("    {:20} splash_boxes={:?}", name, hl.splash_boxes());
-            }
-        } else {
-            println!("  No hit locations found");
-        }
-
         let mut zone_counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         let all_geom_bytes: Vec<&[u8]> = ctx
@@ -1837,15 +1814,6 @@ fn run_armor(
                                 ];
                                 if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
                                     zone = z.to_string();
-                                } else {
-                                    eprintln!(
-                                        "    [DEBUG] Other: mat={} ({}) centroid=({:.2}, {:.2}, {:.2})",
-                                        tri.material_id,
-                                        mat_name,
-                                        centroid[0],
-                                        centroid[1],
-                                        centroid[2]
-                                    );
                                 }
                             }
                         }

@@ -1108,6 +1108,10 @@ fn bounding_coords(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArmorTriangleInfo {
+    /// 1-based armor model index (matches GameParams key prefix: ).
+    pub model_index: u32,
+    /// 0-based triangle index within the armor model.
+    pub triangle_index: u32,
     /// Collision material ID (0–255) from the BVH node header.
     pub material_id: u8,
     /// Human-readable material name (e.g. "Cit_Belt", "Bow_Bottom").
@@ -1166,6 +1170,7 @@ impl InteractiveArmorMesh {
         model_index: u32,
         splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
         hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
+        zone_thicknesses: Option<&HashMap<String, f32>>,
     ) -> Self {
         let tri_count = armor.triangles.len();
         let vert_count = tri_count * 3;
@@ -1175,24 +1180,34 @@ impl InteractiveArmorMesh {
         let mut colors = Vec::with_capacity(vert_count);
         let mut triangle_info = Vec::with_capacity(tri_count);
 
+        // For zone-based thickness fallback: max thickness across all zones.
+        let fallback_thickness = zone_thicknesses
+            .map(|zt| zt.values().cloned().fold(0.0f32, f32::max))
+            .unwrap_or(0.0);
+
         for (ti, tri) in armor.triangles.iter().enumerate() {
-            let key = (model_index << 16) | (tri.material_id as u32);
-            let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
-            let color = thickness_to_color(thickness_mm);
             let mat_name = collision_material_name(tri.material_id);
             let mut zone = zone_from_material_name(mat_name).to_string();
-            let mut hidden = false;
 
-            // Splash-box fallback for unknown materials — these are hidden plates.
+            // Splash-box fallback for unknown materials.
             if zone == "Other" {
                 if let (Some(sbs), Some(hls)) = (splash_boxes, hit_locations) {
                     let centroid = triangle_centroid(&tri.vertices);
                     if let Some(z) = zone_from_splash_boxes(centroid, sbs, hls) {
                         zone = z.to_string();
-                        hidden = true;
                     }
                 }
             }
+
+            // Thickness: use zone-based lookup for turret armor, material_id for hull.
+            let thickness_mm = if let Some(zt) = zone_thicknesses {
+                zt.get(&zone).copied().unwrap_or(fallback_thickness)
+            } else {
+                let key = (model_index << 16) | (tri.material_id as u32);
+                armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0)
+            };
+            let color = thickness_to_color(thickness_mm);
+            let hidden = tri.material_id > 101;
 
             for v in 0..3 {
                 positions.push(tri.vertices[v]);
@@ -1202,6 +1217,8 @@ impl InteractiveArmorMesh {
             }
 
             triangle_info.push(ArmorTriangleInfo {
+                model_index,
+                triangle_index: ti as u32,
                 material_id: tri.material_id,
                 material_name: mat_name.to_string(),
                 zone,
@@ -1279,6 +1296,196 @@ impl ArmorSubModel {
             transform: None,
         }
     }
+}
+
+/// A hull visual mesh for interactive viewers (positions, normals, indices + render set name).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InteractiveHullMesh {
+    /// Render set name (e.g. "Hull", "Superstructure").
+    pub name: String,
+    /// Vertex positions.
+    pub positions: Vec<[f32; 3]>,
+    /// Vertex normals (same length as positions).
+    pub normals: Vec<[f32; 3]>,
+    /// Triangle indices into positions/normals.
+    pub indices: Vec<u32>,
+    /// Optional world-space transform (column-major 4x4) for turret mounts.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub transform: Option<[f32; 16]>,
+}
+
+/// Collect hull visual meshes (render sets) from a visual prototype and geometry.
+///
+/// Each render set becomes one `InteractiveHullMesh` with decoded
+/// positions, normals, and indices. UVs and texture info are omitted since
+/// the interactive viewer renders hull meshes with a solid color.
+pub fn collect_hull_meshes(
+    visual: &VisualPrototype,
+    geometry: &MergedGeometry,
+    db: &PrototypeDatabase<'_>,
+    lod: usize,
+    damaged: bool,
+) -> Result<Vec<InteractiveHullMesh>, Report<ExportError>> {
+    let mut result = Vec::new();
+
+    if visual.lods.is_empty() || lod >= visual.lods.len() {
+        return Ok(result);
+    }
+    let lod_entry = &visual.lods[lod];
+
+    let exclude = if damaged {
+        DAMAGED_EXCLUDE
+    } else {
+        INTACT_EXCLUDE
+    };
+
+    for &rs_name_id in &lod_entry.render_set_names {
+        let rs = visual
+            .render_sets
+            .iter()
+            .find(|rs| rs.name_id == rs_name_id)
+            .ok_or_else(|| Report::new(ExportError::RenderSetNotFound(rs_name_id)))?;
+
+        let rs_name = db
+            .strings
+            .get_string_by_id(rs_name_id)
+            .unwrap_or("<unknown>");
+
+        if exclude.iter().any(|sub| rs_name.contains(sub)) {
+            continue;
+        }
+
+        let vertices_mapping_id = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
+        let indices_mapping_id = (rs.unknown_u64 >> 32) as u32;
+
+        let vert_mapping = geometry
+            .vertices_mapping
+            .iter()
+            .find(|m| m.mapping_id == vertices_mapping_id)
+            .ok_or_else(|| {
+                Report::new(ExportError::VerticesMappingNotFound {
+                    id: vertices_mapping_id,
+                })
+            })?;
+
+        let idx_mapping = geometry
+            .indices_mapping
+            .iter()
+            .find(|m| m.mapping_id == indices_mapping_id)
+            .ok_or_else(|| {
+                Report::new(ExportError::IndicesMappingNotFound {
+                    id: indices_mapping_id,
+                })
+            })?;
+
+        let vbuf_idx = vert_mapping.merged_buffer_index as usize;
+        if vbuf_idx >= geometry.merged_vertices.len() {
+            return Err(Report::new(ExportError::BufferIndexOutOfRange {
+                index: vbuf_idx,
+                count: geometry.merged_vertices.len(),
+            }));
+        }
+        let vert_proto = &geometry.merged_vertices[vbuf_idx];
+
+        let ibuf_idx = idx_mapping.merged_buffer_index as usize;
+        if ibuf_idx >= geometry.merged_indices.len() {
+            return Err(Report::new(ExportError::BufferIndexOutOfRange {
+                index: ibuf_idx,
+                count: geometry.merged_indices.len(),
+            }));
+        }
+        let idx_proto = &geometry.merged_indices[ibuf_idx];
+
+        let decoded_vertices = vert_proto
+            .data
+            .decode()
+            .map_err(|e| Report::new(ExportError::VertexDecode(format!("{e:?}"))))?;
+        let decoded_indices = idx_proto
+            .data
+            .decode()
+            .map_err(|e| Report::new(ExportError::IndexDecode(format!("{e:?}"))))?;
+
+        let format = vertex_format::parse_vertex_format(&vert_proto.format_name);
+        let stride = vert_proto.stride_in_bytes as usize;
+
+        let vert_offset = vert_mapping.items_offset as usize;
+        let vert_count = vert_mapping.items_count as usize;
+        let vert_start = vert_offset * stride;
+        let vert_end = vert_start + vert_count * stride;
+
+        if vert_end > decoded_vertices.len() {
+            return Err(Report::new(ExportError::VertexDecode(format!(
+                "vertex range {}..{} exceeds buffer size {}",
+                vert_start, vert_end, decoded_vertices.len()
+            ))));
+        }
+        let vert_slice = &decoded_vertices[vert_start..vert_end];
+
+        let idx_offset = idx_mapping.items_offset as usize;
+        let idx_count = idx_mapping.items_count as usize;
+        let index_size = idx_proto.index_size as usize;
+        let idx_start = idx_offset * index_size;
+        let idx_end = idx_start + idx_count * index_size;
+
+        if idx_end > decoded_indices.len() {
+            return Err(Report::new(ExportError::IndexDecode(format!(
+                "index range {}..{} exceeds buffer size {}",
+                idx_start, idx_end, decoded_indices.len()
+            ))));
+        }
+        let idx_slice = &decoded_indices[idx_start..idx_end];
+
+        let indices: Vec<u32> = match index_size {
+            2 => idx_slice
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                .collect(),
+            4 => idx_slice
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            _ => {
+                return Err(Report::new(ExportError::IndexDecode(format!(
+                    "unsupported index size: {index_size}"
+                ))));
+            }
+        };
+
+        let (positions, normals, _uvs) = unpack_vertices(vert_slice, stride, &format);
+
+        result.push(InteractiveHullMesh {
+            name: rs_name.to_string(),
+            positions,
+            normals,
+            indices,
+            transform: None,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Build a zone-to-thickness map for a given armor model index.
+///
+/// Used for turret armor where material IDs don't reliably map to GameParams keys.
+pub fn zone_thickness_map(
+    armor_map: &std::collections::HashMap<u32, f32>,
+    model_index: u32,
+) -> HashMap<String, f32> {
+    let mut result = HashMap::new();
+    for (&key, &thickness) in armor_map {
+        if (key >> 16) == model_index {
+            let mat_id = (key & 0xFF) as u8;
+            let mat_name = collision_material_name(mat_id);
+            let zone = zone_from_material_name(mat_name);
+            let entry = result.entry(zone.to_string()).or_insert(0.0f32);
+            if thickness > *entry {
+                *entry = thickness;
+            }
+        }
+    }
+    result
 }
 
 /// Game's exact armor thickness color scale.
@@ -1613,6 +1820,7 @@ pub fn armor_sub_models_by_zone(
     model_index: u32,
     splash_boxes: Option<&[crate::models::geometry::SplashBox]>,
     hit_locations: Option<&HashMap<String, crate::game_params::types::HitLocation>>,
+    zone_thicknesses: Option<&HashMap<String, f32>>,
 ) -> Vec<ArmorSubModel> {
     // Group triangles by zone name.
     let mut zone_tris: std::collections::BTreeMap<
@@ -1620,10 +1828,11 @@ pub fn armor_sub_models_by_zone(
         Vec<(&crate::models::geometry::ArmorTriangle, [f32; 4])>,
     > = std::collections::BTreeMap::new();
 
-    for tri in &armor.triangles {
-        let key = (model_index << 16) | (tri.material_id as u32);
-        let thickness_mm = armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0);
+    let fallback_thickness = zone_thicknesses
+        .map(|zt| zt.values().cloned().fold(0.0f32, f32::max))
+        .unwrap_or(0.0);
 
+    for tri in &armor.triangles {
         let mat_name = collision_material_name(tri.material_id);
         let mut zone_name = zone_from_material_name(mat_name).to_string();
 
@@ -1637,6 +1846,12 @@ pub fn armor_sub_models_by_zone(
             }
         }
 
+        let thickness_mm = if let Some(zt) = zone_thicknesses {
+            zt.get(&zone_name).copied().unwrap_or(fallback_thickness)
+        } else {
+            let key = (model_index << 16) | (tri.material_id as u32);
+            armor_map.and_then(|m| m.get(&key).copied()).unwrap_or(0.0)
+        };
         let color = thickness_to_color(thickness_mm);
 
         zone_tris.entry(zone_name).or_default().push((tri, color));
