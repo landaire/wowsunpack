@@ -1095,7 +1095,6 @@ impl ShipModelContext {
     /// and zone on hover/click.
     pub fn interactive_armor_meshes(&self) -> Result<Vec<InteractiveArmorMesh>, Report> {
         let mut result = Vec::new();
-        let mut model_index = 1u32; // 1-based, continuous across hull + turret
 
         // Hull armor (already in world space).
         for part in &self.hull_parts {
@@ -1105,15 +1104,12 @@ impl ShipModelContext {
                 result.push(InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
-                    model_index,
                     None,
                 ));
-                model_index += 1;
             }
         }
 
-        // Turret armor: pre-parse geometries to count armor models,
-        // then instance per mount with that mount's transform.
+        // Turret armor: instance per mount.
         let turret_geoms: Vec<_> = self
             .turret_models
             .iter()
@@ -1123,21 +1119,12 @@ impl ShipModelContext {
             })
             .collect::<Result<_, _>>()?;
 
-        let mut turret_armor_bases: Vec<u32> = Vec::new();
-        for geom in &turret_geoms {
-            turret_armor_bases.push(model_index);
-            model_index += geom.armor_models.len() as u32;
-        }
-
         for mount in &self.mounts {
             let geom = &turret_geoms[mount.turret_model_index];
-            let base_idx = turret_armor_bases[mount.turret_model_index];
-            for (ai, armor_model) in geom.armor_models.iter().enumerate() {
-                let idx = base_idx + ai as u32;
+            for armor_model in &geom.armor_models {
                 let mut mesh = InteractiveArmorMesh::from_armor_model(
                     armor_model,
                     self.armor_map.as_ref(),
-                    idx,
                     mount.mount_armor.as_ref(),
                 );
                 mesh.transform = mount.transform;
@@ -1148,7 +1135,6 @@ impl ShipModelContext {
 
         Ok(result)
     }
-
     /// Collect hull visual meshes for interactive display.
     ///
     /// Returns one [`InteractiveHullMesh`](gltf_export::InteractiveHullMesh) per
@@ -1389,7 +1375,6 @@ impl ShipModelContext {
         // Collect armor meshes from hull AND turret geometries with thickness data.
         let armor_map = self.armor_map.as_ref();
         let mut armor_meshes: Vec<gltf_export::ArmorSubModel> = Vec::new();
-
         // Hull armor (already in world space, no transform needed).
         for geom in &hull_geoms {
             for am in &geom.armor_models {

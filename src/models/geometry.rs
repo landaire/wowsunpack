@@ -39,9 +39,15 @@ pub struct MergedGeometry<'a> {
 pub struct ArmorTriangle {
     pub vertices: [[f32; 3]; 3],
     pub normals: [[f32; 3]; 3],
-    /// Collision material ID from the BVH node header (byte 0).
-    /// Used as the key in the GameParams armor dict: `(model_index << 16) | material_id`.
+    /// Collision material ID from the BVH node header (byte 0 of the u32 first_dword).
+    /// Maps to a collision material name (e.g. "Cit_Belt", "Bow_Bottom").
     pub material_id: u8,
+    /// 1-based layer index from the BVH node header (byte 2 of the u32 first_dword).
+    /// The u32 encodes `(layer_index << 16) | material_id`.
+    /// Multi-layer armor materials have separate BVH node groups per layer,
+    /// each covering different spatial regions. This maps directly to the
+    /// `model_index` in GameParams armor keys: `(model_index << 16) | material_id`.
+    pub layer_index: u8,
 }
 
 /// A parsed armor model containing triangle geometry for hit detection.
@@ -576,9 +582,12 @@ fn parse_armor_data(data: &[u8]) -> Result<Vec<ArmorTriangle>, Report<GeometryEr
             break;
         }
 
-        // First entry of node header: byte 0 = collision material ID
+        // First entry of node header: u32 encoding (layer_index << 16) | material_id
+        // byte 0 = collision material ID, byte 2 = 1-based layer index
+        // This matches the GameParams key encoding: (model_index << 16) | material_id
         let node_entry0_off = pos * ENTRY_SIZE;
         let material_id = data[node_entry0_off];
+        let layer_index = data[node_entry0_off + 2];
 
         // Second entry of the node header has vertex_count at bytes 12..16
         let node_entry1_off = (pos + 1) * ENTRY_SIZE;
@@ -603,6 +612,7 @@ fn parse_armor_data(data: &[u8]) -> Result<Vec<ArmorTriangle>, Report<GeometryEr
                 vertices: [[0.0; 3]; 3],
                 normals: [[0.0; 3]; 3],
                 material_id,
+                layer_index,
             };
             for v in 0..3 {
                 let entry_off = (pos + t * 3 + v) * ENTRY_SIZE;

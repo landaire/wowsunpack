@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Add, Mul, Sub};
 
 use bon::Builder;
@@ -13,11 +13,13 @@ const BW_TO_METERS: f32 = 30.0;
 
 /// Per-material armor thickness map.
 ///
-/// Key = collision material ID (0–254).  Value = per-layer thicknesses in mm.
+/// Outer key = collision material ID (0–254).
+/// Inner key = model_index (1-based armor model ordinal).
+/// Value = thickness in mm for that model_index.
+///
 /// The game registers the same geometry multiple times with different
 /// `model_index` values; each registration represents a separate armor layer.
-/// Layers are ordered by ascending model_index.
-pub type ArmorMap = HashMap<u32, Vec<f32>>;
+pub type ArmorMap = HashMap<u32, BTreeMap<u32, f32>>;
 
 /// Distance in meters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]

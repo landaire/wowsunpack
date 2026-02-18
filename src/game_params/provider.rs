@@ -650,11 +650,7 @@ fn parse_armor_dict(dict: &BTreeMap<HashableValue, Value>) -> ArmorMap {
             .insert(model_index, value);
     }
 
-    // Second pass: flatten BTreeMap values into Vec<f32> (sorted by model_index).
     by_material
-        .into_iter()
-        .map(|(mat_id, layers)| (mat_id, layers.into_values().collect()))
-        .collect()
 }
 
 /// Extract mount points (HP_* entries with model paths) from a component dict.

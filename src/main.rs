@@ -1629,29 +1629,38 @@ fn run_armor(
     // Helper to print armor layer info for materials found in a geometry.
     fn print_armor_layers(
         geom_mat_ids: &std::collections::BTreeSet<u8>,
-        amap: &std::collections::HashMap<u32, Vec<f32>>,
+        amap: &std::collections::HashMap<u32, std::collections::BTreeMap<u32, f32>>,
     ) {
         let mut matched = 0usize;
         for &mid in geom_mat_ids {
-            if let Some(layers) = amap.get(&(mid as u32)) {
+            if let Some(layers_map) = amap.get(&(mid as u32)) {
+                let layers: Vec<f32> = layers_map.values().copied().collect();
                 let total: f32 = layers.iter().sum();
                 if total > 0.0 {
                     matched += 1;
                     let mat_name = collision_material_name(mid);
+                    let idx_str: Vec<String> = layers_map
+                        .iter()
+                        .map(|(k, v)| format!("mi{k}={v:.0}"))
+                        .collect();
                     if layers.len() == 1 {
                         println!(
-                            "      mat {:>3} ({:<20}) = {:>6.1} mm",
-                            mid, mat_name, total
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm  [{}]",
+                            mid,
+                            mat_name,
+                            total,
+                            idx_str.join(", ")
                         );
                     } else {
                         let layer_str: Vec<String> =
                             layers.iter().map(|v| format!("{v:.0}")).collect();
                         println!(
-                            "      mat {:>3} ({:<20}) = {:>6.1} mm  (layers: [{}])",
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm  (layers: [{}])  [{}]",
                             mid,
                             mat_name,
                             total,
-                            layer_str.join(", ")
+                            layer_str.join(", "),
+                            idx_str.join(", ")
                         );
                     }
                 }
@@ -1800,26 +1809,26 @@ fn run_armor(
         );
     }
 
-    // Show per-triangle material breakdown for turret armor models.
     println!("\nTurret armor triangle materials:");
     let interactive = ctx.interactive_armor_meshes()?;
     for mesh in &interactive {
         if mesh.transform.is_none() {
             continue; // skip hull
         }
-        let mut mat_summary: std::collections::BTreeMap<(u8, String), (usize, f32)> =
+        // Key by (material_id, model_index) to show per-layer thickness.
+        let mut mat_summary: std::collections::BTreeMap<(u8, u32, String), (usize, f32)> =
             Default::default();
         for ti in &mesh.triangle_info {
             let entry = mat_summary
-                .entry((ti.material_id, ti.material_name.clone()))
+                .entry((ti.material_id, ti.model_index, ti.material_name.clone()))
                 .or_insert((0, ti.thickness_mm));
             entry.0 += 1;
         }
         println!("  {}:", mesh.name);
-        for ((mid, mname), (count, thickness)) in &mat_summary {
+        for ((mid, layer, mname), (count, thickness)) in &mat_summary {
             println!(
-                "    mat {:>3} ({:<24}) x{:<4} = {:>6.1} mm",
-                mid, mname, count, thickness
+                "    mat {:>3} layer {} ({:<24}) x{:<4} = {:>6.1} mm",
+                mid, layer, mname, count, thickness
             );
         }
     }

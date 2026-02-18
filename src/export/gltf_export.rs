@@ -1128,20 +1128,45 @@ pub struct ArmorTriangleInfo {
     pub color: [f32; 4],
 }
 
-/// Look up armor layers for a material from mount armor (priority) or hull armor (fallback).
-/// Returns the layer vec and total thickness.
-fn lookup_armor_layers(
+/// Look up all non-zero armor layers for a material from mount armor (priority) or hull armor.
+///
+/// Returns `(layers, total)` where `layers` contains all non-zero thickness values
+/// across model_indices, and `total` is their sum. This is used when we want to show
+/// the per-plate thickness for the outermost layer and include all layers in the tooltip.
+fn lookup_all_layers(
     mat_id: u32,
     mount_armor: Option<&ArmorMap>,
     armor_map: Option<&ArmorMap>,
 ) -> (Vec<f32>, f32) {
-    let layers = mount_armor
+    let layers_map = mount_armor
         .and_then(|m| m.get(&mat_id))
-        .or_else(|| armor_map.and_then(|m| m.get(&mat_id)))
-        .cloned()
+        .or_else(|| armor_map.and_then(|m| m.get(&mat_id)));
+    let layers: Vec<f32> = layers_map
+        .map(|m| m.values().copied().filter(|&v| v > 0.0).collect())
         .unwrap_or_default();
     let total: f32 = layers.iter().sum();
     (layers, total)
+}
+
+/// Look up the armor thickness for a specific (material_id, model_index) pair.
+/// Checks mount armor first, then hull armor as fallback.
+fn lookup_thickness(
+    mat_id: u32,
+    model_index: u32,
+    mount_armor: Option<&ArmorMap>,
+    armor_map: Option<&ArmorMap>,
+) -> f32 {
+    mount_armor
+        .and_then(|m| m.get(&mat_id))
+        .and_then(|layers| layers.get(&model_index))
+        .copied()
+        .or_else(|| {
+            armor_map
+                .and_then(|m| m.get(&mat_id))
+                .and_then(|layers| layers.get(&model_index))
+                .copied()
+        })
+        .unwrap_or(0.0)
 }
 
 /// An indexed armor mesh with per-triangle metadata for interactive viewers.
@@ -1167,7 +1192,7 @@ pub struct InteractiveArmorMesh {
     /// Per-triangle metadata. `triangle_info[i]` corresponds to
     /// `indices[i*3..i*3+3]`. Length = `indices.len() / 3`.
     pub triangle_info: Vec<ArmorTriangleInfo>,
-    /// Optional world-space transform (column-major 4×4).
+    /// Optional world-space transform (column-major 4x4).
     /// Used for turret armor instances positioned at mount points.
     /// Hull armor meshes have `None` (already in world space).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
@@ -1183,7 +1208,6 @@ impl InteractiveArmorMesh {
     pub fn from_armor_model(
         armor: &crate::models::geometry::ArmorModel,
         armor_map: Option<&ArmorMap>,
-        model_index: u32,
         mount_armor: Option<&ArmorMap>,
     ) -> Self {
         let tri_count = armor.triangles.len();
@@ -1199,7 +1223,11 @@ impl InteractiveArmorMesh {
             let zone = zone_from_material_name(mat_name).to_string();
 
             let mat_id = tri.material_id as u32;
-            let (layers, thickness_mm) = lookup_armor_layers(mat_id, mount_armor, armor_map);
+            let layer = tri.layer_index as u32;
+            // Use the per-triangle layer_index for the specific plate thickness.
+            let thickness_mm = lookup_thickness(mat_id, layer, mount_armor, armor_map);
+            // Collect all non-zero layers for the tooltip (shows stacked plates).
+            let (all_layers, _) = lookup_all_layers(mat_id, mount_armor, armor_map);
             let color = thickness_to_color(thickness_mm);
 
             for v in 0..3 {
@@ -1210,13 +1238,17 @@ impl InteractiveArmorMesh {
             }
 
             triangle_info.push(ArmorTriangleInfo {
-                model_index,
+                model_index: layer,
                 triangle_index: ti as u32,
                 material_id: tri.material_id,
                 material_name: mat_name.to_string(),
                 zone,
                 thickness_mm,
-                layers,
+                layers: if all_layers.len() > 1 {
+                    all_layers
+                } else {
+                    vec![thickness_mm]
+                },
                 color,
             });
         }
@@ -1242,7 +1274,7 @@ pub struct ArmorSubModel {
     /// Per-vertex RGBA color encoding armor thickness.
     /// All 3 vertices of a triangle share the same color.
     pub colors: Vec<[f32; 4]>,
-    /// Optional world-space transform (column-major 4×4).
+    /// Optional world-space transform (column-major 4x4).
     /// Used for turret armor instances positioned at mount points.
     pub transform: Option<[f32; 16]>,
 }
@@ -1265,7 +1297,8 @@ impl ArmorSubModel {
 
         for (ti, tri) in armor.triangles.iter().enumerate() {
             let mat_id = tri.material_id as u32;
-            let (_, thickness_mm) = lookup_armor_layers(mat_id, mount_armor, armor_map);
+            let layer = tri.layer_index as u32;
+            let thickness_mm = lookup_thickness(mat_id, layer, mount_armor, armor_map);
             let color = thickness_to_color(thickness_mm);
 
             for v in 0..3 {
@@ -2024,12 +2057,13 @@ pub fn armor_sub_models_by_zone(
     > = std::collections::BTreeMap::new();
 
     for tri in &armor.triangles {
+        let mat_id = tri.material_id as u32;
+        let layer = tri.layer_index as u32;
+        let thickness_mm = lookup_thickness(mat_id, layer, mount_armor, armor_map);
+        let color = thickness_to_color(thickness_mm);
+
         let mat_name = collision_material_name(tri.material_id);
         let zone_name = zone_from_material_name(mat_name).to_string();
-
-        let mat_id = tri.material_id as u32;
-        let (_, thickness_mm) = lookup_armor_layers(mat_id, mount_armor, armor_map);
-        let color = thickness_to_color(thickness_mm);
 
         zone_tris.entry(zone_name).or_default().push((tri, color));
     }
