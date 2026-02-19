@@ -888,10 +888,27 @@ impl ShipAssets {
                 continue;
             }
 
+            // Turret models face -Z by default; hardpoints encode the correct
+            // world-space orientation, so pre-multiply a 180-deg Y rotation to
+            // flip the model into the direction the hardpoint expects.
+            // Armor geometry is already aligned with the hardpoint, so it uses
+            // the raw transform without rotation.
+            let armor_transform = transform;
+            let visual_transform = transform.map(|t| {
+                let rot_180_y: [f32; 16] = [
+                    -1.0, 0.0,  0.0, 0.0,
+                     0.0, 1.0,  0.0, 0.0,
+                     0.0, 0.0, -1.0, 0.0,
+                     0.0, 0.0,  0.0, 1.0,
+                ];
+                mat4_mul_col_major(&t, &rot_180_y)
+            });
+
             mounts.push(ResolvedMount {
                 hp_name: mi.hp_name().to_string(),
                 turret_model_index: model_idx,
-                transform,
+                transform: visual_transform,
+                armor_transform,
                 mount_armor: mi.mount_armor().cloned(),
             });
         }
@@ -1127,7 +1144,7 @@ impl ShipModelContext {
                     self.armor_map.as_ref(),
                     mount.mount_armor.as_ref(),
                 );
-                mesh.transform = mount.transform;
+                mesh.transform = mount.armor_transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
                 result.push(mesh);
             }
@@ -1392,7 +1409,7 @@ impl ShipModelContext {
                     mount.mount_armor.as_ref(),
                 );
                 for s in &mut subs {
-                    s.transform = mount.transform;
+                    s.transform = mount.armor_transform;
                     s.name = format!("{} [{}]", s.name, mount.hp_name);
                 }
                 armor_meshes.extend(subs);
@@ -1431,8 +1448,10 @@ struct OwnedSubModel {
 struct ResolvedMount {
     hp_name: String,
     turret_model_index: usize,
-    /// Hardpoint transform (world-space placement from the hull visual's node tree).
+    /// Hardpoint transform with 180-deg Y pre-rotation (for visual turret models).
     transform: Option<[f32; 16]>,
+    /// Raw hardpoint transform without model rotation (for armor geometry).
+    armor_transform: Option<[f32; 16]>,
     /// Per-mount armor map for turret shell surfaces (from `A_Artillery.HP_XXX.armor`).
     mount_armor: Option<crate::game_params::types::ArmorMap>,
 }
@@ -1564,6 +1583,18 @@ pub fn build_texture_set(mfm_infos: &[MfmInfo], vfs: &VfsPath) -> TextureSet {
 /// - `HP_AD` — decoration / depth charge
 /// - `HP_AF` — flags
 /// - `HP_ARF` / `HP_ARS` — rangefinders / radar
+
+
+fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
+        }
+    }
+    out
+}
+
 fn mount_group(hp_name: &str) -> &'static str {
     if hp_name.starts_with("HP_AGM") {
         "Main Battery"

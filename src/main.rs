@@ -1718,6 +1718,54 @@ fn run_armor(
             } else {
                 println!("    GameParams: no armor data available");
             }
+
+            // Print per-layer bounding boxes for multi-layer materials.
+            {
+                // Group triangles by (material_id, layer_index)
+                let mut layer_groups: std::collections::BTreeMap<
+                    (u8, u8),
+                    (usize, [f32; 3], [f32; 3]),
+                > = Default::default();
+                for tri in &am.triangles {
+                    let key = (tri.material_id, tri.layer_index);
+                    let entry =
+                        layer_groups
+                            .entry(key)
+                            .or_insert((0, [f32::MAX; 3], [f32::MIN; 3]));
+                    entry.0 += 1; // triangle count
+                    for v in &tri.vertices {
+                        for i in 0..3 {
+                            entry.1[i] = entry.1[i].min(v[i]);
+                            entry.2[i] = entry.2[i].max(v[i]);
+                        }
+                    }
+                }
+
+                // Only print if there are any multi-layer materials
+                let multi_layer_mats: std::collections::BTreeSet<u8> = layer_groups
+                    .keys()
+                    .map(|(mid, _)| *mid)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|mid| layer_groups.keys().filter(|(m, _)| m == mid).count() > 1)
+                    .collect();
+
+                if !multi_layer_mats.is_empty() {
+                    println!("    Per-layer spatial extent (multi-layer materials):");
+                    for &mid in &multi_layer_mats {
+                        let mat_name = collision_material_name(mid);
+                        for (&(m, layer), &(count, ref lmin, ref lmax)) in &layer_groups {
+                            if m != mid {
+                                continue;
+                            }
+                            println!(
+                                "      mat {:>3} layer {} ({:<20}): {:>4} tris, Y [{:.2} .. {:.2}], Z [{:.2} .. {:.2}]",
+                                mid, layer, mat_name, count, lmin[1], lmax[1], lmin[2], lmax[2],
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

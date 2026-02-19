@@ -737,6 +737,7 @@ pub struct MountPoint {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     mount_armor: Option<ArmorMap>,
+
 }
 
 impl MountPoint {
@@ -767,6 +768,8 @@ impl MountPoint {
     pub fn mount_armor(&self) -> Option<&ArmorMap> {
         self.mount_armor.as_ref()
     }
+
+
 }
 
 /// All mount points for a single component type within a hull upgrade.
