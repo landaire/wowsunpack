@@ -1624,7 +1624,7 @@ fn run_armor(
 
     let armor_map = ctx.armor_map();
 
-    use wowsunpack::export::gltf_export::collision_material_name;
+    use wowsunpack::export::gltf_export::{collision_material_name, zone_from_material_name};
 
     // Helper to print armor layer info for materials found in a geometry.
     fn print_armor_layers(
@@ -1639,28 +1639,32 @@ fn run_armor(
                 if total > 0.0 {
                     matched += 1;
                     let mat_name = collision_material_name(mid);
+                    let hidden = zone_from_material_name(mat_name) == "Hull";
+                    let tag = if hidden { "  [HIDDEN]" } else { "" };
                     let idx_str: Vec<String> = layers_map
                         .iter()
                         .map(|(k, v)| format!("mi{k}={v:.0}"))
                         .collect();
                     if layers.len() == 1 {
                         println!(
-                            "      mat {:>3} ({:<20}) = {:>6.1} mm  [{}]",
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm  [{}]{}",
                             mid,
                             mat_name,
                             total,
-                            idx_str.join(", ")
+                            idx_str.join(", "),
+                            tag,
                         );
                     } else {
                         let layer_str: Vec<String> =
                             layers.iter().map(|v| format!("{v:.0}")).collect();
                         println!(
-                            "      mat {:>3} ({:<20}) = {:>6.1} mm  (layers: [{}])  [{}]",
+                            "      mat {:>3} ({:<20}) = {:>6.1} mm  (layers: [{}])  [{}]{}",
                             mid,
                             mat_name,
                             total,
                             layer_str.join(", "),
-                            idx_str.join(", ")
+                            idx_str.join(", "),
+                            tag,
                         );
                     }
                 }

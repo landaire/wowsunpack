@@ -1126,6 +1126,10 @@ pub struct ArmorTriangleInfo {
     pub layers: Vec<f32>,
     /// RGBA color [0.0–1.0] encoding the total thickness via the game's color scale.
     pub color: [f32; 4],
+    /// Whether the in-game armor viewer hides this plate. Plates in the "Hull"
+    /// parent zone (generic materials like `Trans`, `Deck`, `Belt`) are never
+    /// rendered by the viewer despite being functional in the combat model.
+    pub hidden: bool,
 }
 
 /// Look up all non-zero armor layers for a material from mount armor (priority) or hull armor.
@@ -1237,6 +1241,7 @@ impl InteractiveArmorMesh {
                 colors.push(color);
             }
 
+            let hidden = zone == "Hull";
             triangle_info.push(ArmorTriangleInfo {
                 model_index: layer,
                 triangle_index: ti as u32,
@@ -1250,6 +1255,7 @@ impl InteractiveArmorMesh {
                     vec![thickness_mm]
                 },
                 color,
+                hidden,
             });
         }
 
