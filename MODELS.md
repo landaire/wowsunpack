@@ -447,3 +447,354 @@ No gaps or overlaps; every byte is accounted for.
 - **meshoptimizer** (`meshopt-rs` crate): Required for decoding ENCD-compressed vertex
   and index buffers.
 - **winnow**: Used for binary parsing in the Rust implementation.
+
+---
+
+# Armor System Reverse Engineering
+
+## Collision Material Name Table
+
+**Location in game binary**: `py_collisionMaterialName` function at `sub_140363ba0`.
+The table is a contiguous array of `char*` pointers at `0x142a569a0`, 8 bytes per entry
+(pointer + `0x01000000` tag). 255 entries total (IDs 0–254).
+
+**How it works** (from decompiled code):
+- Material ID is a `u8` extracted from armor BVH node headers (byte 0 of the first
+  16-byte entry of each BVH node group).
+- The function checks `id < 0xFF`, then indexes `table[id]` to get the string pointer.
+- If the pointer is null or id >= 255, it falls back to `sprintf("%d", id)`.
+- The function is a Python-exposed builtin (`py_collisionMaterialName`) returning a
+  Python string object.
+
+**Source path**: `D:\Source\Build\SOURCE\WOWS_GIT_SPARSE\wows\source\lib\lesta\script_junk.cpp`
+
+**Table structure**: The table is NOT sorted alphabetically — entries are grouped
+roughly by function:
+- 0–1: generic (`common`, `zero`)
+- 2–31: `Dual_` zone boundary materials + `Bottom` (ID 12), `Cas_Inclin` (19), `SSC_Inclin` (20)
+- 32–45: turret/artillery components (`TurretSide/Top/Front/Aft`, `Art*`, `AuTurret*`)
+- 46–51: `Bow_*`
+- 52–54: `Bridge*`
+- 55–58: `Cas_*`
+- 59–67: `Cit_*`
+- 68–70: `Dual_Cit_Cas_*`
+- 71–79: misc hull (`Bow_Fdck`, `St_Fdck`, `Kdp*`, `OCit_*`)
+- 80–83: `Rudder*`
+- 84–90: `SSC_*`, `SS_*`
+- 91–96: `St_*`
+- 97–100: generic turret (`TurretBarbette`, `TurretDown`, `TurretFwd`)
+- 101–106: generic hull (`Bulge`, `Trans`, `Deck`, `Belt`, `Inclin`) + `Dual_Cit_SSC_Bulge`
+- 107–110: `SS_Bridge*`, `Cas_Bottom`
+- 111–133: zone sub-face materials (`SideCit`, `DeckCit`, ..., `TransSS`)
+- 134–153: `Tur1GkBar` through `Tur20GkBar` (turret barbettes)
+- 154–173: more `Dual_` transitions + `Dual_Cit_Bow/St_Bottom`
+- 174–193: `Tur1GkDown` through `Tur20GkDown` (turret undersides)
+- 194–213: `Dual_` same-zone pairs + cross-zone `ArtDeck`/`Side` combos
+- 214–233: `Tur1GkTop` through `Tur20GkTop` (turret tops)
+- 234–241: hangar/forecastle (`Cas_Hang`, `Cas_Fdck`, `SSC_Fdck`, `SSC_Hang`,
+  `SS_SGBarbette`, `SS_SGDown`, `SGBarbetteSS`, `SGDownSS`)
+- 242–254: `Dual_Cit_Cas/SSC/Bow` deck/inclin/trans
+
+**IMPORTANT**: This table was completely restructured compared to an earlier game
+version. The entire table must be treated as version-dependent.
+
+## Armor Geometry (BVH Format)
+
+Armor data in each `ArmorModelPrototype` is a BVH tree with interleaved triangle soup.
+Data starts right after the struct (`struct_base + 0x20`) and extends to
+`resolve_relptr(struct_base, data_relptr) + size_in_bytes`.
+
+### Entry Format
+
+All entries are 16 bytes. The data consists of:
+
+1. **2 global header entries** (bounding box + BVH node count)
+2. **N BVH node groups**, each consisting of:
+   - 2 header entries (node header + bbox/vertex_count)
+   - `vertex_count` vertex entries (groups of 3 = triangles)
+
+### Vertex Entry (16 bytes)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     f32    x
+0x04    4     f32    y
+0x08    4     f32    z
+0x0C    1     u8     packed_normal_x    # byte / 127.5 - 1.0
+0x0D    1     u8     packed_normal_y
+0x0E    1     u8     packed_normal_z
+0x0F    1     u8     zero
+```
+
+### BVH Node Header Encoding
+
+Each BVH node group starts with two 16-byte header entries. The first entry's
+first u32 (`first_dword`) encodes both the collision material ID and the layer
+index for multi-layer armor:
+
+```
+first_dword = (layer_index << 16) | material_id
+```
+
+- **byte 0** (bits [7:0]): collision material ID (0–254)
+- **byte 1** (bits [15:8]): unused / zero in all observed data
+- **byte 2** (bits [23:16]): 1-based layer index (matches GameParams `model_index`)
+- **byte 3** (bits [31:24]): unused / zero in all observed data
+
+The second entry has `vertex_count` at bytes 12..16 (`u32` at offset +12).
+
+### Examples
+
+Yamato hull: 6978 triangles (70 BVH nodes).
+Iowa hull: 5762 triangles.
+
+Patrie turret (`FGM051_430_50_Mle_1940`):
+- `0x00010020` → layer=1, mat=32 (TurretSide) → 350mm
+- `0x00020020` → layer=2, mat=32 (TurretSide) → 330mm
+- `0x00010021` → layer=1, mat=33 (TurretTop)  → 255mm
+- `0x00020021` → layer=2, mat=33 (TurretTop)  → 240mm
+
+## Zone Classification
+
+Material names map to armor zones via `zone_from_material_name()` in
+`src/export/gltf_export.rs`. The logic:
+
+1. **Dual-zone** (`Dual_X_Y_Surface`): primary zone = first identifier after `Dual_`.
+   - `Cit`, `OCit` → Citadel
+   - `Cas` → Casemate
+   - `SSC` → Superstructure
+   - `Bow` → Bow
+   - `St_` → Stern
+   - `SS_` → Superstructure
+
+2. **Sub-face suffix** (`SideCit`, `DeckBow`, etc.): zone = suffix.
+   - `*Cit` → Citadel, `*Cas` → Casemate, `*SSC` → Superstructure
+   - `*Bow` → Bow, `*Stern` → Stern, `*SS` → Superstructure
+   - Exception: `SG*SS` (e.g. `SGBarbetteSS`) → SteeringGear
+
+3. **Prefix-based**: `Bow*` → Bow, `St_*` → Stern, `Cit*` → Citadel,
+   `Cas*` → Casemate, `SSC*`/`SS_*` → Superstructure, `Tur*`/`AuTurret*`/`Art*` → Turret,
+   `Rudder*`/`SG*` → SteeringGear, `Bulge*` → TorpedoProtection,
+   `Bridge*`/`Funnel*` → Superstructure, `Kdp*` → Hull
+
+4. **Exact match fallback**: `Deck`/`Belt`/`Trans`/`Inclin`/`Bottom`/etc. → Hull
+
+## Multi-Layer Armor
+
+Multi-layer armor plates are NOT stacked at the same position. Each layer covers
+a **different spatial region** of the hull or turret. The game simply raycasts all
+geometry and the nearest triangle hit determines the result. There is no explicit
+"layer selection" logic — it's an emergent property of the geometry.
+
+### GameParams Armor Dict
+
+**Type**: `HashMap<u32, BTreeMap<u32, f32>>` — outer key = collision material ID
+(0–254), inner key = model_index, value = thickness in mm.
+
+Parsed from GameParams raw keys `(model_index << 16) | material_id` by
+`parse_armor_dict()` in `provider.rs`.
+
+**Two separate armor maps per ship**:
+1. `A_Hull.armor` — hull-wide map covering hull + structural plates.
+2. `A_Artillery.HP_XXX.armor` — per-mount turret shell armor.
+   ATBA secondaries also have per-mount armor (`A_ATBA.HP_XXX.armor`).
+
+**Sparse**: Only 71 entries for Yamato (36 nonzero). Most triangles inherit
+default zone thickness via splash boxes. Keys in pickle data are **integers**,
+not strings — parser must handle both.
+
+### Spatial Layout Examples
+
+**Patrie mat 248 (Dual_Cit_Bow_Trans)** — forward citadel athwartship, Z=5.84:
+| Layer | Thickness | Y Range         | Description              |
+|-------|-----------|-----------------|--------------------------|
+| 1     | 370mm     | -0.21 .. 0.02   | Upper (near waterline)   |
+| 2     | 235mm     | -0.77 .. -0.21  | Lower (below waterline)  |
+
+**Patrie mat 51 (Bow_Trans)** — full bow transverse, Z=5.84:
+| Layer | Thickness | Y Range         | Description              |
+|-------|-----------|-----------------|--------------------------|
+| 1     | 250mm     | -0.21 .. 0.23   | Above waterline          |
+| 2     | 370mm     | -0.21 .. 0.02   | Upper citadel            |
+| 3     | 235mm     | -0.73 .. -0.21  | Lower citadel            |
+
+**Slava mat 61 (Cit_Belt)** — citadel side belt:
+| Layer | Thickness | Y Range        | Z Range         | Description           |
+|-------|-----------|----------------|-----------------|-----------------------|
+| 1     | 370mm     | -0.01 .. 0.15  | -5.85 .. 5.08   | Full citadel length   |
+| 2     | 350mm     | -0.01 .. 0.15  | -3.98 .. 1.87   | Shorter fore-aft span |
+
+Note: Patrie's athwartships stack **vertically** (different Y ranges, same Z plane),
+while Slava's belt layers separate **longitudinally** (same Y range, different Z extents).
+
+### Turret Armor Layers
+
+Turret armor uses the same layer_index mechanism as hull armor. The per-mount
+armor dict has keys with `model_index` = 1, 2, 3 (never 0). Each model_index
+corresponds to a separate set of BVH nodes covering different spatial regions.
+
+**Patrie turret example** (`HP_FGM_1.armor`):
+| Material      | Layer 1  | Layer 2  | Layer 3  |
+|---------------|----------|----------|----------|
+| TurretSide    | 350mm    | 330mm    | —        |
+| TurretTop     | 255mm    | 240mm    | —        |
+| TurretAft     | 330mm    | —        | —        |
+| TurretDown    | 165mm    | 0mm      | 165mm    |
+| TurretFwd     | 590mm    | —        | —        |
+
+## Splash Boxes (`.splash` Files)
+
+Named AABBs for spatial zone classification. Loaded alongside `.geometry` files.
+
+### File Format
+
+```
+u32 count
+Per box:
+  u32 name_len
+  char[name_len] name     # e.g. "CM_SB_bow_1", "CM_SB_cit_1"
+  f32 min_x, min_y, min_z
+  f32 max_x, max_y, max_z
+```
+
+**Classification**: Test triangle centroid against AABBs, smallest-volume wins.
+Triangles not in any box → "Hull" fallback zone.
+
+**GameParams hit locations**: Zones (Bow, Cit, SS, etc.) are top-level entries
+in `A_Hull` with `hlType` field. Each zone has `splashBoxes` array mapping
+zone → splash box names.
+
+## Armor Raycast Pipeline
+
+### C++ Functions (from game binary RE)
+
+| Address | Name | Purpose |
+|---------|------|---------|
+| `0x140367d90` | `getArmorPickedMaterial` | Python-exposed raycast: `(origin, direction) → materialKey` |
+| `0x140969370` | BVH raycast | Internal: iterates registered models, finds nearest triangle |
+| `0x140369030` | `regArmorVisualModel` | Python: `(model, model_index)` → registers armor model |
+| `0x14094b430` | ArmorSystem::registerModel | Allocates ArmorVisualModel entry |
+| `0x140967990` | `ArmorVisualModel_loadModel` | Loads `.geometry`+`.armor`, stores model_index |
+| `0x1403695d0` | `unregArmorVisualModel` | Python: unregisters armor model |
+| `0x1403a1b10` | `getSplashEffectiveArmor` | Receives per-face thickness sequence, computes weighted avg |
+
+### Raycast Flow
+
+1. `getArmorPickedMaterial(ray_origin, ray_direction)` iterates ALL registered
+   armor models (linked list at global `data_142ba78d8 + 0x20`)
+2. For each model, the BVH raycast reads the instance list from `ArmorVisualModel`
+   at offset +0xB0 (begin) to +0xB8 (end)
+3. Each instance entry is 16 bytes:
+   - offset +8: u32 transform index
+   - offset +12: u32 material key `(layer_index << 16) | material_id`
+4. For each instance, applies transform, tests ray-triangle intersection via BVH
+5. Returns `(model_index << 16) | material_id` of the **nearest** hit, or -1
+
+### Thickness Determination
+
+1. C++ `getArmorPickedMaterial` raycasts geometry, returns `materialID`
+2. Python looks up `armorDict[materialID]` (GameParams `.armor` dict)
+3. For triangles WITH explicit overrides: thickness = `armor[materialID]` in mm
+4. For triangles WITHOUT overrides (vast majority): default zone thickness
+   is determined entirely in Python game scripts (encrypted)
+5. `getSplashEffectiveArmor` receives per-face thickness as a Python sequence
+   of up to 6 floats, computes weighted avg by distance
+
+**GameParams `armourCas/Cit/Deck/Extremities` fields are ALL [-1,-1] for every
+ship — never used as overrides.** Zone `armorCoeff` is mostly 0.0; only SG
+(Steering Gear) uses non-zero values (0.2-1.2) as a damage reduction coefficient.
+
+## Armor Viewer Rendering API (Python → C++)
+
+The game's armor viewer is controlled entirely from Python scripts (encrypted).
+The C++ engine exposes rendering primitives only.
+
+### Material Visibility Control
+
+Methods on `PyHitLocation` (`Physics::pyPhysics`, source: `py_hit_location.h`):
+
+| Function | Args | Description |
+|----------|------|-------------|
+| `deactivateMaterial(materialId)` | `u32` | Hide a single material ID from rendering |
+| `activateMaterial(materialId)` | `u32` | Show a previously hidden material |
+| `deactivateMultipleMaterials(seq)` | sequence of ints | Hide multiple material IDs at once |
+| `activateMultipleMaterials(seq)` | sequence of ints | Show multiple material IDs |
+| `isMaterialActive(materialId)` | `u32` → `bool` | Check if a material is currently visible |
+
+**C++ implementation** (`sub_14039d630` / `deactivateMultipleMaterials`):
+- Iterates each Python int in the sequence
+- For each material ID, calls `sub_1403d6700` which searches registered armor
+  model entries (stride 0xD0) for a BVH node group matching `*(entry + 0x30) == materialId`
+- Swaps matching entry to the end of the active range (partition-based hide)
+
+### Armor Color & Highlight
+
+Functions on `Lesta` module (source: `lesta/script_junk.cpp`):
+
+| Function | Args | Description |
+|----------|------|-------------|
+| `setArmorMaterialColor(hitLocation, materialId, color)` | HL, u32, u32 | Set color for a material plate |
+| `setArmorMaterialHighlight(hitLocation, materialId)` | HL, u32 | Highlight a material plate |
+| `clearArmorMaterialColors()` | none | Reset all material colors |
+| `drawHitLocation(hitLocation, materialId)` | HL, u32 | Draw a hit location |
+| `drawHitLocationMaterial(hitLocation, materialId, color)` | HL, u32, u32 | Draw with specific color |
+| `setArmorRenderState(...)` | ... | Set render state for armor display |
+| `clearArmorSystem()` | none | Full reset: clears models, colors, and render state |
+
+### Armor Renderer Internals
+
+`Armor::Renderer` class (source: `gameplay_render/armor/armor_renderer.cpp`):
+
+- **Shaders**: `shaders/armor/armor.fx`, `shaders/armor/outline_detect.fx`,
+  `shaders/armor/resolve.fx`
+- **Render targets**: `armor_renderer_outline_rt`, `armor_renderer_depth_rt`,
+  `armor_renderer_geometry_rt`, `armor_renderer_depth_buffer`
+- **Technique names**: `"Armor"` (main), `"Outline"` (outline detect), `"Resolve"` (composite)
+- **Uniforms**: `armorCameraFarPlane`, `armorFadeEnabled`, `armorPaletteTexture`,
+  `armorQuality`, `armorDepthTexture`, `armorGeometryTexture`
+- **Quality setting**: `ARMOR_SYSTEM_QUALITY` config variable
+
+The palette texture (`Renderer::updatePaletteTexture`) writes per-material colors
+into a texture for the shader to sample.
+
+### Armor Viewer Zone Filtering
+
+The in-game armor viewer does NOT display all armor geometry. It iterates the
+ship's **child hit locations** (Bow, Cas, Cit, SS, SSC, St, SG) and calls
+`drawHitLocation` for each. The **Hull zone** (`hlType=hull_hitlocation`) is the
+root/parent zone and is **never drawn** by the viewer. Its `splashBoxes` array
+is always empty — it serves as the catch-all for triangles not claimed by any
+child zone's splash boxes.
+
+**Consequence**: Collision materials without a zone prefix (`Trans`, `Deck`,
+`Belt`, `Bulge`, `ConstrSide`, `Inclin`, etc.) classify to the Hull fallback
+zone and are **invisible in the armor viewer** despite being fully functional
+in the game's combat model (raycasts DO hit them).
+
+**Slava example** — hidden armor plates:
+| Material ID | Name       | Thickness | Notes                          |
+|-------------|------------|-----------|--------------------------------|
+| 102         | Trans      | 420mm     | Full-height transverse bulkhead|
+| 103         | Deck       | 195mm     | 3 layers [100, 75, 20]         |
+| 104         | Belt       | 720mm     | 2 layers [370, 350]            |
+| 69          | ConstrSide | 50mm      | Longitudinal construction side |
+
+These span the entire hull length or height, crossing multiple splash box zones.
+They provide real shell protection but players cannot see them in the armor viewer.
+Our GLB export correctly includes them in the "Hull" zone node.
+
+### Global Armor System Object
+
+All armor state lives in a global singleton at `data_142ba78d8` (`Armor::System`).
+- Created during `BW::WorldAppModule::init` via `sub_14094c1b0`
+- Destroyed via `sub_14094adda`
+- `clearArmorSystem` resets: `model_count = 0`, clears BVH cache, clears material
+  colors (both at +0x58 and +0x98 offset vectors)
+
+### Key Conclusion: Filtering Is Python-Only
+
+**There is NO C++ logic that decides which plates to show/hide.** All decisions
+about which materials to show, what colors to assign, and how to handle
+multi-layer visibility are made in encrypted Python scripts
+(`scripts/ArmorConstants.pyc`, `scripts/ModelArmor.pyc`, etc.).
