@@ -714,6 +714,55 @@ impl ParamType {
 
 // }
 
+/// Mount species from GameParams `typeinfo.species`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum MountSpecies {
+    Main,
+    Secondary,
+    AAircraft,
+    Torpedo,
+    DCharge,
+    FireControl,
+    Search,
+    MissileGun,
+}
+
+impl MountSpecies {
+    /// Parse from the GameParams `typeinfo.species` string value.
+    pub fn from_gp_str(s: &str) -> Option<Self> {
+        match s {
+            "Main" => Some(Self::Main),
+            "Secondary" => Some(Self::Secondary),
+            "AAircraft" => Some(Self::AAircraft),
+            "Torpedo" => Some(Self::Torpedo),
+            "DCharge" => Some(Self::DCharge),
+            "Fire control" => Some(Self::FireControl),
+            "Search" => Some(Self::Search),
+            "MissileGun" => Some(Self::MissileGun),
+            _ => None,
+        }
+    }
+
+    /// Display group name for Blender outliner hierarchy.
+    pub fn display_group(&self) -> &'static str {
+        match self {
+            Self::Main => "Main Battery",
+            Self::Secondary => "Secondary Battery",
+            Self::AAircraft => "AA Guns",
+            Self::Torpedo => "Torpedoes",
+            Self::DCharge => "Depth Charges",
+            Self::FireControl => "Fire Control",
+            Self::Search => "Radar",
+            Self::MissileGun => "Missiles",
+        }
+    }
+}
+
 /// A single mount point (hardpoint) within a ship component.
 ///
 /// Each ship component (artillery, atba, etc.) has one or more mount points
@@ -737,7 +786,12 @@ pub struct MountPoint {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     mount_armor: Option<ArmorMap>,
-
+    /// Mount species from GameParams `typeinfo.species`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    species: Option<MountSpecies>,
 }
 
 impl MountPoint {
@@ -746,19 +800,30 @@ impl MountPoint {
             hp_name,
             model_path,
             mount_armor: None,
+            species: None,
         }
     }
 
-    pub fn with_armor(hp_name: String, model_path: String, mount_armor: Option<ArmorMap>) -> Self {
+    pub fn with_armor(
+        hp_name: String,
+        model_path: String,
+        mount_armor: Option<ArmorMap>,
+        species: Option<MountSpecies>,
+    ) -> Self {
         Self {
             hp_name,
             model_path,
             mount_armor,
+            species,
         }
     }
 
     pub fn hp_name(&self) -> &str {
         &self.hp_name
+    }
+
+    pub fn species(&self) -> Option<MountSpecies> {
+        self.species
     }
 
     pub fn model_path(&self) -> &str {
@@ -768,8 +833,6 @@ impl MountPoint {
     pub fn mount_armor(&self) -> Option<&ArmorMap> {
         self.mount_armor.as_ref()
     }
-
-
 }
 
 /// All mount points for a single component type within a hull upgrade.
@@ -908,6 +971,8 @@ pub struct ShipConfigData {
     /// Names of torpedo ammo GameParams across all torpedo upgrades.
     /// Resolved to max range in meters in resolve_ranges().
     pub torpedo_ammo: HashSet<String>,
+    /// Names of main battery ammo GameParams across all artillery upgrades.
+    pub main_battery_ammo: HashSet<String>,
 }
 
 /// Resolved ship range values in real-world units.
@@ -1627,6 +1692,51 @@ pub struct Projectile {
     /// Maximum range in BigWorld units. Present for torpedo ammo.
     #[cfg_attr(feature = "serde", serde(default))]
     max_dist: Option<BigWorldDistance>,
+    /// Shell caliber in meters (bulletDiametr).
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_diametr: Option<f32>,
+    /// Shell mass in kg.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_mass: Option<f32>,
+    /// Muzzle velocity in m/s.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_speed: Option<f32>,
+    /// Krupp coefficient (AP penetration factor).
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_krupp: Option<f32>,
+    /// Whether the shell is capped (AP).
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_cap: Option<bool>,
+    /// Cap normalization max angle in degrees.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_cap_normalize_max_angle: Option<f32>,
+    /// Fuse time in seconds.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_detonator: Option<f32>,
+    /// Fuse threshold thickness in mm.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_detonator_threshold: Option<f32>,
+    /// Ricochet start angle in degrees.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_ricochet_at: Option<f32>,
+    /// Guaranteed ricochet angle in degrees.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_always_ricochet_at: Option<f32>,
+    /// HE penetration in mm.
+    #[cfg_attr(feature = "serde", serde(default))]
+    alpha_piercing_he: Option<f32>,
+    /// SAP penetration in mm.
+    #[cfg_attr(feature = "serde", serde(default))]
+    alpha_piercing_cs: Option<f32>,
+    /// Alpha strike damage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    alpha_damage: Option<f32>,
+    /// Fire chance (-0.5 means N/A).
+    #[cfg_attr(feature = "serde", serde(default))]
+    burn_prob: Option<f32>,
+    /// Air drag coefficient.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bullet_air_drag: Option<f32>,
 }
 
 impl Projectile {
@@ -1636,6 +1746,66 @@ impl Projectile {
 
     pub fn max_dist(&self) -> Option<BigWorldDistance> {
         self.max_dist
+    }
+
+    pub fn bullet_diametr(&self) -> Option<f32> {
+        self.bullet_diametr
+    }
+
+    pub fn bullet_mass(&self) -> Option<f32> {
+        self.bullet_mass
+    }
+
+    pub fn bullet_speed(&self) -> Option<f32> {
+        self.bullet_speed
+    }
+
+    pub fn bullet_krupp(&self) -> Option<f32> {
+        self.bullet_krupp
+    }
+
+    pub fn bullet_cap(&self) -> Option<bool> {
+        self.bullet_cap
+    }
+
+    pub fn bullet_cap_normalize_max_angle(&self) -> Option<f32> {
+        self.bullet_cap_normalize_max_angle
+    }
+
+    pub fn bullet_detonator(&self) -> Option<f32> {
+        self.bullet_detonator
+    }
+
+    pub fn bullet_detonator_threshold(&self) -> Option<f32> {
+        self.bullet_detonator_threshold
+    }
+
+    pub fn bullet_ricochet_at(&self) -> Option<f32> {
+        self.bullet_ricochet_at
+    }
+
+    pub fn bullet_always_ricochet_at(&self) -> Option<f32> {
+        self.bullet_always_ricochet_at
+    }
+
+    pub fn alpha_piercing_he(&self) -> Option<f32> {
+        self.alpha_piercing_he
+    }
+
+    pub fn alpha_piercing_cs(&self) -> Option<f32> {
+        self.alpha_piercing_cs
+    }
+
+    pub fn alpha_damage(&self) -> Option<f32> {
+        self.alpha_damage
+    }
+
+    pub fn burn_prob(&self) -> Option<f32> {
+        self.burn_prob
+    }
+
+    pub fn bullet_air_drag(&self) -> Option<f32> {
+        self.bullet_air_drag
     }
 }
 

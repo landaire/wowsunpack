@@ -896,10 +896,8 @@ impl ShipAssets {
             let armor_transform = transform;
             let visual_transform = transform.map(|t| {
                 let rot_180_y: [f32; 16] = [
-                    -1.0, 0.0,  0.0, 0.0,
-                     0.0, 1.0,  0.0, 0.0,
-                     0.0, 0.0, -1.0, 0.0,
-                     0.0, 0.0,  0.0, 1.0,
+                    -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0,
+                    1.0,
                 ];
                 mat4_mul_col_major(&t, &rot_180_y)
             });
@@ -910,6 +908,7 @@ impl ShipAssets {
                 transform: visual_transform,
                 armor_transform,
                 mount_armor: mi.mount_armor().cloned(),
+                species: mi.species(),
             });
         }
 
@@ -1282,7 +1281,7 @@ impl ShipModelContext {
                 visual: &turret_data.visual,
                 geometry: turret_geom,
                 transform: mount.transform,
-                group: mount_group(&mount.hp_name),
+                group: mount_group(mount.species),
             });
         }
 
@@ -1454,6 +1453,8 @@ struct ResolvedMount {
     armor_transform: Option<[f32; 16]>,
     /// Per-mount armor map for turret shell surfaces (from `A_Artillery.HP_XXX.armor`).
     mount_armor: Option<crate::game_params::types::ArmorMap>,
+    /// Mount species from GameParams `typeinfo.species`.
+    species: Option<crate::game_params::types::MountSpecies>,
 }
 
 /// Pre-resolved material-based camouflage scheme (owned data, no lifetimes).
@@ -1573,18 +1574,6 @@ pub fn build_texture_set(mfm_infos: &[MfmInfo], vfs: &VfsPath) -> TextureSet {
     }
 }
 
-/// Categorize a mount's hardpoint name into a display group.
-///
-/// Hardpoint prefixes:
-/// - `HP_AGM` — main gun turrets
-/// - `HP_AGS` — secondary gun turrets
-/// - `HP_AGA` — AA gun mounts
-/// - `HP_ATB` / `HP_AT` — torpedo tube mounts
-/// - `HP_AD` — decoration / depth charge
-/// - `HP_AF` — flags
-/// - `HP_ARF` / `HP_ARS` — rangefinders / radar
-
-
 fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0f32; 16];
     for col in 0..4 {
@@ -1595,17 +1584,11 @@ fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     out
 }
 
-fn mount_group(hp_name: &str) -> &'static str {
-    if hp_name.starts_with("HP_AGM") {
-        "Main Battery"
-    } else if hp_name.starts_with("HP_AGS") {
-        "Secondary Battery"
-    } else if hp_name.starts_with("HP_AGA") {
-        "AA Guns"
-    } else if hp_name.starts_with("HP_ATB") || hp_name.starts_with("HP_AT_") {
-        "Torpedoes"
-    } else {
-        "Other"
+/// Map a mount's species to a display group name.
+fn mount_group(species: Option<crate::game_params::types::MountSpecies>) -> &'static str {
+    match species {
+        Some(s) => s.display_group(),
+        None => "Other",
     }
 }
 

@@ -683,10 +683,18 @@ fn extract_mounts(
                 .and_then(|v| v.dict_ref())
                 .map(|d| parse_armor_dict(&d.inner()));
 
+            // Extract mount species from typeinfo.species.
+            let species = mount_inner
+                .get(&pk("typeinfo"))
+                .and_then(|v| v.dict_ref())
+                .and_then(|d| read_string(&d.inner(), "species"))
+                .and_then(|s| MountSpecies::from_gp_str(&s));
+
             Some(MountPoint::with_armor(
                 key_str.clone(),
                 model_path,
                 mount_armor,
+                species,
             ))
         })
         .collect()
@@ -839,6 +847,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
     // Collect weapon ranges from all upgrade types.
     // Artillery, torpedo, and secondary upgrades are independent of hull selection.
     let mut torpedo_ammo = HashSet::new();
+    let mut main_battery_ammo = HashSet::new();
     let mut max_main_battery_m: Option<Meters> = None;
     let mut max_secondary_battery_m: Option<Meters> = None;
 
@@ -875,6 +884,26 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                             Some(prev) if prev.value() >= m.value() => prev,
                             _ => m,
                         });
+                    }
+                    // Collect main battery ammo from all mounts in the artillery component
+                    for (_mount_key, mount_val) in art_data.inner().iter() {
+                        let Some(mount_dict) = mount_val.dict_ref() else {
+                            continue;
+                        };
+                        let mount_inner = mount_dict.inner();
+                        let Some(ammo_val) = mount_inner.get(&pk(keys::AMMO_LIST)) else {
+                            continue;
+                        };
+                        let mut insert_ammo = |item: &Value| {
+                            if let Some(name) = item.string_ref() {
+                                main_battery_ammo.insert(name.inner().clone());
+                            }
+                        };
+                        match ammo_val {
+                            Value::Tuple(t) => t.inner().iter().for_each(&mut insert_ammo),
+                            Value::List(l) => l.inner().iter().for_each(&mut insert_ammo),
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -949,6 +978,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
 
     let config_data = if hull_upgrades.is_empty()
         && torpedo_ammo.is_empty()
+        && main_battery_ammo.is_empty()
         && max_main_battery_m.is_none()
         && max_secondary_battery_m.is_none()
     {
@@ -959,6 +989,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             main_battery_m: max_main_battery_m,
             secondary_battery_m: max_secondary_battery_m,
             torpedo_ammo,
+            main_battery_ammo,
         })
     };
 
@@ -1263,9 +1294,48 @@ impl GameMetadataProvider {
                                                 .or_else(|| v.i64_ref().map(|i| *i as f32))
                                         })
                                         .map(BigWorldDistance::from);
+                                    let read_opt_f32 = |key: &str| -> Option<f32> {
+                                        param_data.get(&pk(key)).and_then(|v| {
+                                            v.f64_ref().map(|f| *f as f32)
+                                                .or_else(|| v.i64_ref().map(|i| *i as f32))
+                                        })
+                                    };
+                                    let read_opt_bool = |key: &str| -> Option<bool> {
+                                        param_data.get(&pk(key)).and_then(|v| v.bool_ref().copied())
+                                    };
+                                    let bullet_diametr = read_opt_f32("bulletDiametr");
+                                    let bullet_mass = read_opt_f32("bulletMass");
+                                    let bullet_speed = read_opt_f32("bulletSpeed");
+                                    let bullet_krupp = read_opt_f32("bulletKrupp");
+                                    let bullet_cap = read_opt_bool("bulletCap");
+                                    let bullet_cap_normalize_max_angle = read_opt_f32("bulletCapNormalizeMaxAngle");
+                                    let bullet_detonator = read_opt_f32("bulletDetonator");
+                                    let bullet_detonator_threshold = read_opt_f32("bulletDetonatorThreshold");
+                                    let bullet_ricochet_at = read_opt_f32("bulletRicochetAt");
+                                    let bullet_always_ricochet_at = read_opt_f32("bulletAlwaysRicochetAt");
+                                    let alpha_piercing_he = read_opt_f32("alphaPiercingHE");
+                                    let alpha_piercing_cs = read_opt_f32("alphaPiercingCS");
+                                    let alpha_damage = read_opt_f32("alphaDamage");
+                                    let burn_prob = read_opt_f32("burnProb");
+                                    let bullet_air_drag = read_opt_f32("bulletAirDrag");
                                     Some(ParamData::Projectile(Projectile::builder()
                                         .ammo_type(ammo_type)
                                         .maybe_max_dist(max_dist)
+                                        .maybe_bullet_diametr(bullet_diametr)
+                                        .maybe_bullet_mass(bullet_mass)
+                                        .maybe_bullet_speed(bullet_speed)
+                                        .maybe_bullet_krupp(bullet_krupp)
+                                        .maybe_bullet_cap(bullet_cap)
+                                        .maybe_bullet_cap_normalize_max_angle(bullet_cap_normalize_max_angle)
+                                        .maybe_bullet_detonator(bullet_detonator)
+                                        .maybe_bullet_detonator_threshold(bullet_detonator_threshold)
+                                        .maybe_bullet_ricochet_at(bullet_ricochet_at)
+                                        .maybe_bullet_always_ricochet_at(bullet_always_ricochet_at)
+                                        .maybe_alpha_piercing_he(alpha_piercing_he)
+                                        .maybe_alpha_piercing_cs(alpha_piercing_cs)
+                                        .maybe_alpha_damage(alpha_damage)
+                                        .maybe_burn_prob(burn_prob)
+                                        .maybe_bullet_air_drag(bullet_air_drag)
                                         .build()))
                                 },
                                 _ => {
