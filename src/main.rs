@@ -1639,7 +1639,8 @@ fn run_armor(
                 if total > 0.0 {
                     matched += 1;
                     let mat_name = collision_material_name(mid);
-                    let hidden = zone_from_material_name(mat_name) == "Hull";
+                    let zone = zone_from_material_name(mat_name);
+                    let hidden = matches!(zone, "Hull" | "SteeringGear" | "Default");
                     let tag = if hidden { "  [HIDDEN]" } else { "" };
                     let idx_str: Vec<String> = layers_map
                         .iter()

@@ -1241,7 +1241,7 @@ impl InteractiveArmorMesh {
                 colors.push(color);
             }
 
-            let hidden = zone == "Hull";
+            let hidden = matches!(zone.as_str(), "Hull" | "SteeringGear" | "Default");
             triangle_info.push(ArmorTriangleInfo {
                 model_index: layer,
                 triangle_index: ti as u32,
