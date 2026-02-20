@@ -86,6 +86,11 @@ impl From<i32> for Km {
 // --- Read access and unit conversions ---
 
 impl Meters {
+    /// Const constructor for use in static/const contexts.
+    pub const fn new(v: f32) -> Self {
+        Self(v)
+    }
+
     pub fn value(self) -> f32 {
         self.0
     }
@@ -107,6 +112,11 @@ impl BigWorldDistance {
 }
 
 impl Km {
+    /// Const constructor for use in static/const contexts.
+    pub const fn new(v: f32) -> Self {
+        Self(v)
+    }
+
     pub fn value(self) -> f32 {
         self.0
     }
@@ -230,6 +240,73 @@ impl Sub<Meters> for Km {
     type Output = Km;
     fn sub(self, rhs: Meters) -> Km {
         Km(self.0 - rhs.to_km().0)
+    }
+}
+
+// --- Scalar division (for averaging, etc.) ---
+
+impl std::ops::Div<f32> for Meters {
+    type Output = Meters;
+    fn div(self, rhs: f32) -> Meters {
+        Meters(self.0 / rhs)
+    }
+}
+
+impl std::ops::Div<f32> for BigWorldDistance {
+    type Output = BigWorldDistance;
+    fn div(self, rhs: f32) -> BigWorldDistance {
+        BigWorldDistance(self.0 / rhs)
+    }
+}
+
+impl std::ops::Div<f32> for Km {
+    type Output = Km;
+    fn div(self, rhs: f32) -> Km {
+        Km(self.0 / rhs)
+    }
+}
+
+// --- Sum (for iterator aggregation) ---
+
+impl std::iter::Sum for Meters {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Meters(iter.map(|m| m.0).sum())
+    }
+}
+
+impl std::iter::Sum for BigWorldDistance {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        BigWorldDistance(iter.map(|d| d.0).sum())
+    }
+}
+
+impl std::iter::Sum for Km {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Km(iter.map(|k| k.0).sum())
+    }
+}
+
+// --- Cross-type comparison (converts to common unit for PartialEq/PartialOrd) ---
+
+impl PartialEq<BigWorldDistance> for Meters {
+    fn eq(&self, other: &BigWorldDistance) -> bool {
+        self.0 == other.to_meters().0
+    }
+}
+impl PartialOrd<BigWorldDistance> for Meters {
+    fn partial_cmp(&self, other: &BigWorldDistance) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.to_meters().0)
+    }
+}
+
+impl PartialEq<Meters> for BigWorldDistance {
+    fn eq(&self, other: &Meters) -> bool {
+        self.0 == other.to_bigworld().0
+    }
+}
+impl PartialOrd<Meters> for BigWorldDistance {
+    fn partial_cmp(&self, other: &Meters) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.to_bigworld().0)
     }
 }
 
@@ -1680,6 +1757,82 @@ impl Aircraft {
     }
 }
 
+// ─── Shell / Ammo Types ─────────────────────────────────────────────────────────────
+
+/// Strongly-typed ammunition type for projectiles.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AmmoType {
+    AP,
+    HE,
+    SAP,
+    Unknown(String),
+}
+
+impl AmmoType {
+    /// Parse from the game's internal string representation.
+    pub fn from_game_str(s: &str) -> Self {
+        match s {
+            "AP" => Self::AP,
+            "HE" => Self::HE,
+            "CS" => Self::SAP,
+            _ => Self::Unknown(s.to_string()),
+        }
+    }
+
+    /// Display-friendly name.
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::AP => "AP",
+            Self::HE => "HE",
+            Self::SAP => "SAP",
+            Self::Unknown(s) => s,
+        }
+    }
+
+    /// Sort order for consistent display (AP=0, HE=1, SAP=2, Unknown=3).
+    pub fn sort_order(&self) -> u8 {
+        match self {
+            Self::AP => 0,
+            Self::HE => 1,
+            Self::SAP => 2,
+            Self::Unknown(_) => 3,
+        }
+    }
+}
+
+impl std::fmt::Display for AmmoType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
+    }
+}
+
+/// Resolved shell information extracted from GameParams projectile data.
+///
+/// A flattened, easy-to-use representation of a `Projectile`'s ballistic
+/// properties. All units are game-standard (mm for caliber/penetration,
+/// m/s for velocity, kg for mass, degrees for angles).
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ShellInfo {
+    pub name: String,
+    pub ammo_type: AmmoType,
+    pub caliber_mm: f32,
+    pub he_pen_mm: Option<f32>,
+    pub sap_pen_mm: Option<f32>,
+    pub alpha_damage: f32,
+    pub muzzle_velocity: f32,
+    pub mass_kg: f32,
+    pub krupp: f32,
+    pub ricochet_angle: f32,
+    pub always_ricochet_angle: f32,
+    pub fuse_time: f32,
+    pub fuse_threshold: f32,
+    pub burn_prob: f32,
+    pub air_drag: f32,
+    pub normalization: f32,
+}
+
 #[derive(Clone, Builder, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -1806,6 +1959,32 @@ impl Projectile {
 
     pub fn bullet_air_drag(&self) -> Option<f32> {
         self.bullet_air_drag
+    }
+
+    /// Convert this projectile to a [`ShellInfo`] with the given name.
+    ///
+    /// This is the canonical way to build a `ShellInfo` from game data,
+    /// avoiding duplication across consumers.
+    pub fn to_shell_info(&self, name: String) -> ShellInfo {
+        let caliber_mm = self.bullet_diametr.unwrap_or(0.0) * 1000.0;
+        ShellInfo {
+            name,
+            ammo_type: AmmoType::from_game_str(&self.ammo_type),
+            caliber_mm,
+            he_pen_mm: self.alpha_piercing_he,
+            sap_pen_mm: self.alpha_piercing_cs,
+            alpha_damage: self.alpha_damage.unwrap_or(0.0),
+            muzzle_velocity: self.bullet_speed.unwrap_or(0.0),
+            mass_kg: self.bullet_mass.unwrap_or(0.0),
+            krupp: self.bullet_krupp.unwrap_or(0.0),
+            ricochet_angle: self.bullet_ricochet_at.unwrap_or(45.0),
+            always_ricochet_angle: self.bullet_always_ricochet_at.unwrap_or(60.0),
+            fuse_time: self.bullet_detonator.unwrap_or(0.033),
+            fuse_threshold: self.bullet_detonator_threshold.unwrap_or(0.0),
+            burn_prob: self.burn_prob.unwrap_or(-0.5),
+            air_drag: self.bullet_air_drag.unwrap_or(0.0),
+            normalization: self.bullet_cap_normalize_max_angle.unwrap_or(0.0),
+        }
     }
 }
 

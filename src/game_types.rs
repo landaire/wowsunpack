@@ -9,6 +9,8 @@ use crate::data::Version;
 use crate::game_constants::{BattleConstants, CommonConstants, ShipsConstants};
 use crate::recognized::Recognized;
 
+use crate::game_params::types::Meters;
+
 // =============================================================================
 // Identity Types
 // =============================================================================
@@ -313,6 +315,37 @@ impl std::ops::Mul<f32> for WorldPos {
             y: self.y * rhs,
             z: self.z * rhs,
         }
+    }
+}
+
+impl std::ops::Div<f32> for WorldPos {
+    type Output = WorldPos;
+    fn div(self, rhs: f32) -> WorldPos {
+        WorldPos {
+            x: self.x / rhs,
+            y: self.y / rhs,
+            z: self.z / rhs,
+        }
+    }
+}
+
+impl std::iter::Sum for WorldPos {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(WorldPos::default(), |a, b| WorldPos {
+            x: a.x + b.x,
+            y: a.y + b.y,
+            z: a.z + b.z,
+        })
+    }
+}
+
+impl WorldPos {
+    /// Horizontal (XZ-plane) distance to another position, returned in meters.
+    /// Both positions are in BigWorld coordinates (1 BW = 30m).
+    pub fn distance_xz(&self, other: &WorldPos) -> Meters {
+        let dx = (self.x - other.x) * 30.0;
+        let dz = (self.z - other.z) * 30.0;
+        Meters::from((dx * dx + dz * dz).sqrt())
     }
 }
 

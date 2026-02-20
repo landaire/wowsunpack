@@ -1479,4 +1479,16 @@ impl GameMetadataProvider {
     //     }
     //     None
     // }
+
+    /// Build a `ShellInfo` from a projectile's `GameParamId`.
+    ///
+    /// Resolves the param, extracts the projectile data, and converts it to
+    /// the flattened `ShellInfo` representation. Returns `None` if the param
+    /// doesn't exist or isn't a projectile.
+    pub fn resolve_shell_from_param_id(&self, params_id: GameParamId) -> Option<ShellInfo> {
+        let param = GameParamProvider::game_param_by_id(self, params_id)?;
+        let projectile = param.projectile()?;
+        let name = param.name().to_string();
+        Some(projectile.to_shell_info(name))
+    }
 }
