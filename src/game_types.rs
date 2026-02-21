@@ -56,6 +56,58 @@ impl From<i64> for EntityId {
     }
 }
 
+/// Entity identifier for the client-side Avatar entity.
+///
+/// In WoWs replays the recording player has two entities: a Vehicle (the ship,
+/// tracked by `EntityId`) and an Avatar (the client object that receives RPC
+/// methods like `receiveShotKills`, `receiveArtilleryShots`, etc.).
+/// This type distinguishes avatar entity IDs from vehicle/ship entity IDs to
+/// prevent silent mismatches.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct AvatarId(u32);
+
+impl AvatarId {
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for AvatarId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "avatar:{}", self.0)
+    }
+}
+
+impl From<EntityId> for AvatarId {
+    fn from(eid: EntityId) -> Self {
+        AvatarId(eid.raw())
+    }
+}
+
+impl From<u32> for AvatarId {
+    fn from(v: u32) -> Self {
+        AvatarId(v)
+    }
+}
+
+impl From<i32> for AvatarId {
+    fn from(v: i32) -> Self {
+        AvatarId(v as u32)
+    }
+}
+
+impl From<i64> for AvatarId {
+    fn from(v: i64) -> Self {
+        AvatarId(v as u32)
+    }
+}
+
 /// A persistent player account identifier (db_id, avatar_id).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
