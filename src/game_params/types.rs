@@ -48,6 +48,15 @@ pub struct BigWorldDistance(f32);
 )]
 pub struct Km(f32);
 
+/// Distance in millimeters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct Millimeters(f32);
+
 // --- Construction ---
 
 impl From<f32> for Meters {
@@ -83,6 +92,17 @@ impl From<i32> for Km {
     }
 }
 
+impl From<f32> for Millimeters {
+    fn from(v: f32) -> Self {
+        Self(v)
+    }
+}
+impl From<i32> for Millimeters {
+    fn from(v: i32) -> Self {
+        Self(v as f32)
+    }
+}
+
 // --- Read access and unit conversions ---
 
 impl Meters {
@@ -99,6 +119,9 @@ impl Meters {
     }
     pub fn to_km(self) -> Km {
         Km(self.0 / 1000.0)
+    }
+    pub fn to_mm(self) -> Millimeters {
+        Millimeters(self.0 * 1000.0)
     }
 }
 
@@ -125,6 +148,23 @@ impl Km {
     }
 }
 
+impl Millimeters {
+    /// Const constructor for use in static/const contexts.
+    pub const fn new(v: f32) -> Self {
+        Self(v)
+    }
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+    pub fn to_meters(self) -> Meters {
+        Meters(self.0 / 1000.0)
+    }
+    pub fn to_bigworld(self) -> BigWorldDistance {
+        self.to_meters().to_bigworld()
+    }
+}
+
 // --- Scalar multiplication (dimensionless coefficients) ---
 
 impl Mul<f32> for Meters {
@@ -145,6 +185,13 @@ impl Mul<f32> for Km {
     type Output = Km;
     fn mul(self, rhs: f32) -> Km {
         Km(self.0 * rhs)
+    }
+}
+
+impl Mul<f32> for Millimeters {
+    type Output = Millimeters;
+    fn mul(self, rhs: f32) -> Millimeters {
+        Millimeters(self.0 * rhs)
     }
 }
 
@@ -186,6 +233,19 @@ impl Sub for Km {
     type Output = Km;
     fn sub(self, rhs: Km) -> Km {
         Km(self.0 - rhs.0)
+    }
+}
+
+impl Add for Millimeters {
+    type Output = Millimeters;
+    fn add(self, rhs: Millimeters) -> Millimeters {
+        Millimeters(self.0 + rhs.0)
+    }
+}
+impl Sub for Millimeters {
+    type Output = Millimeters;
+    fn sub(self, rhs: Millimeters) -> Millimeters {
+        Millimeters(self.0 - rhs.0)
     }
 }
 
@@ -266,6 +326,13 @@ impl std::ops::Div<f32> for Km {
     }
 }
 
+impl std::ops::Div<f32> for Millimeters {
+    type Output = Millimeters;
+    fn div(self, rhs: f32) -> Millimeters {
+        Millimeters(self.0 / rhs)
+    }
+}
+
 // --- Sum (for iterator aggregation) ---
 
 impl std::iter::Sum for Meters {
@@ -283,6 +350,12 @@ impl std::iter::Sum for BigWorldDistance {
 impl std::iter::Sum for Km {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         Km(iter.map(|k| k.0).sum())
+    }
+}
+
+impl std::iter::Sum for Millimeters {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Millimeters(iter.map(|m| m.0).sum())
     }
 }
 
