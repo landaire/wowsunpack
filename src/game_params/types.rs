@@ -11,6 +11,11 @@ use super::provider::GameMetadataProvider;
 /// Conversion factor: 1 BigWorld unit = 30 meters.
 const BW_TO_METERS: f32 = 30.0;
 
+/// Conversion factor: 1 BigWorld unit = 15 ship-model units.
+/// Ship geometry (armor meshes, hull models) uses this coordinate space
+/// where 1 ship-model unit = 2 real meters (= 30 / 15).
+const BW_TO_SHIP: f32 = 15.0;
+
 /// Per-material armor thickness map.
 ///
 /// Outer key = collision material ID (0–254).
@@ -38,6 +43,18 @@ pub struct Meters(f32);
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct BigWorldDistance(f32);
+
+/// Distance in ship-model coordinate units (1 unit = 2 meters).
+/// Ship geometry (armor meshes, hull visual models) uses this coordinate space.
+/// The game defines BW_TO_SHIP = 15, meaning 1 BigWorld unit = 15 ship-model units,
+/// so 1 ship-model unit = BW_TO_METERS / BW_TO_SHIP = 30 / 15 = 2 meters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ShipModelDistance(f32);
 
 /// Distance in kilometers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
@@ -117,6 +134,12 @@ impl Meters {
     pub fn to_bigworld(self) -> BigWorldDistance {
         BigWorldDistance(self.0 / BW_TO_METERS)
     }
+    /// Convert to ship-model units (1 unit = 2 meters).
+    /// Use this for distances that will be compared against ship geometry
+    /// (armor meshes, hull models), which are in ship-model coordinates.
+    pub fn to_ship_model(self) -> ShipModelDistance {
+        ShipModelDistance(self.0 * BW_TO_SHIP / BW_TO_METERS)
+    }
     pub fn to_km(self) -> Km {
         Km(self.0 / 1000.0)
     }
@@ -131,6 +154,18 @@ impl BigWorldDistance {
     }
     pub fn to_meters(self) -> Meters {
         Meters(self.0 * BW_TO_METERS)
+    }
+}
+
+impl ShipModelDistance {
+    pub fn value(self) -> f32 {
+        self.0
+    }
+    pub fn to_meters(self) -> Meters {
+        Meters(self.0 * BW_TO_METERS / BW_TO_SHIP)
+    }
+    pub fn to_bigworld(self) -> BigWorldDistance {
+        BigWorldDistance(self.0 / BW_TO_SHIP)
     }
 }
 
@@ -1067,6 +1102,11 @@ pub struct HullUpgradeConfig {
     /// Ship draft (depth below waterline) in meters, from the hull component.
     #[cfg_attr(feature = "serde", serde(default))]
     pub draft: Option<Meters>,
+    /// Normalized waterline offset from model origin.
+    /// Range [-1, 1]: -1 = bottom of bounding box, 0 = pivot (model origin), +1 = top.
+    /// Used to position the waterline plane on the ship model.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dock_y_offset: Option<f32>,
     /// Mount points grouped by component type key.
     #[cfg_attr(feature = "serde", serde(default))]
     pub mounts_by_type: HashMap<String, ComponentMounts>,
@@ -1086,6 +1126,12 @@ impl HullUpgradeConfig {
     /// Get the ship draft in meters.
     pub fn draft(&self) -> Option<Meters> {
         self.draft
+    }
+
+    /// Get the normalized waterline offset from model origin.
+    /// Range [-1, 1]: -1 = bottom of bounding box, 0 = pivot, +1 = top.
+    pub fn dock_y_offset(&self) -> Option<f32> {
+        self.dock_y_offset
     }
 
     /// Get mount points for a specific component type.
@@ -1890,7 +1936,7 @@ impl std::fmt::Display for AmmoType {
 pub struct ShellInfo {
     pub name: String,
     pub ammo_type: AmmoType,
-    pub caliber_mm: f32,
+    pub caliber: Millimeters,
     pub he_pen_mm: Option<f32>,
     pub sap_pen_mm: Option<f32>,
     pub alpha_damage: f32,
@@ -2039,11 +2085,11 @@ impl Projectile {
     /// This is the canonical way to build a `ShellInfo` from game data,
     /// avoiding duplication across consumers.
     pub fn to_shell_info(&self, name: String) -> ShellInfo {
-        let caliber_mm = self.bullet_diametr.unwrap_or(0.0) * 1000.0;
+        let caliber_mm = Millimeters::new(self.bullet_diametr.unwrap_or(0.0) * 1000.0);
         ShellInfo {
             name,
             ammo_type: AmmoType::from_game_str(&self.ammo_type),
-            caliber_mm,
+            caliber: caliber_mm,
             he_pen_mm: self.alpha_piercing_he,
             sap_pen_mm: self.alpha_piercing_cs,
             alpha_damage: self.alpha_damage.unwrap_or(0.0),

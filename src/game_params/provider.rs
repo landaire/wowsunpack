@@ -822,6 +822,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                 );
                 config.hull_model_path = read_string(&hull_data, keys::MODEL);
                 config.draft = read_float(&hull_data, keys::DRAFT).map(Meters::from);
+                config.dock_y_offset = read_float(&hull_data, keys::DOCK_Y_OFFSET);
             }
         }
 
