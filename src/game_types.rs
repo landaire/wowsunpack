@@ -1451,3 +1451,135 @@ impl fmt::Display for BattleType {
         f.write_str(self.name())
     }
 }
+
+/// What the projectile collided with (from CollisionMath module).
+/// Mapped from `COLLISION_TYPES` in ships.xml.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum CollisionType {
+    NoHit,
+    HitWater,
+    HitGround,
+    HitEntity,
+    HitEntityBB,
+    HitWave,
+}
+
+impl CollisionType {
+    pub fn from_id(
+        id: i32,
+        constants: &ShipsConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .collision_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
+        match name {
+            "NO_HIT" => Recognized::Known(CollisionType::NoHit),
+            "HIT_WATER" => Recognized::Known(CollisionType::HitWater),
+            "HIT_GROUND" => Recognized::Known(CollisionType::HitGround),
+            "HIT_ENTITY" => Recognized::Known(CollisionType::HitEntity),
+            "HIT_ENTITY_BB" => Recognized::Known(CollisionType::HitEntityBB),
+            "HIT_WAVE" => Recognized::Known(CollisionType::HitWave),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            CollisionType::NoHit => "NO_HIT",
+            CollisionType::HitWater => "HIT_WATER",
+            CollisionType::HitGround => "HIT_GROUND",
+            CollisionType::HitEntity => "HIT_ENTITY",
+            CollisionType::HitEntityBB => "HIT_ENTITY_BB",
+            CollisionType::HitWave => "HIT_WAVE",
+        }
+    }
+}
+
+impl fmt::Display for CollisionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Shell penetration result (from ConstantsShip module).
+/// Mapped from `SHELL_HIT_TYPES` in ships.xml.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum ShellHitType {
+    /// Normal penetration (full damage).
+    Normal,
+    /// Ricochet (shell bounced off armor).
+    Ricochet,
+    /// Citadel hit (maximum damage).
+    MajorHit,
+    /// Shatter (failed to penetrate armor).
+    NoPenetration,
+    /// Overpenetration (shell passed through without detonating).
+    Overpenetration,
+    /// No shell hit type (non-shell projectiles).
+    None,
+    /// Exit point of an overpenetration.
+    ExitOverpenetration,
+    /// Underwater hit.
+    Underwater,
+}
+
+impl ShellHitType {
+    pub fn from_id(
+        id: i32,
+        constants: &ShipsConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .shell_hit_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
+        match name {
+            "SHELL_HIT_TYPE_NORMAL" => Recognized::Known(ShellHitType::Normal),
+            "SHELL_HIT_TYPE_RICOCHET" => Recognized::Known(ShellHitType::Ricochet),
+            "SHELL_HIT_TYPE_MAJORHIT" => Recognized::Known(ShellHitType::MajorHit),
+            "SHELL_HIT_TYPE_NOPENETRATION" => Recognized::Known(ShellHitType::NoPenetration),
+            "SHELL_HIT_TYPE_OVERPENETRATION" => Recognized::Known(ShellHitType::Overpenetration),
+            "SHELL_HIT_TYPE_NONE" => Recognized::Known(ShellHitType::None),
+            "SHELL_HIT_TYPE_EXIT_OVERPENETRATION" => {
+                Recognized::Known(ShellHitType::ExitOverpenetration)
+            }
+            "SHELL_HIT_TYPE_UNDERWATER" => Recognized::Known(ShellHitType::Underwater),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            ShellHitType::Normal => "SHELL_HIT_TYPE_NORMAL",
+            ShellHitType::Ricochet => "SHELL_HIT_TYPE_RICOCHET",
+            ShellHitType::MajorHit => "SHELL_HIT_TYPE_MAJORHIT",
+            ShellHitType::NoPenetration => "SHELL_HIT_TYPE_NOPENETRATION",
+            ShellHitType::Overpenetration => "SHELL_HIT_TYPE_OVERPENETRATION",
+            ShellHitType::None => "SHELL_HIT_TYPE_NONE",
+            ShellHitType::ExitOverpenetration => "SHELL_HIT_TYPE_EXIT_OVERPENETRATION",
+            ShellHitType::Underwater => "SHELL_HIT_TYPE_UNDERWATER",
+        }
+    }
+}
+
+impl fmt::Display for ShellHitType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}

@@ -4,7 +4,8 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 use crate::game_types::{
-    BuoyancyState, CameraMode, Consumable, DeathCause, FinishType, WeaponType,
+    BuoyancyState, CameraMode, CollisionType, Consumable, DeathCause, FinishType, ShellHitType,
+    WeaponType,
 };
 
 fn read_vfs_file(vfs: &vfs::VfsPath, path: &str) -> Result<Vec<u8>, vfs::VfsError> {
@@ -628,6 +629,8 @@ impl BattleConstants {
 pub struct ShipsConstants {
     weapon_types: HashMap<i32, Cow<'static, str>>,
     module_types: HashMap<i32, Cow<'static, str>>,
+    shell_hit_types: HashMap<i32, Cow<'static, str>>,
+    collision_types: HashMap<i32, Cow<'static, str>>,
 }
 
 impl ShipsConstants {
@@ -653,6 +656,8 @@ impl ShipsConstants {
                 .unwrap_or(defaults.weapon_types),
             module_types: parse_integer_enum(xml_str, "SHIP_MODULE_TYPES")
                 .unwrap_or(defaults.module_types),
+            shell_hit_types: defaults.shell_hit_types,
+            collision_types: defaults.collision_types,
         }
     }
 
@@ -695,6 +700,24 @@ impl ShipsConstants {
                 (12, Cow::Borrowed("SECONDARY_WEAPONS")),
                 (13, Cow::Borrowed("ABILITIES")),
             ]),
+            shell_hit_types: HashMap::from([
+                (0, Cow::Borrowed(ShellHitType::Normal.name())),
+                (1, Cow::Borrowed(ShellHitType::Ricochet.name())),
+                (2, Cow::Borrowed(ShellHitType::MajorHit.name())),
+                (3, Cow::Borrowed(ShellHitType::NoPenetration.name())),
+                (4, Cow::Borrowed(ShellHitType::Overpenetration.name())),
+                (5, Cow::Borrowed(ShellHitType::None.name())),
+                (6, Cow::Borrowed(ShellHitType::ExitOverpenetration.name())),
+                (7, Cow::Borrowed(ShellHitType::Underwater.name())),
+            ]),
+            collision_types: HashMap::from([
+                (0, Cow::Borrowed(CollisionType::NoHit.name())),
+                (1, Cow::Borrowed(CollisionType::HitWater.name())),
+                (2, Cow::Borrowed(CollisionType::HitGround.name())),
+                (3, Cow::Borrowed(CollisionType::HitEntity.name())),
+                (4, Cow::Borrowed(CollisionType::HitEntityBB.name())),
+                (5, Cow::Borrowed(CollisionType::HitWave.name())),
+            ]),
         }
     }
 
@@ -720,6 +743,30 @@ impl ShipsConstants {
 
     pub fn module_types_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
         &mut self.module_types
+    }
+
+    pub fn shell_hit_type(&self, id: i32) -> Option<&str> {
+        self.shell_hit_types.get(&id).map(|s| s.as_ref())
+    }
+
+    pub fn collision_type(&self, id: i32) -> Option<&str> {
+        self.collision_types.get(&id).map(|s| s.as_ref())
+    }
+
+    pub fn shell_hit_types(&self) -> &HashMap<i32, Cow<'static, str>> {
+        &self.shell_hit_types
+    }
+
+    pub fn collision_types(&self) -> &HashMap<i32, Cow<'static, str>> {
+        &self.collision_types
+    }
+
+    pub fn shell_hit_types_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
+        &mut self.shell_hit_types
+    }
+
+    pub fn collision_types_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
+        &mut self.collision_types
     }
 }
 
