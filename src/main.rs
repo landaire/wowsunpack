@@ -818,6 +818,12 @@ fn run() -> Result<(), Report> {
                             bar.println(format!("{path} matched"));
                         }
                     }
+
+                    // Avoid retaining huge allocations from large files (e.g. GameParams).
+                    const MAX_RETAINED: usize = 4 * 1024 * 1024;
+                    if buffer.capacity() > MAX_RETAINED {
+                        *buffer = Vec::new();
+                    }
                 });
         }
         Commands::DiffDump { out_dir } => {
