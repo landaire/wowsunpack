@@ -39,8 +39,9 @@ pub const ALL_COMPONENT_TYPES: &[&str] = &[
     COMP_TORPEDOES,
 ];
 
-/// Component types that have 3D models (excludes hull — hull is the parent model).
+/// Component types that have 3D models (mounted on hull hardpoints).
 pub const MODEL_COMPONENT_TYPES: &[&str] = &[
+    COMP_HULL,
     COMP_ARTILLERY,
     COMP_ATBA,
     COMP_AIR_DEFENSE,

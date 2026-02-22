@@ -244,15 +244,17 @@ pub fn unpack_normal(packed: u32) -> [f32; 3] {
 
 /// Unpack a 4-byte packed UV into `[f32; 2]`.
 ///
-/// The packed format is 2 x float16 (IEEE 754 half-precision), stored as
-/// `[u_half, v_half]` in little-endian order.
+/// The on-disk format is 2 x IEEE 754 float16 (half-precision) with a -0.5
+/// bias, stored as `[u_half, v_half]` in little-endian order. The engine
+/// stores `actual_uv - 0.5` to center values around zero where float16 has
+/// the most precision, then adds 0.5 back when loading to the GPU.
 pub fn unpack_uv(packed: u32) -> [f32; 2] {
     let bytes = packed.to_le_bytes();
     let u_bits = u16::from_le_bytes([bytes[0], bytes[1]]);
     let v_bits = u16::from_le_bytes([bytes[2], bytes[3]]);
     [
-        half::f16::from_bits(u_bits).to_f32(),
-        half::f16::from_bits(v_bits).to_f32(),
+        half::f16::from_bits(u_bits).to_f32() + 0.5,
+        half::f16::from_bits(v_bits).to_f32() + 0.5,
     ]
 }
 

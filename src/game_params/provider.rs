@@ -1115,17 +1115,21 @@ impl GameMetadataProvider {
                 .dict_ref()
                 .expect("game params is not a dict")
                 .clone()
-        } else {
-            let params_list = pickled_params
-                .list_ref()
-                .expect("Root game params is not a list")
-                .inner();
-
-            let params = &params_list[0];
+        } else if let Some(params_list) = pickled_params.list_ref() {
+            let params = &params_list.inner()[0];
             params
                 .dict_ref()
-                .expect("First element of GameParams is not a dictionary")
+                .expect("First element of GameParams list is not a dictionary")
                 .clone()
+        } else if let Some(params_tuple) = pickled_params.tuple_ref() {
+            let inner = params_tuple.inner();
+            let params = &inner[0];
+            params
+                .dict_ref()
+                .expect("First element of GameParams tuple is not a dictionary")
+                .clone()
+        } else {
+            panic!("Root game params is not a dict, list, or tuple");
         };
 
         let new_params = params_dict

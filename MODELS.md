@@ -450,6 +450,77 @@ No gaps or overlaps; every byte is accounted for.
 
 ---
 
+# ModelPrototype Format (blob index 3)
+
+Reverse-engineered from `WorldOfWarships64.exe` using Binary Ninja.
+
+ModelPrototype wraps a VisualPrototype, adding skeleton extensions, animations,
+and dye/tint data. The `.model` file in BigWorld traditionally references a
+`.visual` -- this is how that reference is stored in `assets.bin`.
+
+- **Magic:** `0xA9576F28` (MurmurHash3_x86_32 of `"ModelPrototype"`)
+- **Item size:** `0x28` (40 bytes)
+- **Blob index:** 3
+- **Registration function:** `sub_140035b20`
+
+## ModelPrototype Record (0x28 bytes)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    8     u64    visualResourceId     # selfId (path hash) of the .visual in pathsStorage
+0x08    1     u8     skelExtResIdCount    # number of skeleton extension resource IDs
+0x09    1     u8     miscType             # purpose unknown (seen as 0 or small values)
+0x0A    1     u8     animationsCount      # number of animation entries
+0x0B    1     u8     dyesCount            # number of dye entries
+0x0C    4     ---    (padding/reserved)
+0x10    8     i64    skelExtResIdsPtr     # relptr -> u64[] (skeleton extension resource IDs)
+0x18    8     i64    animationsPtr        # relptr -> AnimationEntry[] (0x28 bytes each)
+0x20    8     i64    dyesPtr              # relptr -> DyeEntry[] (0x20 bytes each)
+```
+
+### Resolving the Visual
+
+`visualResourceId` is a `selfId` (64-bit path hash) that can be looked up in the
+`pathsStorage` section of `assets.bin` to find the corresponding `.visual` file path.
+This is more reliable than string-replacing `.model` with `.visual` in the file path.
+
+### AnimationEntry (0x28 bytes each)
+
+Same layout as a ModelPrototype record -- contains its own `visualResourceId`,
+skeleton extensions, animations (recursive), and dyes. Used for animation
+overlays.
+
+### DyeEntry (0x20 bytes)
+
+Material dye/tint replacement data for ship camouflage and cosmetic systems.
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     u32    matterId             # string ID of the target material name
+0x04    4     u32    replacesId           # string ID of the replacement material name
+0x08    4     i32    tintsCount           # number of tint entries
+0x0C    4     ---    (padding)
+0x10    8     i64    tintNameIdsPtr       # relptr -> u32[] (string IDs of tint names)
+0x18    8     i64    tintMaterialIdsPtr   # relptr -> u64[] (selfIds of tint .mfm materials)
+```
+
+### Binary Ninja Functions
+
+| Address         | Name / Purpose                                       |
+|-----------------|------------------------------------------------------|
+| `sub_140035b20` | Registration (sets blob_index=3, size=0x28)          |
+| `sub_1407f32c0` | Per-item deserialization (reads all fields)           |
+| `sub_1407f0080` | `createStaticArray` -- deserializes record array    |
+| `sub_1407ef780` | `dumpDynamicArray` -- serializes record array       |
+| `sub_1407f0400` | Destructor -- frees skelExtResIds, animations, dyes  |
+| `sub_1407f4660` | DyeEntry deserialization                             |
+| `sub_1407f3860` | skelExtResIds array deserialization                   |
+
+
+---
+
 # Armor System Reverse Engineering
 
 ## Collision Material Name Table

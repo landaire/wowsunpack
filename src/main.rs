@@ -224,6 +224,10 @@ enum Commands {
         /// List available camouflage texture schemes, then exit
         #[arg(long)]
         list_textures: bool,
+
+        /// Enable verbose debug output (UV decoding details, etc.)
+        #[arg(long)]
+        debug: bool,
     },
     /// Inspect armor model geometry and GameParams thickness data for a ship
     Armor {
@@ -259,6 +263,15 @@ enum Commands {
         /// Read file from disk instead of VFS
         #[clap(long)]
         no_vfs: bool,
+    },
+    /// Dump UV coordinate statistics for hull meshes of a ship
+    DumpUvs {
+        /// Ship name
+        name: String,
+
+        /// Hull upgrade to use
+        #[arg(long)]
+        hull: Option<String>,
     },
 }
 
@@ -983,6 +996,7 @@ fn run() -> Result<(), Report> {
             no_textures,
             damaged,
             list_textures,
+            debug,
         } => {
             let Some(vfs) = &vfs else {
                 bail!("VFS required for export-ship. Use --game-dir to specify a game install.");
@@ -1000,6 +1014,7 @@ fn run() -> Result<(), Report> {
                 no_textures,
                 damaged,
                 list_textures,
+                debug,
             )?;
         }
         Commands::Armor { name, hull } => {
@@ -1010,6 +1025,12 @@ fn run() -> Result<(), Report> {
             };
 
             run_armor(vfs, &name, &game_dir, game_version, hull.as_deref())?;
+        }
+        Commands::DumpUvs { name, hull } => {
+            let Some(vfs) = &vfs else {
+                bail!("VFS required. Use --game-dir to specify a game install.");
+            };
+            run_dump_uvs(vfs, &name, &game_dir, game_version, hull.as_deref())?;
         }
         Commands::AssetsBin {
             file,
@@ -1501,6 +1522,7 @@ fn run_export_ship(
     no_textures: bool,
     damaged: bool,
     list_textures: bool,
+    debug: bool,
 ) -> Result<(), Report> {
     use wowsunpack::export::ship::{ShipAssets, ShipExportOptions};
 
@@ -1566,6 +1588,7 @@ fn run_export_ship(
 
     let has_armor = ctx.armor_map().is_some() || ctx.hull_splash_bytes().is_some();
 
+    wowsunpack::export::set_debug(debug);
     let mut file = std::fs::File::create(output).context("Failed to create output file")?;
     ctx.export_glb(&mut file)?;
 
@@ -1904,6 +1927,365 @@ fn main() -> Result<(), Report> {
         "Finished in {} seconds",
         (Instant::now() - timestamp).as_secs_f32()
     );
+
+    Ok(())
+}
+
+fn run_dump_uvs(
+    vfs: &VfsPath,
+    name: &str,
+    _game_dir: &Path,
+    _game_version: Option<u64>,
+    _hull_selection: Option<&str>,
+) -> Result<(), Report> {
+    use wowsunpack::models::{geometry, vertex_format};
+
+    // Try to find and extract .geometry files matching the name from VFS.
+    let mut geom_files: Vec<(String, Vec<u8>)> = Vec::new();
+
+    // List all files in VFS matching the name.
+    let name_lower = name.to_lowercase();
+    // Walk the VFS to find .geometry files.
+    fn walk_vfs(path: &VfsPath, results: &mut Vec<String>) {
+        if let Ok(entries) = path.read_dir() {
+            for entry in entries {
+                let p = entry.as_str().to_string();
+                if p.ends_with(".geometry") {
+                    results.push(p);
+                }
+                walk_vfs(&entry, results);
+            }
+        }
+    }
+
+    // Instead of walking VFS (slow), try direct path construction.
+    // The user provides a directory name like "JSB001_Kawachi_1912".
+    // Geometry files are at content/gameplay/{nation}/ship/{type}/{name}/{name}_{part}.geometry
+    // But we do not know nation/type. Just search for the name in known locations.
+    let nations = [
+        "japan",
+        "usa",
+        "germany",
+        "uk",
+        "france",
+        "ussr",
+        "italy",
+        "pan_america",
+        "pan_asia",
+        "europe",
+        "netherlands",
+        "spain",
+        "commonwealth",
+    ];
+    let ship_types = [
+        "battleship",
+        "cruiser",
+        "destroyer",
+        "aircarrier",
+        "submarine",
+    ];
+    let parts = ["", "_Bow", "_MidFront", "_MidBack", "_Stern"];
+
+    for nation in &nations {
+        for stype in &ship_types {
+            for part in &parts {
+                let path =
+                    format!("content/gameplay/{nation}/ship/{stype}/{name}/{name}{part}.geometry");
+                if let Ok(file_path) = vfs.join(&path) {
+                    if let Ok(mut f) = file_path.open_file() {
+                        let mut data = Vec::new();
+                        if f.read_to_end(&mut data).is_ok() && !data.is_empty() {
+                            geom_files.push((path, data));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if geom_files.is_empty() {
+        bail!(
+            "No .geometry files found for '{}'. Try using the full model directory name (e.g. JSB001_Kawachi_1912).",
+            name
+        );
+    }
+
+    println!(
+        "Found {} geometry files for '{}':
+",
+        geom_files.len(),
+        name
+    );
+
+    for (path, data) in &geom_files {
+        println!("=== {} ({} bytes) ===", path, data.len());
+
+        let geom = match geometry::parse_geometry(data) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("  Failed to parse: {}", e);
+                continue;
+            }
+        };
+
+        println!(
+            "  Vertex buffers: {}  Index buffers: {}",
+            geom.merged_vertices.len(),
+            geom.merged_indices.len()
+        );
+        println!(
+            "  Vertex mappings: {}  Index mappings: {}",
+            geom.vertices_mapping.len(),
+            geom.indices_mapping.len()
+        );
+        for (mi, vm) in geom.vertices_mapping.iter().enumerate() {
+            println!(
+                "    vert_mapping[{}]: id={} buf={} offset={} count={}",
+                mi, vm.mapping_id, vm.merged_buffer_index, vm.items_offset, vm.items_count
+            );
+        }
+        for (mi, im) in geom.indices_mapping.iter().enumerate() {
+            println!(
+                "    idx_mapping[{}]: id={} buf={} offset={} count={}",
+                mi, im.mapping_id, im.merged_buffer_index, im.items_offset, im.items_count
+            );
+        }
+        // Check ALL index ranges against vertex buffers
+        // Decode index buffer(s) and check max index vs total vertex count
+        for (bi, ibuf) in geom.merged_indices.iter().enumerate() {
+            let decoded_i = match ibuf.data.decode() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let idx_size = ibuf.index_size as usize;
+            let total_indices = decoded_i.len() / idx_size;
+            let max_idx: u32 = match idx_size {
+                2 => decoded_i
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                    .max()
+                    .unwrap_or(0),
+                4 => decoded_i
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .max()
+                    .unwrap_or(0),
+                _ => continue,
+            };
+            println!(
+                "    Index buf {}: {} indices, max_idx={}",
+                bi, total_indices, max_idx
+            );
+            // Check each index mapping range
+            for im in geom
+                .indices_mapping
+                .iter()
+                .filter(|m| m.merged_buffer_index as usize == bi)
+            {
+                let idx_start = im.items_offset as usize * idx_size;
+                let idx_end = idx_start + im.items_count as usize * idx_size;
+                if idx_end > decoded_i.len() {
+                    continue;
+                }
+                let idx_slice = &decoded_i[idx_start..idx_end];
+                let max_i: u32 = match idx_size {
+                    2 => idx_slice
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                        .max()
+                        .unwrap_or(0),
+                    4 => idx_slice
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .max()
+                        .unwrap_or(0),
+                    _ => continue,
+                };
+                let min_i: u32 = match idx_size {
+                    2 => idx_slice
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                        .min()
+                        .unwrap_or(0),
+                    4 => idx_slice
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .min()
+                        .unwrap_or(0),
+                    _ => continue,
+                };
+                println!(
+                    "      idx_map id={}: offset={} count={} idx_range=[{}, {}]",
+                    im.mapping_id, im.items_offset, im.items_count, min_i, max_i
+                );
+            }
+        }
+        // For each vertex mapping, show which vertex ranges exist
+        for vbuf_idx in 0..geom.merged_vertices.len() {
+            let vbuf = &geom.merged_vertices[vbuf_idx];
+            let decoded_v = match vbuf.data.decode() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let stride = vbuf.stride_in_bytes as usize;
+            let total_verts = decoded_v.len() / stride;
+            println!(
+                "    Vertex buf {}: {} total verts (format={})",
+                vbuf_idx, total_verts, vbuf.format_name
+            );
+            for vm in geom
+                .vertices_mapping
+                .iter()
+                .filter(|m| m.merged_buffer_index as usize == vbuf_idx)
+            {
+                println!(
+                    "      vert_map id={}: offset={} count={} range=[{}, {})",
+                    vm.mapping_id,
+                    vm.items_offset,
+                    vm.items_count,
+                    vm.items_offset,
+                    vm.items_offset + vm.items_count
+                );
+            }
+        }
+
+        for (buf_idx, vert_proto) in geom.merged_vertices.iter().enumerate() {
+            let format = vertex_format::parse_vertex_format(&vert_proto.format_name);
+            let stride = vert_proto.stride_in_bytes as usize;
+
+            let uv_attr = format
+                .attributes
+                .iter()
+                .find(|a| a.semantic == vertex_format::AttributeSemantic::TexCoord0);
+            let uv_attr = match uv_attr {
+                Some(a) => a,
+                None => {
+                    println!(
+                        "  Buffer {}: format='{}' stride={} (no UV)",
+                        buf_idx, vert_proto.format_name, stride
+                    );
+                    continue;
+                }
+            };
+
+            let decoded = match vert_proto.data.decode() {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("  Buffer {}: decode error: {}", buf_idx, e);
+                    continue;
+                }
+            };
+
+            let count = decoded.len() / stride;
+            println!(
+                "  Buffer {}: format='{}' stride={} vertices={} uv_offset={}",
+                buf_idx, vert_proto.format_name, stride, count, uv_attr.offset
+            );
+
+            if count == 0 {
+                continue;
+            }
+
+            let mut f16_u_min = f32::MAX;
+            let mut f16_u_max = f32::MIN;
+            let mut f16_v_min = f32::MAX;
+            let mut f16_v_max = f32::MIN;
+            let mut sn_u_min = f32::MAX;
+            let mut sn_u_max = f32::MIN;
+            let mut sn_v_min = f32::MAX;
+            let mut sn_v_max = f32::MIN;
+
+            let sample_count = count.min(15);
+            let mut samples = Vec::new();
+
+            for i in 0..count {
+                let off = i * stride + uv_attr.offset;
+                if off + 4 > decoded.len() {
+                    break;
+                }
+                let raw = &decoded[off..off + 4];
+                let u_bits = u16::from_le_bytes([raw[0], raw[1]]);
+                let v_bits = u16::from_le_bytes([raw[2], raw[3]]);
+
+                let u_f16 = half::f16::from_bits(u_bits).to_f32();
+                let v_f16 = half::f16::from_bits(v_bits).to_f32();
+                f16_u_min = f16_u_min.min(u_f16);
+                f16_u_max = f16_u_max.max(u_f16);
+                f16_v_min = f16_v_min.min(v_f16);
+                f16_v_max = f16_v_max.max(v_f16);
+
+                let u_sn = (u_bits as i16) as f32 / 32767.0;
+                let v_sn = (v_bits as i16) as f32 / 32767.0;
+                sn_u_min = sn_u_min.min(u_sn);
+                sn_u_max = sn_u_max.max(u_sn);
+                sn_v_min = sn_v_min.min(v_sn);
+                sn_v_max = sn_v_max.max(v_sn);
+
+                if i < sample_count {
+                    samples.push((i, u_bits, v_bits, u_f16, v_f16, u_sn, v_sn));
+                }
+            }
+
+            println!(
+                "    float16 range:  u=[{:.6}, {:.6}] v=[{:.6}, {:.6}]  span=({:.4}, {:.4})",
+                f16_u_min,
+                f16_u_max,
+                f16_v_min,
+                f16_v_max,
+                f16_u_max - f16_u_min,
+                f16_v_max - f16_v_min
+            );
+            println!(
+                "    snorm16 range:  u=[{:.6}, {:.6}] v=[{:.6}, {:.6}]  span=({:.4}, {:.4})",
+                sn_u_min,
+                sn_u_max,
+                sn_v_min,
+                sn_v_max,
+                sn_u_max - sn_u_min,
+                sn_v_max - sn_v_min
+            );
+
+            println!("    Samples:");
+            println!(
+                "    {:>5}  {:>6} {:>6}  {:>10} {:>10}  {:>10} {:>10}",
+                "idx", "u_raw", "v_raw", "f16_u", "f16_v", "sn16_u", "sn16_v"
+            );
+            for &(i, ub, vb, uf, vf, us, vs) in &samples {
+                println!(
+                    "    {:>5}  0x{:04X} 0x{:04X}  {:>10.6} {:>10.6}  {:>10.6} {:>10.6}",
+                    i, ub, vb, uf, vf, us, vs
+                );
+            }
+            // Also dump first 5 vertices with BOTH position and UV
+            let pos_attr = format
+                .attributes
+                .iter()
+                .find(|a| a.semantic == vertex_format::AttributeSemantic::Position);
+            if let Some(pa) = pos_attr {
+                println!("    Position+UV correlation (first 10 verts):");
+                for i in 0..count.min(10) {
+                    let poff = i * stride + pa.offset;
+                    let uoff = i * stride + uv_attr.offset;
+                    if poff + 12 > decoded.len() || uoff + 4 > decoded.len() {
+                        break;
+                    }
+                    let x = f32::from_le_bytes(decoded[poff..poff + 4].try_into().unwrap());
+                    let y = f32::from_le_bytes(decoded[poff + 4..poff + 8].try_into().unwrap());
+                    let z = f32::from_le_bytes(decoded[poff + 8..poff + 12].try_into().unwrap());
+                    let raw = &decoded[uoff..uoff + 4];
+                    let u_bits = u16::from_le_bytes([raw[0], raw[1]]);
+                    let v_bits = u16::from_le_bytes([raw[2], raw[3]]);
+                    let u = half::f16::from_bits(u_bits).to_f32();
+                    let v = half::f16::from_bits(v_bits).to_f32();
+                    println!(
+                        "      v[{}]: pos=({:.2}, {:.2}, {:.2}) uv=({:.6}, {:.6})",
+                        i, x, y, z, u, v
+                    );
+                }
+                println!();
+            }
+        }
+    }
 
     Ok(())
 }

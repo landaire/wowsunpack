@@ -5,3 +5,5 @@ pub mod geometry;
 pub mod vertex_format;
 #[cfg(feature = "models")]
 pub mod visual;
+#[cfg(feature = "models")]
+pub mod model;

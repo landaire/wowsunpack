@@ -472,6 +472,20 @@ impl fmt::Display for GameClock {
     }
 }
 
+impl Eq for GameClock {}
+
+impl Ord for GameClock {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl std::hash::Hash for GameClock {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
 impl std::ops::Add<f32> for GameClock {
     type Output = GameClock;
     fn add(self, rhs: f32) -> GameClock {
@@ -497,6 +511,94 @@ impl std::ops::Sub<std::time::Duration> for GameClock {
     type Output = GameClock;
     fn sub(self, rhs: std::time::Duration) -> GameClock {
         GameClock(self.0 - rhs.as_secs_f32())
+    }
+}
+
+impl std::ops::Sub<f32> for GameClock {
+    type Output = GameClock;
+    fn sub(self, rhs: f32) -> GameClock {
+        GameClock(self.0 - rhs)
+    }
+}
+
+impl From<f32> for GameClock {
+    fn from(secs: f32) -> Self {
+        GameClock(secs)
+    }
+}
+
+impl GameClock {
+    /// Convert to elapsed time given a battle start epoch.
+    pub fn to_elapsed(self, battle_start: GameClock) -> ElapsedClock {
+        ElapsedClock((self.0 - battle_start.0).max(0.0))
+    }
+}
+
+/// Seconds elapsed since battle start (battleStage transition).
+/// Distinct from GameClock which counts from replay recording start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ElapsedClock(pub f32);
+
+impl ElapsedClock {
+    pub fn seconds(self) -> f32 {
+        self.0
+    }
+
+    /// Convert back to absolute GameClock given a battle start epoch.
+    pub fn to_absolute(self, battle_start: GameClock) -> GameClock {
+        GameClock(battle_start.0 + self.0)
+    }
+}
+
+impl Eq for ElapsedClock {}
+
+impl Ord for ElapsedClock {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl std::hash::Hash for ElapsedClock {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+impl fmt::Display for ElapsedClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:.1}s", self.0)
+    }
+}
+
+impl std::ops::Add<f32> for ElapsedClock {
+    type Output = ElapsedClock;
+    fn add(self, rhs: f32) -> ElapsedClock {
+        ElapsedClock(self.0 + rhs)
+    }
+}
+
+impl std::ops::Sub for ElapsedClock {
+    type Output = f32;
+    fn sub(self, rhs: ElapsedClock) -> f32 {
+        self.0 - rhs.0
+    }
+}
+
+impl std::ops::Sub<f32> for ElapsedClock {
+    type Output = ElapsedClock;
+    fn sub(self, rhs: f32) -> ElapsedClock {
+        ElapsedClock(self.0 - rhs)
+    }
+}
+
+impl From<f32> for ElapsedClock {
+    fn from(secs: f32) -> Self {
+        ElapsedClock(secs)
     }
 }
 

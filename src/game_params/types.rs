@@ -915,6 +915,7 @@ pub enum MountSpecies {
     FireControl,
     Search,
     MissileGun,
+    Decoration,
 }
 
 impl MountSpecies {
@@ -929,6 +930,7 @@ impl MountSpecies {
             "Fire control" => Some(Self::FireControl),
             "Search" => Some(Self::Search),
             "MissileGun" => Some(Self::MissileGun),
+            "Decoration" => Some(Self::Decoration),
             _ => None,
         }
     }
@@ -944,6 +946,7 @@ impl MountSpecies {
             Self::FireControl => "Fire Control",
             Self::Search => "Radar",
             Self::MissileGun => "Missiles",
+            Self::Decoration => "Decorations",
         }
     }
 }

@@ -30,6 +30,7 @@ use crate::game_params::provider::GameMetadataProvider;
 use crate::game_params::types::{ArmorMap, GameParamProvider, MountPoint, Vehicle};
 use crate::models::assets_bin::{self, PrototypeDatabase};
 use crate::models::geometry;
+use crate::models::model;
 use crate::models::visual::{self, VisualPrototype};
 
 use super::camouflage::{self, CamouflageDb};
@@ -180,6 +181,11 @@ impl ShipAssets {
     /// Access the underlying `GameMetadataProvider`.
     pub fn metadata(&self) -> &GameMetadataProvider {
         &self.metadata
+    }
+
+    /// Access the underlying VFS root.
+    pub fn vfs(&self) -> &VfsPath {
+        &self.vfs
     }
 
     /// Find a ship by name (fuzzy display-name match or exact model dir).
@@ -739,21 +745,13 @@ impl ShipAssets {
 
         for (sub_name, _) in visual_paths {
             let visual_suffix = format!("{sub_name}.visual");
-            let (vis_location, _) = db
-                .resolve_path(&visual_suffix, self_id_index)
-                .context_with(|| format!("Could not resolve visual: {visual_suffix}"))?;
-
-            if vis_location.blob_index != 1 {
-                eprintln!(
-                    "Warning: '{visual_suffix}' resolved to blob {} (not VisualPrototype), skipping",
-                    vis_location.blob_index
-                );
-                continue;
-            }
-
-            let vis_data = db
-                .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
-                .context("Failed to get visual prototype data")?;
+            let vis_data = match resolve_visual_data(db, &visual_suffix, self_id_index) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Warning: skipping '{visual_suffix}': {e}");
+                    continue;
+                }
+            };
             let vp = visual::parse_visual(vis_data).context("Failed to parse VisualPrototype")?;
 
             let geom_path_idx =
@@ -870,6 +868,18 @@ impl ShipAssets {
         let (turret_models, turret_model_index) =
             self.load_turret_models_deduped(db, self_id_index, mount_points)?;
 
+        // Build a mapping from simple HP name -> turret model index so compound
+        // hardpoints can look up their parent turret's visual for sub-HP nodes.
+        let mut simple_hp_to_turret: HashMap<String, usize> = HashMap::new();
+        for mi in mount_points {
+            let hp_parts: Vec<&str> = mi.hp_name().split("_HP_").collect();
+            if hp_parts.len() == 1 {
+                if let Some(&idx) = turret_model_index.get(mi.model_path()) {
+                    simple_hp_to_turret.insert(mi.hp_name().to_string(), idx);
+                }
+            }
+        }
+
         // Build resolved mounts.
         let mut mounts = Vec::new();
         for mi in mount_points {
@@ -877,13 +887,37 @@ impl ShipAssets {
                 continue;
             };
 
-            // Skip compound hardpoints.
+            // Resolve transform: simple HP from hull, compound HP by composing
+            // parent (hull) and child (turret visual) transforms.
             let hp_parts: Vec<&str> = mi.hp_name().split("_HP_").collect();
-            if hp_parts.len() > 1 {
-                continue;
-            }
+            let transform = if hp_parts.len() == 1 {
+                // Simple hardpoint: look up directly from hull visuals.
+                hp_transforms.get(mi.hp_name()).copied()
+            } else {
+                // Compound hardpoint: e.g. "HP_BGM_2_HP_BGA_2"
+                // parent = "HP_BGM_2", child = "HP_BGA_2"
+                let parent_hp = hp_parts[0];
+                let child_hp = format!("HP_{}", hp_parts[1]);
 
-            let transform = hp_transforms.get(mi.hp_name()).copied();
+                let parent_xform = hp_transforms.get(parent_hp).copied();
+                let child_xform = parent_xform.and_then(|_| {
+                    let &parent_turret_idx = simple_hp_to_turret.get(parent_hp)?;
+                    let parent_turret = &turret_models[parent_turret_idx];
+                    parent_turret.visual.find_hardpoint_transform(&child_hp, &db.strings)
+                });
+
+                match (parent_xform, child_xform) {
+                    (Some(p), Some(c)) => Some(mat4_mul_col_major(&p, &c)),
+                    _ => {
+                        eprintln!(
+                            "Warning: could not resolve compound HP '{}' (parent={}, child={})",
+                            mi.hp_name(), parent_hp, child_hp
+                        );
+                        continue;
+                    }
+                }
+            };
+
             if transform.is_none() {
                 continue;
             }
@@ -970,21 +1004,7 @@ impl ShipAssets {
             .unwrap_or(&visual_path)
             .to_string();
 
-        let (vis_location, _) = db
-            .resolve_path(&visual_suffix, self_id_index)
-            .context_with(|| format!("Could not resolve turret visual: {visual_suffix}"))?;
-
-        if vis_location.blob_index != 1 {
-            bail!(
-                "Turret visual '{}' resolved to blob {} (expected 1)",
-                visual_suffix,
-                vis_location.blob_index
-            );
-        }
-
-        let vis_data = db
-            .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
-            .context("Failed to get turret visual data")?;
+        let vis_data = resolve_visual_data(db, &visual_suffix, self_id_index)?;
         let vp = visual::parse_visual(vis_data).context("Failed to parse turret visual")?;
 
         let geom_path_idx = self_id_index
@@ -1041,6 +1061,73 @@ pub struct ShipModelContext {
     hit_locations: Option<HashMap<String, crate::game_params::types::HitLocation>>,
 }
 
+/// Resolve a visual suffix to VisualPrototype record data.
+///
+/// If the suffix resolves to blob 1 (VisualPrototype), returns the data directly.
+/// If it resolves to blob 3 (ModelPrototype), parses the ModelPrototype and follows
+/// its `visual_resource_id` to look up the actual VisualPrototype.
+fn resolve_visual_data<'a>(
+    db: &'a PrototypeDatabase<'a>,
+    visual_suffix: &str,
+    self_id_index: &HashMap<u64, usize>,
+) -> Result<&'a [u8], Report> {
+    let (vis_location, _) = db
+        .resolve_path(visual_suffix, self_id_index)
+        .context_with(|| format!("Could not resolve visual: {visual_suffix}"))?;
+
+    match vis_location.blob_index {
+        1 => {
+            // Direct VisualPrototype
+            Ok(db.get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
+                .context("Failed to get visual prototype data")?)
+        }
+        3 => {
+            // ModelPrototype -- follow visualResourceId to the actual VisualPrototype
+            let model_data = db
+                .get_prototype_data(vis_location, model::MODEL_ITEM_SIZE)
+                .context("Failed to get model prototype data")?;
+            let mp = model::parse_model(model_data)
+                .context_with(|| format!("Failed to parse ModelPrototype for {visual_suffix}"))?;
+
+            if mp.visual_resource_id == 0 {
+                bail!("ModelPrototype for '{}' has null visualResourceId", visual_suffix);
+            }
+
+            // Look up the visual resource by its selfId
+            let r2p_value = db
+                .lookup_r2p(mp.visual_resource_id)
+                .ok_or_else(|| {
+                    rootcause::report!(
+                        "visualResourceId 0x{:016X} from ModelPrototype '{}' not found in r2p map",
+                        mp.visual_resource_id,
+                        visual_suffix
+                    )
+                })?;
+            let vis_loc = db.decode_r2p_value(r2p_value)
+                .context("Failed to decode r2p value for visual resource")?;
+
+            if vis_loc.blob_index != 1 {
+                bail!(
+                    "ModelPrototype '{}' visualResourceId resolved to blob {} (expected 1)",
+                    visual_suffix,
+                    vis_loc.blob_index
+                );
+            }
+
+            Ok(db.get_prototype_data(vis_loc, visual::VISUAL_ITEM_SIZE)
+                .context("Failed to get visual prototype data via ModelPrototype")?)
+        }
+        other => {
+            bail!(
+                "'{}' resolved to blob {} (expected 1=Visual or 3=Model)",
+                visual_suffix,
+                other
+            );
+        }
+    }
+}
+
+
 impl ShipModelContext {
     /// Ship identity information.
     pub fn info(&self) -> &ShipInfo {
@@ -1086,6 +1173,15 @@ impl ShipModelContext {
     /// Names of unique turret/mount models.
     pub fn turret_model_names(&self) -> Vec<&str> {
         self.turret_models.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    /// Number of LOD levels available for hull meshes.
+    pub fn hull_lod_count(&self) -> usize {
+        self.hull_parts
+            .iter()
+            .map(|p| p.visual.lods.len())
+            .max()
+            .unwrap_or(1)
     }
 
     /// Hit location zones from GameParams (e.g. "Citadel" → HitLocation).
