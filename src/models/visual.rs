@@ -462,6 +462,16 @@ impl VisualPrototype {
         Some(result)
     }
 
+    /// Get the local (non-composed) matrix of a named node.
+    pub fn find_node_local_matrix(
+        &self,
+        name: &str,
+        strings: &StringsSection<'_>,
+    ) -> Option<[f32; 16]> {
+        let node_idx = self.find_node_index_by_name(name, strings)?;
+        Some(self.nodes.matrices[node_idx as usize].0)
+    }
+
     /// Find the node index for a given node name string.
     pub fn find_node_index_by_name(&self, name: &str, strings: &StringsSection<'_>) -> Option<u16> {
         for (i, &name_id) in self.nodes.name_map_name_ids.iter().enumerate() {

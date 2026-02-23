@@ -903,7 +903,9 @@ impl ShipAssets {
                 let child_xform = parent_xform.and_then(|_| {
                     let &parent_turret_idx = simple_hp_to_turret.get(parent_hp)?;
                     let parent_turret = &turret_models[parent_turret_idx];
-                    parent_turret.visual.find_hardpoint_transform(&child_hp, &db.strings)
+                    parent_turret
+                        .visual
+                        .find_hardpoint_transform(&child_hp, &db.strings)
                 });
 
                 match (parent_xform, child_xform) {
@@ -911,7 +913,9 @@ impl ShipAssets {
                     _ => {
                         eprintln!(
                             "Warning: could not resolve compound HP '{}' (parent={}, child={})",
-                            mi.hp_name(), parent_hp, child_hp
+                            mi.hp_name(),
+                            parent_hp,
+                            child_hp
                         );
                         continue;
                     }
@@ -922,18 +926,42 @@ impl ShipAssets {
                 continue;
             }
 
-            // Turret models face -Z by default; hardpoints encode the correct
-            // world-space orientation, so pre-multiply a 180-deg Y rotation to
-            // flip the model into the direction the hardpoint expects.
+            // The turret model's Rotate_Y_BlendBone encodes its rest-pose
+            // facing direction.  To place the model correctly at the hardpoint
+            // we undo this rest-pose rotation so the hardpoint's own orientation
+            // takes over: visual_transform = hp_transform * inverse(bone_rotation).
             // Armor geometry is already aligned with the hardpoint, so it uses
-            // the raw transform without rotation.
+            // the raw transform without rotation correction.
             let armor_transform = transform;
-            let visual_transform = transform.map(|t| {
-                let rot_180_y: [f32; 16] = [
-                    -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0,
-                    1.0,
-                ];
-                mat4_mul_col_major(&t, &rot_180_y)
+            let turret_visual = &turret_models[model_idx].visual;
+            let bone_local =
+                turret_visual.find_node_local_matrix("Rotate_Y_BlendBone", &db.strings);
+            if let Some(m) = &bone_local {
+                eprintln!(
+                    "DEBUG bone '{}' model='{}': diag=[{:.3},{:.3},{:.3},{:.3}] m[2]={:.3} m[8]={:.3} m[1]={:.3} m[4]={:.3}",
+                    mi.hp_name(),
+                    mi.model_path(),
+                    m[0],
+                    m[5],
+                    m[10],
+                    m[15],
+                    m[2],
+                    m[8],
+                    m[1],
+                    m[4]
+                );
+            } else {
+                eprintln!(
+                    "DEBUG no bone '{}' model='{}'",
+                    mi.hp_name(),
+                    mi.model_path()
+                );
+            }
+            let rotation_correction =
+                bone_local.map(|bone_local| mat4_rotation_inverse(&bone_local));
+            let visual_transform = transform.map(|t| match rotation_correction {
+                Some(inv) => mat4_mul_col_major(&t, &inv),
+                None => t, // no bone → assume model already faces correct direction
             });
 
             mounts.push(ResolvedMount {
@@ -1078,7 +1106,8 @@ fn resolve_visual_data<'a>(
     match vis_location.blob_index {
         1 => {
             // Direct VisualPrototype
-            Ok(db.get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
+            Ok(db
+                .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
                 .context("Failed to get visual prototype data")?)
         }
         3 => {
@@ -1090,20 +1119,22 @@ fn resolve_visual_data<'a>(
                 .context_with(|| format!("Failed to parse ModelPrototype for {visual_suffix}"))?;
 
             if mp.visual_resource_id == 0 {
-                bail!("ModelPrototype for '{}' has null visualResourceId", visual_suffix);
+                bail!(
+                    "ModelPrototype for '{}' has null visualResourceId",
+                    visual_suffix
+                );
             }
 
             // Look up the visual resource by its selfId
-            let r2p_value = db
-                .lookup_r2p(mp.visual_resource_id)
-                .ok_or_else(|| {
-                    rootcause::report!(
-                        "visualResourceId 0x{:016X} from ModelPrototype '{}' not found in r2p map",
-                        mp.visual_resource_id,
-                        visual_suffix
-                    )
-                })?;
-            let vis_loc = db.decode_r2p_value(r2p_value)
+            let r2p_value = db.lookup_r2p(mp.visual_resource_id).ok_or_else(|| {
+                rootcause::report!(
+                    "visualResourceId 0x{:016X} from ModelPrototype '{}' not found in r2p map",
+                    mp.visual_resource_id,
+                    visual_suffix
+                )
+            })?;
+            let vis_loc = db
+                .decode_r2p_value(r2p_value)
                 .context("Failed to decode r2p value for visual resource")?;
 
             if vis_loc.blob_index != 1 {
@@ -1114,7 +1145,8 @@ fn resolve_visual_data<'a>(
                 );
             }
 
-            Ok(db.get_prototype_data(vis_loc, visual::VISUAL_ITEM_SIZE)
+            Ok(db
+                .get_prototype_data(vis_loc, visual::VISUAL_ITEM_SIZE)
                 .context("Failed to get visual prototype data via ModelPrototype")?)
         }
         other => {
@@ -1126,7 +1158,6 @@ fn resolve_visual_data<'a>(
         }
     }
 }
-
 
 impl ShipModelContext {
     /// Ship identity information.
@@ -1678,6 +1709,24 @@ fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
         }
     }
     out
+}
+
+/// Extract the rotation part of a column-major 4x4 matrix and return its
+/// inverse (transpose) as a full 4x4 matrix with zero translation.
+///
+/// Valid for rigid-body transforms (orthonormal rotation + translation).
+/// The inverse of the rotation part is simply its transpose.
+fn mat4_rotation_inverse(m: &[f32; 16]) -> [f32; 16] {
+    // Column-major layout:
+    //   col0 = m[0..4], col1 = m[4..8], col2 = m[8..12], col3 = m[12..16]
+    // 3x3 rotation at (row, col) -> m[col*4 + row]
+    // Transpose: swap (row, col) -> (col, row)
+    [
+        m[0], m[4], m[8], 0.0, // col 0 = original row 0
+        m[1], m[5], m[9], 0.0, // col 1 = original row 1
+        m[2], m[6], m[10], 0.0, // col 2 = original row 2
+        0.0, 0.0, 0.0, 1.0, // no translation
+    ]
 }
 
 /// Map a mount's species to a display group name.
