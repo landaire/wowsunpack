@@ -332,7 +332,7 @@ fn collect_primitives(
         let idx_slice = &decoded_indices[idx_start..idx_end];
 
         // Parse indices as u32.
-        let indices: Vec<u32> = match index_size {
+        let mut indices: Vec<u32> = match index_size {
             2 => idx_slice
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
@@ -434,14 +434,17 @@ fn unpack_vertices(
             let x = f32::from_le_bytes(data[off..off + 4].try_into().unwrap());
             let y = f32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
             let z = f32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap());
-            positions.push([x, y, z]);
+            // Negate Z: converts left-handed (BigWorld) to right-handed (glTF).
+            // This implicitly reverses triangle winding and flips normals consistently.
+            positions.push([x, y, -z]);
         }
 
-        // Normal: packed 4 bytes
+        // Normal: packed 4 bytes — negate Z to match position space.
         if let Some(attr) = norm_attr {
             let off = base + attr.offset;
             let packed = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-            normals.push(vertex_format::unpack_normal(packed));
+            let [nx, ny, nz] = vertex_format::unpack_normal(packed);
+            normals.push([nx, ny, -nz]);
         }
 
         // UV: packed 4 bytes (2 x float16)
@@ -453,6 +456,18 @@ fn unpack_vertices(
     }
 
     (positions, normals, uvs)
+}
+
+/// Convert a column-major 4x4 transform from left-handed to right-handed
+/// coordinates by conjugating with S = diag(1,1,-1,1): M' = S * M * S.
+/// This negates the Z row and Z column of the 3x3 rotation, plus the Z translation.
+pub(super) fn negate_z_transform(m: [f32; 16]) -> [f32; 16] {
+    [
+        m[0], m[1], -m[2], m[3], // col 0: negate row 2
+        m[4], m[5], -m[6], m[7], // col 1: negate row 2
+        -m[8], -m[9], m[10], m[11], // col 2: negate col 2, but row 2 double-negates
+        m[12], m[13], -m[14], m[15], // col 3: negate Z translation
+    ]
 }
 
 /// Apply a pitch rotation to vertices whose dominant bone is a barrel bone.
@@ -481,8 +496,6 @@ fn apply_barrel_pitch(
 
     let m = &bp.pitch_matrix;
     let count = positions.len();
-    let mut transformed = 0usize;
-    let mut first_logged = false;
     for i in 0..count {
         let base = i * stride;
         let off = base + bone_attr.offset;
@@ -491,21 +504,8 @@ fn apply_barrel_pitch(
         if !bp.barrel_bone_indices.contains(&dominant_bone) {
             continue;
         }
-        transformed += 1;
         // Transform position: p' = M * p (column-major 4x4, affine)
         let [px, py, pz] = positions[i];
-        if !first_logged {
-            first_logged = true;
-            let new_p = [
-                m[0] * px + m[4] * py + m[8] * pz + m[12],
-                m[1] * px + m[5] * py + m[9] * pz + m[13],
-                m[2] * px + m[6] * py + m[10] * pz + m[14],
-            ];
-            eprintln!(
-                "    sample vert[{i}]: bone={dominant_bone} before=[{px:.3},{py:.3},{pz:.3}] after=[{:.3},{:.3},{:.3}]",
-                new_p[0], new_p[1], new_p[2]
-            );
-        }
         positions[i] = [
             m[0] * px + m[4] * py + m[8] * pz + m[12],
             m[1] * px + m[5] * py + m[9] * pz + m[13],
@@ -521,7 +521,6 @@ fn apply_barrel_pitch(
             ];
         }
     }
-    eprintln!("    barrel_pitch: {transformed}/{count} verts transformed");
 }
 
 /// All texture data for a ship export: base albedo + camouflage variants.
@@ -1316,9 +1315,12 @@ impl InteractiveArmorMesh {
             let (all_layers, _) = lookup_all_layers(mat_id, mount_armor, armor_map);
             let color = thickness_to_color(thickness_mm);
 
+            // Negate Z for left→right-handed conversion.
             for v in 0..3 {
-                positions.push(tri.vertices[v]);
-                normals.push(tri.normals[v]);
+                let [px, py, pz] = tri.vertices[v];
+                positions.push([px, py, -pz]);
+                let [nx, ny, nz] = tri.normals[v];
+                normals.push([nx, ny, -nz]);
                 indices.push((ti * 3 + v) as u32);
                 colors.push(color);
             }
@@ -1389,9 +1391,12 @@ impl ArmorSubModel {
             let thickness_mm = lookup_thickness(mat_id, layer, mount_armor, armor_map);
             let color = thickness_to_color(thickness_mm);
 
+            // Negate Z for left→right-handed conversion.
             for v in 0..3 {
-                positions.push(tri.vertices[v]);
-                normals.push(tri.normals[v]);
+                let [px, py, pz] = tri.vertices[v];
+                positions.push([px, py, -pz]);
+                let [nx, ny, nz] = tri.normals[v];
+                normals.push([nx, ny, -nz]);
                 indices.push((ti * 3 + v) as u32);
                 colors.push(color);
             }
@@ -1559,7 +1564,7 @@ pub fn collect_hull_meshes(
         }
         let idx_slice = &decoded_indices[idx_start..idx_end];
 
-        let indices: Vec<u32> = match index_size {
+        let mut indices: Vec<u32> = match index_size {
             2 => idx_slice
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
@@ -2302,7 +2307,7 @@ pub fn export_ship_glb(
         let node = root.push(json::Node {
             mesh: Some(mesh),
             name: Some(sub.name.clone()),
-            matrix: sub.transform,
+            matrix: sub.transform.map(negate_z_transform),
             ..Default::default()
         });
 
@@ -2329,7 +2334,7 @@ pub fn export_ship_glb(
         let node = root.push(json::Node {
             mesh: Some(mesh),
             name: Some(armor.name.clone()),
-            matrix: armor.transform,
+            matrix: armor.transform.map(negate_z_transform),
             ..Default::default()
         });
 

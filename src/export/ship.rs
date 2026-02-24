@@ -1243,7 +1243,7 @@ impl ShipModelContext {
                     self.armor_map.as_ref(),
                     mount.mount_armor.as_ref(),
                 );
-                mesh.transform = mount.armor_transform;
+                mesh.transform = mount.armor_transform.map(gltf_export::negate_z_transform);
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
                 result.push(mesh);
             }
@@ -1289,7 +1289,7 @@ impl ShipModelContext {
                 mount.barrel_pitch.as_ref(),
             )?;
             for mesh in &mut meshes {
-                mesh.transform = mount.transform;
+                mesh.transform = mount.transform.map(gltf_export::negate_z_transform);
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
             }
             result.extend(meshes);
@@ -1798,6 +1798,9 @@ fn build_barrel_pitch(
     if barrel_bone_indices.is_empty() {
         return None;
     }
+
+    // Conjugate the pitch matrix for Z-negated coordinate space (left→right-handed).
+    let pitch_matrix = super::gltf_export::negate_z_transform(pitch_matrix);
 
     Some(super::gltf_export::BarrelPitch {
         pitch_matrix,
