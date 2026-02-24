@@ -86,7 +86,7 @@ pub fn export_glb(
     let lod_entry = &visual.lods[lod];
 
     // Collect render sets for this LOD by matching LOD render_set_names to RS name_ids.
-    let primitives = collect_primitives(visual, geometry, db, lod_entry, damaged)?;
+    let primitives = collect_primitives(visual, geometry, db, lod_entry, damaged, None)?;
 
     if primitives.is_empty() {
         eprintln!("Warning: no primitives found for LOD {lod}");
@@ -205,6 +205,7 @@ fn collect_primitives(
     db: &PrototypeDatabase<'_>,
     lod: &crate::models::visual::Lod,
     damaged: bool,
+    barrel_pitch: Option<&BarrelPitch>,
 ) -> Result<Vec<DecodedPrimitive>, Report<ExportError>> {
     let mut result = Vec::new();
     let exclude = if damaged {
@@ -351,7 +352,19 @@ fn collect_primitives(
         // (items_offset is applied when extracting the vertex slice).
 
         // Unpack vertex attributes.
-        let (positions, normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+        let (mut positions, mut normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+
+        // Apply per-vertex barrel pitch rotation if configured.
+        if let Some(bp) = barrel_pitch {
+            apply_barrel_pitch(
+                &mut positions,
+                &mut normals,
+                vert_slice,
+                stride,
+                &format,
+                bp,
+            );
+        }
 
         // Material name for this render set.
         let material_name = db
@@ -440,6 +453,75 @@ fn unpack_vertices(
     }
 
     (positions, normals, uvs)
+}
+
+/// Apply a pitch rotation to vertices whose dominant bone is a barrel bone.
+///
+/// Reads bone indices from the raw vertex data (the `iiiww` format: 3 u8 bone
+/// indices + 1 padding byte, then 4 bytes of weights). The first bone index is
+/// the dominant one. If it matches a barrel bone, the vertex position and normal
+/// are transformed by the pitch matrix.
+fn apply_barrel_pitch(
+    positions: &mut [[f32; 3]],
+    normals: &mut [[f32; 3]],
+    vert_data: &[u8],
+    stride: usize,
+    format: &VertexFormat,
+    bp: &BarrelPitch,
+) {
+    use crate::models::vertex_format::AttributeSemantic;
+
+    let bone_idx_attr = format
+        .attributes
+        .iter()
+        .find(|a| a.semantic == AttributeSemantic::BoneIndices);
+    let Some(bone_attr) = bone_idx_attr else {
+        return; // No bone data — can't split
+    };
+
+    let m = &bp.pitch_matrix;
+    let count = positions.len();
+    let mut transformed = 0usize;
+    let mut first_logged = false;
+    for i in 0..count {
+        let base = i * stride;
+        let off = base + bone_attr.offset;
+        // First byte is the dominant bone index.
+        let dominant_bone = vert_data[off];
+        if !bp.barrel_bone_indices.contains(&dominant_bone) {
+            continue;
+        }
+        transformed += 1;
+        // Transform position: p' = M * p (column-major 4x4, affine)
+        let [px, py, pz] = positions[i];
+        if !first_logged {
+            first_logged = true;
+            let new_p = [
+                m[0] * px + m[4] * py + m[8] * pz + m[12],
+                m[1] * px + m[5] * py + m[9] * pz + m[13],
+                m[2] * px + m[6] * py + m[10] * pz + m[14],
+            ];
+            eprintln!(
+                "    sample vert[{i}]: bone={dominant_bone} before=[{px:.3},{py:.3},{pz:.3}] after=[{:.3},{:.3},{:.3}]",
+                new_p[0], new_p[1], new_p[2]
+            );
+        }
+        positions[i] = [
+            m[0] * px + m[4] * py + m[8] * pz + m[12],
+            m[1] * px + m[5] * py + m[9] * pz + m[13],
+            m[2] * px + m[6] * py + m[10] * pz + m[14],
+        ];
+        // Transform normal: n' = R * n (rotation only, no translation)
+        if i < normals.len() {
+            let [nx, ny, nz] = normals[i];
+            normals[i] = [
+                m[0] * nx + m[4] * ny + m[8] * nz,
+                m[1] * nx + m[5] * ny + m[9] * nz,
+                m[2] * nx + m[6] * ny + m[10] * nz,
+            ];
+        }
+    }
+    eprintln!("    barrel_pitch: {transformed}/{count} verts transformed");
 }
 
 /// All texture data for a ship export: base albedo + camouflage variants.
@@ -1360,6 +1442,7 @@ pub fn collect_hull_meshes(
     db: &PrototypeDatabase<'_>,
     lod: usize,
     damaged: bool,
+    barrel_pitch: Option<&BarrelPitch>,
 ) -> Result<Vec<InteractiveHullMesh>, Report<ExportError>> {
     let mut result = Vec::new();
 
@@ -1492,7 +1575,19 @@ pub fn collect_hull_meshes(
             }
         };
 
-        let (positions, normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+        let (mut positions, mut normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+
+        // Apply per-vertex barrel pitch rotation if configured.
+        if let Some(bp) = barrel_pitch {
+            apply_barrel_pitch(
+                &mut positions,
+                &mut normals,
+                vert_slice,
+                stride,
+                &format,
+                bp,
+            );
+        }
 
         // Resolve full MFM path for texture lookup.
         let mfm_path = if rs.material_mfm_path_id != 0 {
@@ -2115,6 +2210,19 @@ pub struct SubModel<'a> {
     pub transform: Option<[f32; 16]>,
     /// Group name for Blender outliner hierarchy (e.g. "Hull", "Main Battery").
     pub group: &'static str,
+    /// If set, apply a pitch rotation to vertices weighted to barrel bones.
+    pub barrel_pitch: Option<BarrelPitch>,
+}
+
+/// Configuration for per-vertex barrel pitch rotation.
+/// Vertices whose dominant bone index is in `barrel_bone_indices` get their
+/// position and normal transformed by `pitch_matrix` (turret-local space).
+#[derive(Clone)]
+pub struct BarrelPitch {
+    /// 4x4 column-major pitch rotation matrix (around Rotate_X pivot).
+    pub pitch_matrix: [f32; 16],
+    /// Bone indices (into the render set's blend bone list) that are barrel bones.
+    pub barrel_bone_indices: Vec<u8>,
 }
 
 /// Export multiple sub-models as a single GLB with separate named meshes/nodes.
@@ -2157,7 +2265,14 @@ pub fn export_ship_glb(
         }
 
         let lod_entry = &sub.visual.lods[lod];
-        let primitives = collect_primitives(sub.visual, sub.geometry, db, lod_entry, damaged)?;
+        let primitives = collect_primitives(
+            sub.visual,
+            sub.geometry,
+            db,
+            lod_entry,
+            damaged,
+            sub.barrel_pitch.as_ref(),
+        )?;
 
         if primitives.is_empty() {
             eprintln!(

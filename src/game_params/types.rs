@@ -980,6 +980,15 @@ pub struct MountPoint {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     species: Option<MountSpecies>,
+    /// Pitch dead zones: regions where barrel elevation is clamped.
+    /// Each entry is `[yaw_min_deg, yaw_max_deg, pitch_min_deg, pitch_max_deg]`.
+    /// When the turret yaw falls in `[yaw_min, yaw_max]`, elevation is clamped
+    /// to `[pitch_min, pitch_max]`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pitch_dead_zones: Vec<[f32; 4]>,
 }
 
 impl MountPoint {
@@ -989,6 +998,7 @@ impl MountPoint {
             model_path,
             mount_armor: None,
             species: None,
+            pitch_dead_zones: Vec::new(),
         }
     }
 
@@ -997,12 +1007,14 @@ impl MountPoint {
         model_path: String,
         mount_armor: Option<ArmorMap>,
         species: Option<MountSpecies>,
+        pitch_dead_zones: Vec<[f32; 4]>,
     ) -> Self {
         Self {
             hp_name,
             model_path,
             mount_armor,
             species,
+            pitch_dead_zones,
         }
     }
 
@@ -1020,6 +1032,22 @@ impl MountPoint {
 
     pub fn mount_armor(&self) -> Option<&ArmorMap> {
         self.mount_armor.as_ref()
+    }
+
+    pub fn pitch_dead_zones(&self) -> &[[f32; 4]] {
+        &self.pitch_dead_zones
+    }
+
+    /// Get the minimum barrel elevation (degrees) at a given yaw angle (degrees)
+    /// by checking pitch dead zones. Returns 0.0 if no dead zone applies.
+    pub fn min_pitch_at_yaw(&self, yaw_deg: f32) -> f32 {
+        for dz in &self.pitch_dead_zones {
+            let [yaw_min, yaw_max, pitch_min, _pitch_max] = *dz;
+            if yaw_deg >= yaw_min && yaw_deg <= yaw_max {
+                return pitch_min;
+            }
+        }
+        0.0
     }
 }
 

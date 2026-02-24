@@ -616,6 +616,45 @@ fn read_string(dict: &BTreeMap<HashableValue, Value>, key: &str) -> Option<Strin
         .map(|s| s.inner().to_string())
 }
 
+/// Extract `pitchDeadZones` from a mount dict.
+/// Each entry is `[yaw_min, yaw_max, pitch_min, pitch_max]` in degrees.
+fn parse_pitch_dead_zones(mount_dict: &BTreeMap<HashableValue, Value>) -> Vec<[f32; 4]> {
+    fn as_f32(v: &Value) -> Option<f32> {
+        v.f64_ref()
+            .map(|f| *f as f32)
+            .or_else(|| v.i64_ref().map(|i| *i as f32))
+    }
+    fn extract_entries(items: &[Value]) -> Vec<[f32; 4]> {
+        items
+            .iter()
+            .filter_map(|entry| {
+                let inner: Vec<f32> = if let Some(l) = entry.list_ref() {
+                    l.inner().iter().filter_map(as_f32).collect()
+                } else if let Some(t) = entry.tuple_ref() {
+                    t.inner().iter().filter_map(as_f32).collect()
+                } else {
+                    return None;
+                };
+                if inner.len() == 4 {
+                    Some([inner[0], inner[1], inner[2], inner[3]])
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    let Some(val) = mount_dict.get(&pk("pitchDeadZones")) else {
+        return Vec::new();
+    };
+    if let Some(l) = val.list_ref() {
+        extract_entries(&l.inner())
+    } else if let Some(t) = val.tuple_ref() {
+        extract_entries(&t.inner())
+    } else {
+        Vec::new()
+    }
+}
+
 /// Parse a raw GameParams armor dict into an [`ArmorMap`].
 ///
 /// Raw keys are `(model_index << 16) | material_id`.  We group by `material_id`
@@ -690,11 +729,15 @@ fn extract_mounts(
                 .and_then(|d| read_string(&d.inner(), "species"))
                 .and_then(|s| MountSpecies::from_gp_str(&s));
 
+            // Extract pitchDeadZones: list of [yaw_min, yaw_max, pitch_min, pitch_max].
+            let pitch_dead_zones: Vec<[f32; 4]> = parse_pitch_dead_zones(&mount_inner);
+
             Some(MountPoint::with_armor(
                 key_str.clone(),
                 model_path,
                 mount_armor,
                 species,
+                pitch_dead_zones,
             ))
         })
         .collect()

@@ -472,6 +472,21 @@ impl VisualPrototype {
         Some(self.nodes.matrices[node_idx as usize].0)
     }
 
+    /// Check whether `node_idx` is a descendant of `ancestor_idx` in the
+    /// skeleton hierarchy.
+    pub fn is_descendant_of(&self, mut node_idx: u16, ancestor_idx: u16) -> bool {
+        loop {
+            let parent = self.nodes.parent_ids[node_idx as usize];
+            if parent == 0xFFFF || parent as usize >= self.nodes.parent_ids.len() {
+                return false;
+            }
+            if parent == ancestor_idx {
+                return true;
+            }
+            node_idx = parent;
+        }
+    }
+
     /// Find the node index for a given node name string.
     pub fn find_node_index_by_name(&self, name: &str, strings: &StringsSection<'_>) -> Option<u16> {
         for (i, &name_id) in self.nodes.name_map_name_ids.iter().enumerate() {

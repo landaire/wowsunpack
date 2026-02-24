@@ -868,17 +868,13 @@ impl ShipAssets {
         let (turret_models, turret_model_index) =
             self.load_turret_models_deduped(db, self_id_index, mount_points)?;
 
-        // Build a mapping from simple HP name -> turret model index so compound
-        // hardpoints can look up their parent turret's visual for sub-HP nodes.
-        let mut simple_hp_to_turret: HashMap<String, usize> = HashMap::new();
-        for mi in mount_points {
-            let hp_parts: Vec<&str> = mi.hp_name().split("_HP_").collect();
-            if hp_parts.len() == 1 {
-                if let Some(&idx) = turret_model_index.get(mi.model_path()) {
-                    simple_hp_to_turret.insert(mi.hp_name().to_string(), idx);
-                }
-            }
-        }
+        // Map hull HP names to turret model paths so we can find the parent
+        // turret visual for compound hardpoints.
+        let hp_to_model_path: HashMap<&str, &str> = mount_points
+            .iter()
+            .filter(|mi| !mi.model_path().is_empty() && hp_transforms.contains_key(mi.hp_name()))
+            .map(|mi| (mi.hp_name(), mi.model_path()))
+            .collect();
 
         // Build resolved mounts.
         let mut mounts = Vec::new();
@@ -887,82 +883,58 @@ impl ShipAssets {
                 continue;
             };
 
-            // Resolve transform: simple HP from hull, compound HP by composing
-            // parent (hull) and child (turret visual) transforms.
-            let hp_parts: Vec<&str> = mi.hp_name().split("_HP_").collect();
-            let transform = if hp_parts.len() == 1 {
-                // Simple hardpoint: look up directly from hull visuals.
-                hp_transforms.get(mi.hp_name()).copied()
-            } else {
-                // Compound hardpoint: e.g. "HP_BGM_2_HP_BGA_2"
-                // parent = "HP_BGM_2", child = "HP_BGA_2"
-                let parent_hp = hp_parts[0];
-                let child_hp = format!("HP_{}", hp_parts[1]);
-
-                let parent_xform = hp_transforms.get(parent_hp).copied();
-                let child_xform = parent_xform.and_then(|_| {
-                    let &parent_turret_idx = simple_hp_to_turret.get(parent_hp)?;
-                    let parent_turret = &turret_models[parent_turret_idx];
-                    parent_turret
-                        .visual
-                        .find_hardpoint_transform(&child_hp, &db.strings)
-                });
-
-                match (parent_xform, child_xform) {
-                    (Some(p), Some(c)) => Some(mat4_mul_col_major(&p, &c)),
-                    _ => {
-                        eprintln!(
-                            "Warning: could not resolve compound HP '{}' (parent={}, child={})",
-                            mi.hp_name(),
-                            parent_hp,
-                            child_hp
-                        );
-                        continue;
+            // Resolve transform: simple HP from hull directly, compound HP
+            // by composing parent (hull) and child (turret visual) transforms.
+            // A mount is compound iff its HP name is NOT in the hull node tree.
+            let (hull_transform, child_hp_transform) =
+                if let Some(&xform) = hp_transforms.get(mi.hp_name()) {
+                    (xform, None)
+                } else {
+                    match resolve_compound_hp(
+                        mi.hp_name(),
+                        &hp_transforms,
+                        &hp_to_model_path,
+                        &turret_model_index,
+                        &turret_models,
+                        &db.strings,
+                    ) {
+                        Some(result) => result,
+                        None => {
+                            eprintln!("Warning: could not resolve hardpoint '{}'", mi.hp_name());
+                            continue;
+                        }
                     }
-                }
+                };
+            let hp_transform = match child_hp_transform {
+                None => hull_transform,
+                Some(child_xform) => mat4_mul_col_major(&hull_transform, &child_xform),
             };
 
-            if transform.is_none() {
-                continue;
-            }
-
             // The turret model's Rotate_Y_BlendBone encodes its rest-pose
-            // facing direction.  To place the model correctly at the hardpoint
+            // facing direction. To place the model correctly at the hardpoint
             // we undo this rest-pose rotation so the hardpoint's own orientation
             // takes over: visual_transform = hp_transform * inverse(bone_rotation).
             // Armor geometry is already aligned with the hardpoint, so it uses
             // the raw transform without rotation correction.
-            let armor_transform = transform;
+            let armor_transform = Some(hp_transform);
             let turret_visual = &turret_models[model_idx].visual;
-            let bone_local =
-                turret_visual.find_node_local_matrix("Rotate_Y_BlendBone", &db.strings);
-            if let Some(m) = &bone_local {
-                eprintln!(
-                    "DEBUG bone '{}' model='{}': diag=[{:.3},{:.3},{:.3},{:.3}] m[2]={:.3} m[8]={:.3} m[1]={:.3} m[4]={:.3}",
-                    mi.hp_name(),
-                    mi.model_path(),
-                    m[0],
-                    m[5],
-                    m[10],
-                    m[15],
-                    m[2],
-                    m[8],
-                    m[1],
-                    m[4]
-                );
+            let yaw_correction = turret_visual
+                .find_node_local_matrix("Rotate_Y_BlendBone", &db.strings)
+                .map(|bone_local| mat4_rotation_inverse(&bone_local));
+            let base_transform = match yaw_correction {
+                Some(inv) => mat4_mul_col_major(&hp_transform, &inv),
+                None => hp_transform,
+            };
+
+            let visual_transform = Some(base_transform);
+
+            // Build per-vertex barrel pitch if pitchDeadZones applies.
+            let min_pitch = mi.min_pitch_at_yaw(0.0);
+            let barrel_pitch = if min_pitch > 0.0 {
+                build_barrel_pitch(turret_visual, &db.strings, min_pitch)
             } else {
-                eprintln!(
-                    "DEBUG no bone '{}' model='{}'",
-                    mi.hp_name(),
-                    mi.model_path()
-                );
-            }
-            let rotation_correction =
-                bone_local.map(|bone_local| mat4_rotation_inverse(&bone_local));
-            let visual_transform = transform.map(|t| match rotation_correction {
-                Some(inv) => mat4_mul_col_major(&t, &inv),
-                None => t, // no bone → assume model already faces correct direction
-            });
+                None
+            };
 
             mounts.push(ResolvedMount {
                 hp_name: mi.hp_name().to_string(),
@@ -971,6 +943,7 @@ impl ShipAssets {
                 armor_transform,
                 mount_armor: mi.mount_armor().cloned(),
                 species: mi.species(),
+                barrel_pitch,
             });
         }
 
@@ -988,7 +961,7 @@ impl ShipAssets {
         let mut models = Vec::new();
 
         for mi in mount_points {
-            if index_map.contains_key(mi.model_path()) {
+            if mi.model_path().is_empty() || index_map.contains_key(mi.model_path()) {
                 continue;
             }
 
@@ -1297,7 +1270,8 @@ impl ShipModelContext {
         for part in &self.hull_parts {
             let geom = geometry::parse_geometry(&part.geom_bytes)
                 .context("Failed to parse hull geometry for hull meshes")?;
-            let meshes = gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
+            let meshes =
+                gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged, None)?;
             result.extend(meshes);
         }
 
@@ -1306,8 +1280,14 @@ impl ShipModelContext {
             let part = &self.turret_models[mount.turret_model_index];
             let geom = geometry::parse_geometry(&part.geom_bytes)
                 .context("Failed to parse turret geometry for hull meshes")?;
-            let mut meshes =
-                gltf_export::collect_hull_meshes(&part.visual, &geom, &db, lod, damaged)?;
+            let mut meshes = gltf_export::collect_hull_meshes(
+                &part.visual,
+                &geom,
+                &db,
+                lod,
+                damaged,
+                mount.barrel_pitch.as_ref(),
+            )?;
             for mesh in &mut meshes {
                 mesh.transform = mount.transform;
                 mesh.name = format!("{} [{}]", mesh.name, mount.hp_name);
@@ -1395,6 +1375,7 @@ impl ShipModelContext {
                 geometry: geom,
                 transform: None,
                 group: "Hull",
+                barrel_pitch: None,
             });
         }
 
@@ -1409,6 +1390,7 @@ impl ShipModelContext {
                 geometry: turret_geom,
                 transform: mount.transform,
                 group: mount_group(mount.species),
+                barrel_pitch: mount.barrel_pitch.clone(),
             });
         }
 
@@ -1574,7 +1556,7 @@ struct OwnedSubModel {
 struct ResolvedMount {
     hp_name: String,
     turret_model_index: usize,
-    /// Hardpoint transform with 180-deg Y pre-rotation (for visual turret models).
+    /// Visual transform with yaw correction.
     transform: Option<[f32; 16]>,
     /// Raw hardpoint transform without model rotation (for armor geometry).
     armor_transform: Option<[f32; 16]>,
@@ -1582,6 +1564,8 @@ struct ResolvedMount {
     mount_armor: Option<crate::game_params::types::ArmorMap>,
     /// Mount species from GameParams `typeinfo.species`.
     species: Option<crate::game_params::types::MountSpecies>,
+    /// Per-vertex barrel pitch configuration (if pitchDeadZones applies).
+    barrel_pitch: Option<super::gltf_export::BarrelPitch>,
 }
 
 /// Pre-resolved material-based camouflage scheme (owned data, no lifetimes).
@@ -1699,6 +1683,126 @@ pub fn build_texture_set(mfm_infos: &[MfmInfo], vfs: &VfsPath) -> TextureSet {
         camo_schemes,
         tiled_uv_transforms: HashMap::new(),
     }
+}
+
+/// Resolve a compound hardpoint (e.g. `HP_AGM_3_HP_AGA_1`) by finding the
+/// longest hull HP name that prefixes the mount's HP name, then looking up
+/// the child HP in the parent turret's visual node tree.
+///
+/// Returns `(parent_hull_transform, Some(child_turret_transform))` on success.
+fn resolve_compound_hp(
+    hp_name: &str,
+    hp_transforms: &HashMap<String, [f32; 16]>,
+    hp_to_model_path: &HashMap<&str, &str>,
+    turret_model_index: &HashMap<String, usize>,
+    turret_models: &[OwnedSubModel],
+    strings: &assets_bin::StringsSection<'_>,
+) -> Option<([f32; 16], Option<[f32; 16]>)> {
+    // Find the longest hull HP name that is a proper prefix of hp_name with
+    // a '_' separator. This avoids partial matches like HP_AG matching HP_AGM_3.
+    let mut best_parent: Option<(&str, &[f32; 16])> = None;
+    for (hull_hp, xform) in hp_transforms {
+        if hp_name.len() > hull_hp.len()
+            && hp_name.starts_with(hull_hp.as_str())
+            && hp_name.as_bytes()[hull_hp.len()] == b'_'
+        {
+            if best_parent.map_or(true, |(bp, _)| hull_hp.len() > bp.len()) {
+                best_parent = Some((hull_hp.as_str(), xform));
+            }
+        }
+    }
+    let (parent_hp, parent_xform) = best_parent?;
+
+    // Extract child HP name: everything after "parent_"
+    let child_hp = &hp_name[parent_hp.len() + 1..];
+
+    // Find the parent turret model via the hp_to_model_path mapping.
+    let &parent_model_path = hp_to_model_path.get(parent_hp)?;
+    let &parent_turret_idx = turret_model_index.get(parent_model_path)?;
+    let parent_turret = &turret_models[parent_turret_idx];
+
+    // Look up the child HP transform in the parent turret's visual.
+    let child_xform = parent_turret
+        .visual
+        .find_hardpoint_transform(child_hp, strings)?;
+
+    Some((*parent_xform, Some(child_xform)))
+}
+
+/// Build a [`BarrelPitch`] config for per-vertex barrel rotation.
+///
+/// Finds the `Rotate_X` pivot point in turret-local space, builds a pitch
+/// rotation matrix around it, and identifies which blend bone indices are
+/// barrel bones (descendants of `Rotate_X` in the skeleton hierarchy).
+fn build_barrel_pitch(
+    visual: &VisualPrototype,
+    strings: &assets_bin::StringsSection<'_>,
+    min_pitch_deg: f32,
+) -> Option<super::gltf_export::BarrelPitch> {
+    let rotate_x_idx = visual.find_node_index_by_name("Rotate_X", strings)?;
+
+    // Get the Rotate_X world (composed) transform to find pivot position.
+    let rotate_x_world = visual.find_hardpoint_transform("Rotate_X", strings)?;
+    let pivot = [rotate_x_world[12], rotate_x_world[13], rotate_x_world[14]];
+
+    // Build pitch rotation matrix: T(-pivot) * Rx(-pitch) * T(pivot)
+    let pitch_rad = -min_pitch_deg.to_radians();
+    let (sin_p, cos_p) = pitch_rad.sin_cos();
+
+    // Rx rotation (column-major):
+    //   1     0      0
+    //   0   cos_p  -sin_p
+    //   0   sin_p   cos_p
+    let pitch_matrix = [
+        // col 0
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        // col 1
+        0.0,
+        cos_p,
+        sin_p,
+        0.0,
+        // col 2
+        0.0,
+        -sin_p,
+        cos_p,
+        0.0,
+        // col 3: T(-pivot) * Rx * T(pivot) translation
+        0.0,
+        pivot[1] - cos_p * pivot[1] + sin_p * pivot[2],
+        pivot[2] + sin_p * pivot[1] - cos_p * pivot[2],
+        1.0,
+    ];
+
+    // Identify barrel bone indices from the first render set's blend bone list.
+    // Barrel bones = those that ARE `Rotate_X` or descendants of it.
+    let first_rs = visual.render_sets.first()?;
+    let mut barrel_bone_indices = Vec::new();
+    for (blend_idx, &name_id) in first_rs.node_name_ids.iter().enumerate() {
+        // Resolve name_id → node index in skeleton
+        let node_idx = visual
+            .nodes
+            .name_map_name_ids
+            .iter()
+            .position(|&nid| nid == name_id)
+            .map(|i| visual.nodes.name_map_node_ids[i]);
+        if let Some(ni) = node_idx {
+            if ni == rotate_x_idx || visual.is_descendant_of(ni, rotate_x_idx) {
+                barrel_bone_indices.push(blend_idx as u8);
+            }
+        }
+    }
+
+    if barrel_bone_indices.is_empty() {
+        return None;
+    }
+
+    Some(super::gltf_export::BarrelPitch {
+        pitch_matrix,
+        barrel_bone_indices,
+    })
 }
 
 fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
