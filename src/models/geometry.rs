@@ -128,7 +128,7 @@ fn decode_vertex_buffer_dynamic(
     stride: usize,
     encoded: &[u8],
 ) -> Result<Vec<u8>, Report<GeometryError>> {
-    if stride == 0 || stride > 256 || stride % 4 != 0 {
+    if stride == 0 || stride > 256 || !stride.is_multiple_of(4) {
         return Err(Report::new(GeometryError::InvalidStride(stride)));
     }
 

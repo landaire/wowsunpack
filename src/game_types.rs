@@ -444,7 +444,7 @@ pub struct NormalizedPos {
 
 /// A game clock value in seconds since the replay started recording.
 /// Note: there is typically a ~30s pre-game countdown, so game_time = clock - 30.
-#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -473,6 +473,12 @@ impl fmt::Display for GameClock {
 }
 
 impl Eq for GameClock {}
+
+impl PartialOrd for GameClock {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for GameClock {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -536,7 +542,7 @@ impl GameClock {
 
 /// Seconds elapsed since battle start (battleStage transition).
 /// Distinct from GameClock which counts from replay recording start.
-#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -556,6 +562,12 @@ impl ElapsedClock {
 }
 
 impl Eq for ElapsedClock {}
+
+impl PartialOrd for ElapsedClock {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for ElapsedClock {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -1306,8 +1318,10 @@ impl fmt::Display for FinishType {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[derive(Default)]
 pub enum BuoyancyState {
     Invalid,
+    #[default]
     Surface,
     Periscope,
     SemiDeepWater,
@@ -1364,11 +1378,6 @@ impl BuoyancyState {
     }
 }
 
-impl Default for BuoyancyState {
-    fn default() -> Self {
-        BuoyancyState::Surface
-    }
-}
 
 impl fmt::Display for BuoyancyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1383,7 +1392,9 @@ impl fmt::Display for BuoyancyState {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[derive(Default)]
 pub enum WeaponType {
+    #[default]
     Artillery,
     Secondaries,
     Torpedoes,
@@ -1434,11 +1445,6 @@ impl WeaponType {
     }
 }
 
-impl Default for WeaponType {
-    fn default() -> Self {
-        WeaponType::Artillery
-    }
-}
 
 impl fmt::Display for WeaponType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1453,7 +1459,9 @@ impl fmt::Display for WeaponType {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[derive(Default)]
 pub enum BatteryState {
+    #[default]
     Idle,
     Charging,
     Discharging,
@@ -1516,11 +1524,6 @@ impl BatteryState {
     }
 }
 
-impl Default for BatteryState {
-    fn default() -> Self {
-        BatteryState::Idle
-    }
-}
 
 impl fmt::Display for BatteryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

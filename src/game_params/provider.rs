@@ -212,11 +212,7 @@ fn build_skill_modifiers(modifiers: &BTreeMap<HashableValue, Value>) -> Vec<Crew
                 let modifier_data = modifier_data.inner();
 
                 // Skip dicts that aren't per-species modifier dicts
-                let Some(_) =
-                    modifier_data.get(&HashableValue::String("AirCarrier".to_owned().into()))
-                else {
-                    return None;
-                };
+                modifier_data.get(&HashableValue::String("AirCarrier".to_owned().into()))?;
 
                 let read_species = |key: &str| -> f32 {
                     modifier_data
@@ -665,7 +661,7 @@ fn parse_pitch_dead_zones(mount_dict: &BTreeMap<HashableValue, Value>) -> Vec<[f
     if let Some(l) = val.list_ref() {
         extract_entries(&l.inner())
     } else if let Some(t) = val.tuple_ref() {
-        extract_entries(&t.inner())
+        extract_entries(t.inner())
     } else {
         Vec::new()
     }
@@ -815,8 +811,8 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
     let upgrade_data = game_param_to_type!(ship_data, keys::SHIP_UPGRADE_INFO, HashMap<(), ()>);
     let upgrades: Vec<String> = upgrade_data
         .inner()
-        .iter()
-        .map(|(upgrade_name, _upgrade_data)| {
+        .keys()
+        .map(|upgrade_name| {
             upgrade_name
                 .string_ref()
                 .expect("upgrade name is not a string")
@@ -878,18 +874,17 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         }
 
         // Read hull detection data and hull model path.
-        if let Some(hull_comp) = config.component_names.get(&keys::ComponentType::Hull) {
-            if let Some(hull_data) = ship_data.get(&pk(hull_comp)).and_then(|v| v.dict_ref()) {
-                let hull_data = hull_data.inner();
-                config.detection_km =
-                    Km::from(read_float(&hull_data, keys::VISIBILITY_FACTOR).unwrap_or(0.0));
-                config.air_detection_km = Km::from(
-                    read_float(&hull_data, keys::VISIBILITY_FACTOR_BY_PLANE).unwrap_or(0.0),
-                );
-                config.hull_model_path = read_string(&hull_data, keys::MODEL);
-                config.draft = read_float(&hull_data, keys::DRAFT).map(Meters::from);
-                config.dock_y_offset = read_float(&hull_data, keys::DOCK_Y_OFFSET);
-            }
+        if let Some(hull_comp) = config.component_names.get(&keys::ComponentType::Hull)
+            && let Some(hull_data) = ship_data.get(&pk(hull_comp)).and_then(|v| v.dict_ref())
+        {
+            let hull_data = hull_data.inner();
+            config.detection_km =
+                Km::from(read_float(&hull_data, keys::VISIBILITY_FACTOR).unwrap_or(0.0));
+            config.air_detection_km =
+                Km::from(read_float(&hull_data, keys::VISIBILITY_FACTOR_BY_PLANE).unwrap_or(0.0));
+            config.hull_model_path = read_string(&hull_data, keys::MODEL);
+            config.draft = read_float(&hull_data, keys::DRAFT).map(Meters::from);
+            config.dock_y_offset = read_float(&hull_data, keys::DOCK_Y_OFFSET);
         }
 
         // Extract mount points for all model component types.
@@ -897,16 +892,15 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             if let Some(comp_name) = config.component_names.get(ct) {
                 let mounts = extract_mounts(ship_data, comp_name);
                 if !mounts.is_empty() {
-                    config.mounts_by_type.insert(
-                        *ct,
-                        ComponentMounts::new(comp_name.clone(), mounts),
-                    );
+                    config
+                        .mounts_by_type
+                        .insert(*ct, ComponentMounts::new(comp_name.clone(), mounts));
                 }
             }
         }
 
         // Extract mount points for alternative components (non-default selections).
-        for (_, alternatives) in &config.component_alternatives {
+        for alternatives in config.component_alternatives.values() {
             for alt_name in alternatives.iter().skip(1) {
                 // Skip the first (default) since it is already in mounts_by_type.
                 let mounts = extract_mounts(ship_data, alt_name);
@@ -952,62 +946,54 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         };
 
         // Collect main battery maxDist from _Hull and _Artillery upgrades
-        if uc_type == keys::UC_TYPE_HULL || uc_type == keys::UC_TYPE_ARTILLERY {
-            if let Some(art_comp) = components
+        if (uc_type == keys::UC_TYPE_HULL || uc_type == keys::UC_TYPE_ARTILLERY)
+            && let Some(art_comp) = components
                 .inner()
                 .get(&pk(keys::COMP_ARTILLERY))
-                .and_then(|v| read_first_string(v))
-            {
-                if let Some(art_data) = ship_data.get(&pk(&art_comp)).and_then(|v| v.dict_ref()) {
-                    if let Some(m) = read_float(&art_data.inner(), keys::MAX_DIST).map(Meters::from)
-                    {
-                        max_main_battery_m = Some(match max_main_battery_m {
-                            Some(prev) if prev.value() >= m.value() => prev,
-                            _ => m,
-                        });
+                .and_then(read_first_string)
+            && let Some(art_data) = ship_data.get(&pk(&art_comp)).and_then(|v| v.dict_ref())
+        {
+            if let Some(m) = read_float(&art_data.inner(), keys::MAX_DIST).map(Meters::from) {
+                max_main_battery_m = Some(match max_main_battery_m {
+                    Some(prev) if prev.value() >= m.value() => prev,
+                    _ => m,
+                });
+            }
+            // Collect main battery ammo from all mounts in the artillery component
+            for (_mount_key, mount_val) in art_data.inner().iter() {
+                let Some(mount_dict) = mount_val.dict_ref() else {
+                    continue;
+                };
+                let mount_inner = mount_dict.inner();
+                let Some(ammo_val) = mount_inner.get(&pk(keys::AMMO_LIST)) else {
+                    continue;
+                };
+                let mut insert_ammo = |item: &Value| {
+                    if let Some(name) = item.string_ref() {
+                        main_battery_ammo.insert(name.inner().clone());
                     }
-                    // Collect main battery ammo from all mounts in the artillery component
-                    for (_mount_key, mount_val) in art_data.inner().iter() {
-                        let Some(mount_dict) = mount_val.dict_ref() else {
-                            continue;
-                        };
-                        let mount_inner = mount_dict.inner();
-                        let Some(ammo_val) = mount_inner.get(&pk(keys::AMMO_LIST)) else {
-                            continue;
-                        };
-                        let mut insert_ammo = |item: &Value| {
-                            if let Some(name) = item.string_ref() {
-                                main_battery_ammo.insert(name.inner().clone());
-                            }
-                        };
-                        match ammo_val {
-                            Value::Tuple(t) => t.inner().iter().for_each(&mut insert_ammo),
-                            Value::List(l) => l.inner().iter().for_each(&mut insert_ammo),
-                            _ => {}
-                        }
-                    }
+                };
+                match ammo_val {
+                    Value::Tuple(t) => t.inner().iter().for_each(&mut insert_ammo),
+                    Value::List(l) => l.inner().iter().for_each(&mut insert_ammo),
+                    _ => {}
                 }
             }
         }
 
         // Collect secondary battery maxDist from _Hull upgrades
-        if uc_type == keys::UC_TYPE_HULL {
-            if let Some(atba_comp) = components
+        if uc_type == keys::UC_TYPE_HULL
+            && let Some(atba_comp) = components
                 .inner()
                 .get(&pk(keys::COMP_ATBA))
-                .and_then(|v| read_first_string(v))
-            {
-                if let Some(atba_data) = ship_data.get(&pk(&atba_comp)).and_then(|v| v.dict_ref()) {
-                    if let Some(m) =
-                        read_float(&atba_data.inner(), keys::MAX_DIST).map(Meters::from)
-                    {
-                        max_secondary_battery_m = Some(match max_secondary_battery_m {
-                            Some(prev) if prev.value() >= m.value() => prev,
-                            _ => m,
-                        });
-                    }
-                }
-            }
+                .and_then(read_first_string)
+            && let Some(atba_data) = ship_data.get(&pk(&atba_comp)).and_then(|v| v.dict_ref())
+            && let Some(m) = read_float(&atba_data.inner(), keys::MAX_DIST).map(Meters::from)
+        {
+            max_secondary_battery_m = Some(match max_secondary_battery_m {
+                Some(prev) if prev.value() >= m.value() => prev,
+                _ => m,
+            });
         }
 
         // Collect torpedo ammo from _Torpedoes upgrades
@@ -1024,7 +1010,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         let Some(torp_comp) = components
             .inner()
             .get(&pk(keys::COMP_TORPEDOES))
-            .and_then(|v| read_first_string(v))
+            .and_then(read_first_string)
         else {
             continue;
         };
@@ -1062,10 +1048,13 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
     let first_hull_comp_name: Option<String> = hull_upgrades
         .iter()
         .min_by_key(|(k, _)| (*k).clone())
-        .and_then(|(_, config)| config.component_names.get(&keys::ComponentType::Hull).cloned());
-    let hull_comp_key = first_hull_comp_name
-        .as_deref()
-        .unwrap_or(keys::A_HULL);
+        .and_then(|(_, config)| {
+            config
+                .component_names
+                .get(&keys::ComponentType::Hull)
+                .cloned()
+        });
+    let hull_comp_key = first_hull_comp_name.as_deref().unwrap_or(keys::A_HULL);
 
     let config_data = if hull_upgrades.is_empty()
         && torpedo_ammo.is_empty()
@@ -1126,7 +1115,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
                         if let Some(list) = v.list_ref() {
                             extract(&list.inner())
                         } else if let Some(tuple) = v.tuple_ref() {
-                            extract(&tuple.inner())
+                            extract(tuple.inner())
                         } else {
                             Vec::new()
                         }
@@ -1159,7 +1148,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             if let Some(list) = val.list_ref() {
                 extract(&list.inner())
             } else if let Some(tuple) = val.tuple_ref() {
-                extract(&tuple.inner())
+                extract(tuple.inner())
             } else {
                 Vec::new()
             }

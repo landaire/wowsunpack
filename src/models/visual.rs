@@ -166,7 +166,7 @@ pub fn parse_visual(record_data: &[u8]) -> Result<VisualPrototype, Report<Visual
     let base = 0usize;
 
     // Node sub-struct (+0x00 to +0x2F)
-    let nodes_count = read_u32(record_data, base + 0x00) as usize;
+    let nodes_count = read_u32(record_data, base) as usize;
 
     let nodes = if nodes_count > 0 {
         let name_map_name_ids = read_u32_array(record_data, base, 0x08, nodes_count)?;
@@ -188,8 +188,8 @@ pub fn parse_visual(record_data: &[u8]) -> Result<VisualPrototype, Report<Visual
             .map(|i| {
                 let mat_base = matrices_abs + i * 64;
                 let mut m = [0f32; 16];
-                for j in 0..16 {
-                    m[j] = read_f32(record_data, mat_base + j * 4);
+                for (j, val) in m.iter_mut().enumerate() {
+                    *val = read_f32(record_data, mat_base + j * 4);
                 }
                 Matrix4x4(m)
             })
@@ -282,7 +282,7 @@ fn parse_render_sets(
     for i in 0..count {
         let rs_base = offset + i * RENDER_SET_SIZE;
 
-        let name_id = read_u32(blob_data, rs_base + 0x00);
+        let name_id = read_u32(blob_data, rs_base);
         let material_name_id = read_u32(blob_data, rs_base + 0x04);
         let unknown_u64 = read_u64(blob_data, rs_base + 0x08);
         let material_mfm_path_id = read_u64(blob_data, rs_base + 0x10);
@@ -329,7 +329,7 @@ fn parse_lods(
     for i in 0..count {
         let lod_base = offset + i * LOD_SIZE;
 
-        let extent = read_f32(blob_data, lod_base + 0x00);
+        let extent = read_f32(blob_data, lod_base);
         let casts_shadow = blob_data[lod_base + 0x04] != 0;
         let render_set_names_count = read_u16(blob_data, lod_base + 0x06) as usize;
 
@@ -456,7 +456,7 @@ impl VisualPrototype {
                 break;
             }
             result = mat4_mul(&self.nodes.matrices[parent as usize].0, &result);
-            current = parent as u16;
+            current = parent;
         }
 
         Some(result)
@@ -490,10 +490,10 @@ impl VisualPrototype {
     /// Find the node index for a given node name string.
     pub fn find_node_index_by_name(&self, name: &str, strings: &StringsSection<'_>) -> Option<u16> {
         for (i, &name_id) in self.nodes.name_map_name_ids.iter().enumerate() {
-            if let Some(resolved) = strings.get_string_by_id(name_id) {
-                if resolved == name {
-                    return Some(self.nodes.name_map_node_ids[i]);
-                }
+            if let Some(resolved) = strings.get_string_by_id(name_id)
+                && resolved == name
+            {
+                return Some(self.nodes.name_map_node_ids[i]);
             }
         }
         None

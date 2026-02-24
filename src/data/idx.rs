@@ -351,7 +351,7 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> BTreeMap<String, VfsEntry> {
         path
     }
 
-    for (id, _resource) in &packed_resources {
+    for id in packed_resources.keys() {
         let path = resolve_path(*id, &packed_resources, &mut path_cache);
         let file_info = file_infos.get(id).cloned();
         let volume = file_info

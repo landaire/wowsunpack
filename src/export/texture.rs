@@ -123,11 +123,10 @@ const MFM_STRIP_SUFFIXES: &[&str] = &["_skinned", "_wire", "_dead", "_blaze", "_
 pub fn texture_base_names(mfm_stem: &str) -> Vec<String> {
     let mut names = vec![mfm_stem.to_string()];
     for suffix in MFM_STRIP_SUFFIXES {
-        if let Some(stripped) = mfm_stem.strip_suffix(suffix) {
-            if !names.contains(&stripped.to_string()) {
+        if let Some(stripped) = mfm_stem.strip_suffix(suffix)
+            && !names.contains(&stripped.to_string()) {
                 names.push(stripped.to_string());
             }
-        }
     }
     names
 }
@@ -165,15 +164,14 @@ pub fn load_texture_bytes(
         ];
 
         for path in &candidates {
-            if let Ok(vfs_path) = vfs.join(path) {
-                if let Ok(mut file) = vfs_path.open_file() {
+            if let Ok(vfs_path) = vfs.join(path)
+                && let Ok(mut file) = vfs_path.open_file() {
                     let mut data = Vec::new();
                     if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty()
                     {
                         return Some((base, data));
                     }
                 }
-            }
         }
     }
 
@@ -199,7 +197,9 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
 
     // The textures/ sibling directory: go up from the ship dir to the species dir,
     // then into textures/. E.g. .../cruiser/JSC010_Mogami_1944/ -> .../cruiser/textures/
-    let tex_sibling_dir = dir.rsplit_once('/').map(|(parent, _)| format!("{parent}/textures"));
+    let tex_sibling_dir = dir
+        .rsplit_once('/')
+        .map(|(parent, _)| format!("{parent}/textures"));
 
     for base in texture_base_names(stem) {
         // Build candidate paths: prefer dd0 (high-res) over dds (low-res mip tail).
@@ -213,15 +213,14 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
         candidates.push(format!("{dir}/{base}_a.dds"));
 
         for path in &candidates {
-            if let Ok(vfs_path) = vfs.join(path) {
-                if let Ok(mut file) = vfs_path.open_file() {
+            if let Ok(vfs_path) = vfs.join(path)
+                && let Ok(mut file) = vfs_path.open_file() {
                     let mut data = Vec::new();
                     if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty()
                     {
                         return Some(data);
                     }
                 }
-            }
         }
     }
 
@@ -233,11 +232,10 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
 /// E.g. `GW_a` → `GW`, `camo_01` → `camo_01` (no channel suffix).
 fn strip_channel_suffix(scheme: &str) -> &str {
     for suffix in TEXTURE_CHANNEL_SUFFIXES {
-        if let Some(stripped) = scheme.strip_suffix(suffix) {
-            if !stripped.is_empty() {
+        if let Some(stripped) = scheme.strip_suffix(suffix)
+            && !stripped.is_empty() {
                 return stripped;
             }
-        }
     }
     scheme
 }
@@ -272,14 +270,12 @@ pub fn discover_texture_schemes(vfs: &vfs::VfsPath, mfm_stems: &[String]) -> Vec
         for base in texture_base_names(stem) {
             let prefix = format!("{base}_");
             for name in &dds_names {
-                if let Some(rest) = name.strip_prefix(&prefix) {
-                    if let Some(raw_scheme) = rest.strip_suffix(".dds") {
-                        if !raw_scheme.is_empty() {
+                if let Some(rest) = name.strip_prefix(&prefix)
+                    && let Some(raw_scheme) = rest.strip_suffix(".dds")
+                        && !raw_scheme.is_empty() {
                             let scheme = strip_channel_suffix(raw_scheme);
                             schemes.insert(scheme.to_string());
                         }
-                    }
-                }
             }
         }
     }

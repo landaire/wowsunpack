@@ -134,12 +134,12 @@ impl CamouflageDb {
         {
             for group_node in sg_node.children().filter(|n| n.is_element()) {
                 let group_name = group_node.tag_name().name().to_string();
-                if let Some(ships_node) = group_node.children().find(|n| n.has_tag_name("ships")) {
-                    if let Some(text) = ships_node.text() {
-                        let indices: HashSet<String> =
-                            text.split_whitespace().map(|s| s.to_string()).collect();
-                        ship_groups.insert(group_name, indices);
-                    }
+                if let Some(ships_node) = group_node.children().find(|n| n.has_tag_name("ships"))
+                    && let Some(text) = ships_node.text()
+                {
+                    let indices: HashSet<String> =
+                        text.split_whitespace().map(|s| s.to_string()).collect();
+                    ship_groups.insert(group_name, indices);
                 }
             }
         }
@@ -155,7 +155,7 @@ impl CamouflageDb {
             }
 
             let mut colors = [[0.0f32; 4]; 4];
-            for i in 0..4 {
+            for (i, color) in colors.iter_mut().enumerate() {
                 let tag = format!("color{i}");
                 if let Some(text) = child_text(&cs_node, &tag) {
                     let parts: Vec<f32> = text
@@ -163,7 +163,7 @@ impl CamouflageDb {
                         .filter_map(|s| s.parse().ok())
                         .collect();
                     if parts.len() >= 4 {
-                        colors[i] = [parts[0], parts[1], parts[2], parts[3]];
+                        *color = [parts[0], parts[1], parts[2], parts[3]];
                     }
                 }
             }
@@ -199,10 +199,10 @@ impl CamouflageDb {
                     if tag.ends_with("_mgn") || tag.ends_with("_animmap") {
                         continue;
                     }
-                    if let Some(path) = child.text().map(|t| t.trim().to_string()) {
-                        if !path.is_empty() {
-                            textures.insert(tag.to_lowercase(), path);
-                        }
+                    if let Some(path) = child.text().map(|t| t.trim().to_string())
+                        && !path.is_empty()
+                    {
+                        textures.insert(tag.to_lowercase(), path);
                     }
                 }
             }
@@ -293,10 +293,10 @@ impl CamouflageDb {
                     continue;
                 }
                 for group_name in &entry.ship_groups {
-                    if let Some(members) = self.ship_groups.get(group_name) {
-                        if members.contains(idx) {
-                            return Some(entry);
-                        }
+                    if let Some(members) = self.ship_groups.get(group_name)
+                        && members.contains(idx)
+                    {
+                        return Some(entry);
                     }
                 }
             }

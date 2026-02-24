@@ -26,15 +26,14 @@ pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
     let mut builds: Vec<u32> = Vec::new();
     for entry in read_dir(&bin_dir)? {
         let entry = entry?;
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            if let Some(build_num) = entry
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && let Some(build_num) = entry
                 .file_name()
                 .to_str()
                 .and_then(|name| name.parse::<u32>().ok())
             {
                 builds.push(build_num);
             }
-        }
     }
     builds.sort();
     Ok(builds)
@@ -103,7 +102,7 @@ pub fn load_game_resources(
                 .open_file()
                 .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
                 .read_to_end(&mut data)
-                .map_err(|e| ErrorKind::IoError(e))?;
+                .map_err(ErrorKind::IoError)?;
             Ok(Cow::Owned(data))
         });
         parse_scripts(&loader)?
@@ -177,13 +176,12 @@ pub fn build_game_vfs(game_dir: &Path) -> Result<VfsPath, Report> {
         })
         .is_ok();
 
-    if assets_loaded {
-        if let Ok(assets_vfs) = AssetsBinVfs::new(assets_bin_data) {
+    if assets_loaded
+        && let Ok(assets_vfs) = AssetsBinVfs::new(assets_bin_data) {
             let assets_layer = VfsPath::new(assets_vfs);
             let overlay = OverlayFS::new(&[assets_layer, pkg_vfs]);
             return Ok(VfsPath::new(overlay));
         }
-    }
 
     Ok(pkg_vfs)
 }

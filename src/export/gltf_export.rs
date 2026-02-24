@@ -93,10 +93,12 @@ pub fn export_glb(
     }
 
     // Build glTF document.
-    let mut root = json::Root::default();
-    root.asset = json::Asset {
-        version: "2.0".to_string(),
-        generator: Some("wowsunpack".to_string()),
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("wowsunpack".to_string()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -112,7 +114,7 @@ pub fn export_glb(
     }
 
     // Pad binary data to 4-byte alignment.
-    while bin_data.len() % 4 != 0 {
+    while !bin_data.len().is_multiple_of(4) {
         bin_data.push(0);
     }
 
@@ -223,10 +225,10 @@ fn collect_primitives(
             .ok_or_else(|| Report::new(ExportError::RenderSetNotFound(rs_name_id)))?;
 
         // Skip render sets based on damage state.
-        if let Some(rs_name) = db.strings.get_string_by_id(rs_name_id) {
-            if exclude.iter().any(|sub| rs_name.contains(sub)) {
-                continue;
-            }
+        if let Some(rs_name) = db.strings.get_string_by_id(rs_name_id)
+            && exclude.iter().any(|sub| rs_name.contains(sub))
+        {
+            continue;
         }
 
         // Decode unknown_u64 → (vertices_mapping_id, indices_mapping_id)
@@ -332,7 +334,7 @@ fn collect_primitives(
         let idx_slice = &decoded_indices[idx_start..idx_end];
 
         // Parse indices as u32.
-        let mut indices: Vec<u32> = match index_size {
+        let indices: Vec<u32> = match index_size {
             2 => idx_slice
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
@@ -352,13 +354,13 @@ fn collect_primitives(
         // (items_offset is applied when extracting the vertex slice).
 
         // Unpack vertex attributes.
-        let (mut positions, mut normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+        let mut verts = unpack_vertices(vert_slice, stride, &format);
 
         // Apply per-vertex barrel pitch rotation if configured.
         if let Some(bp) = barrel_pitch {
             apply_barrel_pitch(
-                &mut positions,
-                &mut normals,
+                &mut verts.positions,
+                &mut verts.normals,
                 vert_slice,
                 stride,
                 &format,
@@ -388,9 +390,9 @@ fn collect_primitives(
         };
 
         result.push(DecodedPrimitive {
-            positions,
-            normals,
-            uvs,
+            positions: verts.positions,
+            normals: verts.normals,
+            uvs: verts.uvs,
             indices,
             material_name,
             mfm_stem,
@@ -400,12 +402,14 @@ fn collect_primitives(
     Ok(result)
 }
 
+struct UnpackedVertices {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+}
+
 /// Unpack vertex data into separate position, normal, and UV arrays.
-fn unpack_vertices(
-    data: &[u8],
-    stride: usize,
-    format: &VertexFormat,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>) {
+fn unpack_vertices(data: &[u8], stride: usize, format: &VertexFormat) -> UnpackedVertices {
     let count = data.len() / stride;
     let mut positions = Vec::with_capacity(count);
     let mut normals = Vec::with_capacity(count);
@@ -455,7 +459,11 @@ fn unpack_vertices(
         }
     }
 
-    (positions, normals, uvs)
+    UnpackedVertices {
+        positions,
+        normals,
+        uvs,
+    }
 }
 
 /// Convert a column-major 4x4 transform from left-handed to right-handed
@@ -631,7 +639,6 @@ fn create_textured_material(
             tex_coord: Some(0),
             extras: Default::default(),
         }),
-        ..Default::default()
     });
 
     let texture_info = json::texture::Info {
@@ -1152,7 +1159,6 @@ fn add_variants_extension(root: &mut json::Root, texture_set: &TextureSet) {
     let ext = json::extensions::root::KhrMaterialsVariants { variants };
     root.extensions = Some(json::extensions::root::Root {
         khr_materials_variants: Some(ext),
-        ..Default::default()
     });
 
     root.extensions_used
@@ -1165,7 +1171,7 @@ fn add_variants_extension(root: &mut json::Root, texture_set: &TextureSet) {
 }
 
 fn pad_to_4(data: &mut Vec<u8>) {
-    while data.len() % 4 != 0 {
+    while !data.len().is_multiple_of(4) {
         data.push(0);
     }
 }
@@ -1564,7 +1570,7 @@ pub fn collect_hull_meshes(
         }
         let idx_slice = &decoded_indices[idx_start..idx_end];
 
-        let mut indices: Vec<u32> = match index_size {
+        let indices: Vec<u32> = match index_size {
             2 => idx_slice
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
@@ -1580,13 +1586,13 @@ pub fn collect_hull_meshes(
             }
         };
 
-        let (mut positions, mut normals, uvs) = unpack_vertices(vert_slice, stride, &format);
+        let mut verts = unpack_vertices(vert_slice, stride, &format);
 
         // Apply per-vertex barrel pitch rotation if configured.
         if let Some(bp) = barrel_pitch {
             apply_barrel_pitch(
-                &mut positions,
-                &mut normals,
+                &mut verts.positions,
+                &mut verts.normals,
                 vert_slice,
                 stride,
                 &format,
@@ -1605,9 +1611,9 @@ pub fn collect_hull_meshes(
 
         result.push(InteractiveHullMesh {
             name: rs_name.to_string(),
-            positions,
-            normals,
-            uvs,
+            positions: verts.positions,
+            normals: verts.normals,
+            uvs: verts.uvs,
             indices,
             mfm_path,
             colors: Vec::new(),
@@ -2244,10 +2250,12 @@ pub fn export_ship_glb(
     damaged: bool,
     writer: &mut impl Write,
 ) -> Result<(), Report<ExportError>> {
-    let mut root = json::Root::default();
-    root.asset = json::Asset {
-        version: "2.0".to_string(),
-        generator: Some("wowsunpack".to_string()),
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("wowsunpack".to_string()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2356,7 +2364,7 @@ pub fn export_ship_glb(
     }
 
     // Pad binary data to 4-byte alignment.
-    while bin_data.len() % 4 != 0 {
+    while !bin_data.len().is_multiple_of(4) {
         bin_data.push(0);
     }
 

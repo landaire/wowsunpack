@@ -3,7 +3,7 @@
 /// Format strings look like `set3/xyznuvtbpc` where the suffix encodes which
 /// attributes are present and in what order. Vertices are always tightly packed
 /// with a fixed stride per format.
-
+///
 /// Semantic meaning of a vertex attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeSemantic {

@@ -91,7 +91,7 @@ fn parse_model_at(blob_data: &[u8], base: usize) -> Result<ModelPrototype, Repor
         }));
     }
 
-    let visual_resource_id = read_u64(blob_data, base + 0x00);
+    let visual_resource_id = read_u64(blob_data, base);
     let skel_ext_count = read_u8(blob_data, base + 0x08) as usize;
     let misc_type = read_u8(blob_data, base + 0x09);
     let animations_count = read_u8(blob_data, base + 0x0A) as usize;
@@ -175,7 +175,7 @@ fn parse_dye_entries(
     for i in 0..count {
         let dye_base = offset + i * DYE_ENTRY_SIZE;
 
-        let matter_id = read_u32(blob_data, dye_base + 0x00);
+        let matter_id = read_u32(blob_data, dye_base);
         let replaces_id = read_u32(blob_data, dye_base + 0x04);
         let tints_count = read_i32(blob_data, dye_base + 0x08).max(0) as usize;
 

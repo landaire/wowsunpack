@@ -1101,15 +1101,12 @@ fn parse_integer_enum(xml: &str, enum_name: &str) -> Option<HashMap<i32, Cow<'st
 
     let mut map = HashMap::new();
     for child in enum_node.children() {
-        if child.has_tag_name("const") {
-            if let (Some(name), Some(value_str)) =
+        if child.has_tag_name("const")
+            && let (Some(name), Some(value_str)) =
                 (child.attribute("name"), child.attribute("value"))
-            {
-                if let Ok(value) = value_str.trim().parse::<i32>() {
+                && let Ok(value) = value_str.trim().parse::<i32>() {
                     map.insert(value, Cow::Owned(name.to_string()));
                 }
-            }
-        }
     }
 
     if map.is_empty() { None } else { Some(map) }

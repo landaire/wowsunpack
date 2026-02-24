@@ -18,6 +18,7 @@ pub fn set_debug(enabled: bool) {
     DEBUG_OUTPUT.store(enabled, Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
 pub(crate) fn debug_enabled() -> bool {
     DEBUG_OUTPUT.load(Ordering::Relaxed)
 }

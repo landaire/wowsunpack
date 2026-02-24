@@ -27,11 +27,13 @@ pub const COMP_FINDERS: &str = "finders";
 pub const COMP_RADARS: &str = "radars";
 pub const COMP_TORPEDOES: &str = "torpedoes";
 
-
 /// Typed representation of component type keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "rkyv", rkyv(derive(Hash, PartialEq, Eq)))]
 pub enum ComponentType {
     #[cfg_attr(feature = "serde", serde(rename = "hull"))]

@@ -380,8 +380,7 @@ fn run() -> Result<(), Report> {
                 for path in paths {
                     let Ok(path) = path else { continue };
                     if path.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                        && let Ok(version) =
-                            u64::from_str_radix(path.file_name().to_str().unwrap(), 10)
+                        && let Ok(version) = path.file_name().to_str().unwrap().parse::<u64>()
                     {
                         match game_version {
                             Some(other_version) => {
@@ -820,7 +819,7 @@ fn run() -> Result<(), Report> {
                         return;
                     };
 
-                    if file.read_to_end(&mut *buffer).is_err() {
+                    if file.read_to_end(&mut buffer).is_err() {
                         return;
                     }
 
@@ -1248,7 +1247,7 @@ fn run_assets_bin(
                     let show_len = item_size.min(data.len()).min(128);
                     println!("  item_size=0x{item_size:X} ({item_size} bytes)");
                     println!("  record hex ({show_len} bytes):");
-                    for row in 0..(show_len + 15) / 16 {
+                    for row in 0..show_len.div_ceil(16) {
                         let start = row * 16;
                         let end = (start + 16).min(show_len);
                         let hex: String = data[start..end]
@@ -1323,13 +1322,13 @@ fn run_assets_bin(
             pos += 1;
             continue;
         }
-        if let Some(s) = db.strings.get_string(pos as u32) {
-            if !s.is_empty() {
-                println!("    [offset={pos}] \"{s}\"");
-                pos += s.len() + 1;
-                sample_count += 1;
-                continue;
-            }
+        if let Some(s) = db.strings.get_string(pos as u32)
+            && !s.is_empty()
+        {
+            println!("    [offset={pos}] \"{s}\"");
+            pos += s.len() + 1;
+            sample_count += 1;
+            continue;
         }
         pos += 1;
     }
@@ -1510,6 +1509,7 @@ fn run_export_model(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_export_ship(
     vfs: &VfsPath,
     name: &str,
@@ -1531,10 +1531,10 @@ fn run_export_ship(
     // Load translations if available.
     if let Some(version) = game_version {
         let mo_path = wowsunpack::game_data::translations_path(game_dir, version as u32);
-        if let Ok(data) = std::fs::read(&mo_path) {
-            if let Ok(catalog) = gettext::Catalog::parse(&*data) {
-                assets.set_translations(catalog);
-            }
+        if let Ok(data) = std::fs::read(&mo_path)
+            && let Ok(catalog) = gettext::Catalog::parse(&*data)
+        {
+            assets.set_translations(catalog);
         }
     }
 
@@ -1576,6 +1576,7 @@ fn run_export_ship(
         hull: hull_selection.map(|s| s.to_string()),
         textures: !no_textures,
         damaged,
+        ..Default::default()
     };
     let ctx = assets.load_ship(name, &options)?;
 
@@ -1631,10 +1632,10 @@ fn run_armor(
     // Load translations if available.
     if let Some(version) = game_version {
         let mo_path = wowsunpack::game_data::translations_path(game_dir, version as u32);
-        if let Ok(data) = std::fs::read(&mo_path) {
-            if let Ok(catalog) = gettext::Catalog::parse(&*data) {
-                assets.set_translations(catalog);
-            }
+        if let Ok(data) = std::fs::read(&mo_path)
+            && let Ok(catalog) = gettext::Catalog::parse(&*data)
+        {
+            assets.set_translations(catalog);
         }
     }
 
@@ -1746,7 +1747,7 @@ fn run_armor(
                 geom_mat_ids.iter().collect::<Vec<_>>()
             );
 
-            if let Some(ref amap) = armor_map {
+            if let Some(amap) = armor_map {
                 println!("    GameParams thickness:");
                 print_armor_layers(&geom_mat_ids, amap);
             } else {
@@ -1755,7 +1756,8 @@ fn run_armor(
 
             // Print per-layer bounding boxes for multi-layer materials.
             {
-                // Group triangles by (material_id, layer_index)
+                // Group triangles by (material_id, layer_index) -> (count, bbox_min, bbox_max)
+                #[allow(clippy::type_complexity)]
                 let mut layer_groups: std::collections::BTreeMap<
                     (u8, u8),
                     (usize, [f32; 3], [f32; 3]),
@@ -1768,9 +1770,9 @@ fn run_armor(
                             .or_insert((0, [f32::MAX; 3], [f32::MIN; 3]));
                     entry.0 += 1; // triangle count
                     for v in &tri.vertices {
-                        for i in 0..3 {
-                            entry.1[i] = entry.1[i].min(v[i]);
-                            entry.2[i] = entry.2[i].max(v[i]);
+                        for (i, &coord) in v.iter().enumerate() {
+                            entry.1[i] = entry.1[i].min(coord);
+                            entry.2[i] = entry.2[i].max(coord);
                         }
                     }
                 }
@@ -1841,7 +1843,7 @@ fn run_armor(
                 geom_mat_ids.iter().collect::<Vec<_>>()
             );
 
-            if let Some(ref amap) = armor_map {
+            if let Some(amap) = armor_map {
                 println!("    GameParams thickness:");
                 print_armor_layers(&geom_mat_ids, amap);
             }
@@ -1877,7 +1879,7 @@ fn run_armor(
     }
 
     // Summary.
-    if let Some(ref amap) = armor_map {
+    if let Some(amap) = armor_map {
         let total_materials = amap.len();
         let multi_layer = amap.values().filter(|v| v.len() > 1).count();
         println!(
@@ -1943,21 +1945,6 @@ fn run_dump_uvs(
     // Try to find and extract .geometry files matching the name from VFS.
     let mut geom_files: Vec<(String, Vec<u8>)> = Vec::new();
 
-    // List all files in VFS matching the name.
-    let name_lower = name.to_lowercase();
-    // Walk the VFS to find .geometry files.
-    fn walk_vfs(path: &VfsPath, results: &mut Vec<String>) {
-        if let Ok(entries) = path.read_dir() {
-            for entry in entries {
-                let p = entry.as_str().to_string();
-                if p.ends_with(".geometry") {
-                    results.push(p);
-                }
-                walk_vfs(&entry, results);
-            }
-        }
-    }
-
     // Instead of walking VFS (slow), try direct path construction.
     // The user provides a directory name like "JSB001_Kawachi_1912".
     // Geometry files are at content/gameplay/{nation}/ship/{type}/{name}/{name}_{part}.geometry
@@ -1991,12 +1978,12 @@ fn run_dump_uvs(
             for part in &parts {
                 let path =
                     format!("content/gameplay/{nation}/ship/{stype}/{name}/{name}{part}.geometry");
-                if let Ok(file_path) = vfs.join(&path) {
-                    if let Ok(mut f) = file_path.open_file() {
-                        let mut data = Vec::new();
-                        if f.read_to_end(&mut data).is_ok() && !data.is_empty() {
-                            geom_files.push((path, data));
-                        }
+                if let Ok(file_path) = vfs.join(&path)
+                    && let Ok(mut f) = file_path.open_file()
+                {
+                    let mut data = Vec::new();
+                    if f.read_to_end(&mut data).is_ok() && !data.is_empty() {
+                        geom_files.push((path, data));
                     }
                 }
             }

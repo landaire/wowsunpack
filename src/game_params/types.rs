@@ -1176,9 +1176,7 @@ impl HullUpgradeConfig {
 
     /// Get mount points for a specific component type.
     pub fn mounts(&self, ct: super::keys::ComponentType) -> Option<&[MountPoint]> {
-        self.mounts_by_type
-            .get(&ct)
-            .map(|cm| cm.mounts())
+        self.mounts_by_type.get(&ct).map(|cm| cm.mounts())
     }
 
     /// Iterate over all mount points across all component types (default selection).
@@ -1200,17 +1198,19 @@ impl HullUpgradeConfig {
         &'a self,
         overrides: &'a HashMap<super::keys::ComponentType, String>,
     ) -> impl Iterator<Item = &'a MountPoint> {
-        self.mounts_by_type.iter().flat_map(move |(ct_key, default_cm)| {
-            if let Some(override_name) = overrides.get(ct_key) {
-                // Use alternative mounts if the override differs from default
-                if override_name != &default_cm.component_name {
-                    if let Some(alt_cm) = self.alternative_mounts.get(override_name) {
+        self.mounts_by_type
+            .iter()
+            .flat_map(move |(ct_key, default_cm)| {
+                if let Some(override_name) = overrides.get(ct_key) {
+                    // Use alternative mounts if the override differs from default
+                    if override_name != &default_cm.component_name
+                        && let Some(alt_cm) = self.alternative_mounts.get(override_name)
+                    {
                         return alt_cm.mounts.iter();
                     }
                 }
-            }
-            default_cm.mounts.iter()
-        })
+                default_cm.mounts.iter()
+            })
     }
 }
 
@@ -1411,16 +1411,15 @@ impl Vehicle {
                 if let Some(game_params) = game_params {
                     let mut max_range: Option<Meters> = None;
                     for ammo_name in &config.torpedo_ammo {
-                        if let Some(ammo_param) = game_params.game_param_by_name(ammo_name) {
-                            if let Some(projectile) = ammo_param.projectile() {
-                                if let Some(dist) = projectile.max_dist() {
-                                    let m = dist.to_meters();
-                                    max_range = Some(match max_range {
-                                        Some(prev) if prev.value() >= m.value() => prev,
-                                        _ => m,
-                                    });
-                                }
-                            }
+                        if let Some(ammo_param) = game_params.game_param_by_name(ammo_name)
+                            && let Some(projectile) = ammo_param.projectile()
+                            && let Some(dist) = projectile.max_dist()
+                        {
+                            let m = dist.to_meters();
+                            max_range = Some(match max_range {
+                                Some(prev) if prev.value() >= m.value() => prev,
+                                _ => m,
+                            });
                         }
                     }
                     ranges.torpedo_range_m = max_range;
@@ -2301,23 +2300,27 @@ impl GameParamProvider for GameParams {
     }
 }
 
-fn build_param_lookups(
-    params: &[Rc<Param>],
-) -> (
-    HashMap<GameParamId, Rc<Param>>,
-    HashMap<String, Rc<Param>>,
-    HashMap<String, Rc<Param>>,
-) {
-    let mut id_to_params = HashMap::with_capacity(params.len());
-    let mut index_to_params = HashMap::with_capacity(params.len());
-    let mut name_to_params = HashMap::with_capacity(params.len());
+struct ParamLookups {
+    by_id: HashMap<GameParamId, Rc<Param>>,
+    by_index: HashMap<String, Rc<Param>>,
+    by_name: HashMap<String, Rc<Param>>,
+}
+
+fn build_param_lookups(params: &[Rc<Param>]) -> ParamLookups {
+    let mut by_id = HashMap::with_capacity(params.len());
+    let mut by_index = HashMap::with_capacity(params.len());
+    let mut by_name = HashMap::with_capacity(params.len());
     for param in params {
-        id_to_params.insert(param.id, param.clone());
-        index_to_params.insert(param.index.clone(), param.clone());
-        name_to_params.insert(param.name.clone(), param.clone());
+        by_id.insert(param.id, param.clone());
+        by_index.insert(param.index.clone(), param.clone());
+        by_name.insert(param.name.clone(), param.clone());
     }
 
-    (id_to_params, index_to_params, name_to_params)
+    ParamLookups {
+        by_id,
+        by_index,
+        by_name,
+    }
 }
 
 impl<I> From<I> for GameParams
@@ -2326,13 +2329,13 @@ where
 {
     fn from(value: I) -> Self {
         let params: Vec<Rc<Param>> = value.into_iter().map(Rc::new).collect();
-        let (id_to_params, index_to_params, name_to_params) = build_param_lookups(params.as_ref());
+        let lookups = build_param_lookups(params.as_ref());
 
         Self {
             params,
-            id_to_params,
-            index_to_params,
-            name_to_params,
+            id_to_params: lookups.by_id,
+            index_to_params: lookups.by_index,
+            name_to_params: lookups.by_name,
         }
     }
 }

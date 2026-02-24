@@ -58,7 +58,8 @@ pub struct ShipExportOptions {
     pub damaged: bool,
     /// Module overrides: component type key (e.g. "artillery") to component name.
     /// Overrides the default component for specific types.
-    pub module_overrides: std::collections::HashMap<crate::game_params::keys::ComponentType, String>,
+    pub module_overrides:
+        std::collections::HashMap<crate::game_params::keys::ComponentType, String>,
 }
 
 impl Default for ShipExportOptions {
@@ -234,24 +235,23 @@ impl ShipAssets {
         }
 
         // Strategy 2: exact param index match via GameParams.
-        if let Some(param) = self.metadata.game_param_by_index(name) {
-            if let Some(vehicle) = param.vehicle() {
-                if let Some(model_path) = vehicle.model_path() {
-                    let dir = model_path
-                        .rsplit_once('/')
-                        .map(|(d, _)| d)
-                        .unwrap_or(model_path);
-                    let model_dir = dir.rsplit('/').next().unwrap_or(dir);
-                    return Ok(ShipInfo {
-                        model_dir: model_dir.to_string(),
-                        display_name: self
-                            .metadata
-                            .localized_name_from_param(&param)
-                            .map(|s: &str| s.to_string()),
-                        param_index: param.index().to_string(),
-                    });
-                }
-            }
+        if let Some(param) = self.metadata.game_param_by_index(name)
+            && let Some(vehicle) = param.vehicle()
+            && let Some(model_path) = vehicle.model_path()
+        {
+            let dir = model_path
+                .rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or(model_path);
+            let model_dir = dir.rsplit('/').next().unwrap_or(dir);
+            return Ok(ShipInfo {
+                model_dir: model_dir.to_string(),
+                display_name: self
+                    .metadata
+                    .localized_name_from_param(&param)
+                    .map(|s: &str| s.to_string()),
+                param_index: param.index().to_string(),
+            });
         }
 
         // Strategy 3: fuzzy display name match via GameParams.
@@ -473,11 +473,14 @@ impl ShipAssets {
 
         // Load turret/mount models from GameParams.
         let mount_points: Vec<MountPoint> = vehicle
-            .and_then(|v| self.select_hull_mount_points(v, options.hull.as_deref(), &options.module_overrides))
+            .and_then(|v| {
+                self.select_hull_mount_points(v, options.hull.as_deref(), &options.module_overrides)
+            })
             .unwrap_or_default();
 
-        let (turret_models, _turret_model_index, mounts) =
-            self.load_mounts(&db, &self_id_index, &mount_points, &hull_parts)?;
+        let loaded = self.load_mounts(&db, &self_id_index, &mount_points, &hull_parts)?;
+        let turret_models = loaded.turret_models;
+        let mounts = loaded.mounts;
 
         // Resolve material-based camouflage schemes (ship-specific + universal).
         let ship_index = self.find_ship_index(&info.model_dir);
@@ -812,7 +815,10 @@ impl ShipAssets {
         &self,
         vehicle: &crate::game_params::types::Vehicle,
         hull_selection: Option<&str>,
-        module_overrides: &std::collections::HashMap<crate::game_params::keys::ComponentType, String>,
+        module_overrides: &std::collections::HashMap<
+            crate::game_params::keys::ComponentType,
+            String,
+        >,
     ) -> Option<Vec<MountPoint>> {
         let upgrades = vehicle.hull_upgrades()?;
         let mut sorted: Vec<_> = upgrades.iter().collect();
@@ -840,7 +846,10 @@ impl ShipAssets {
             if module_overrides.is_empty() {
                 config.all_mount_points().cloned().collect()
             } else {
-                config.mount_points_with_overrides(module_overrides).cloned().collect()
+                config
+                    .mount_points_with_overrides(module_overrides)
+                    .cloned()
+                    .collect()
             }
         })
     }
@@ -852,25 +861,16 @@ impl ShipAssets {
         self_id_index: &HashMap<u64, usize>,
         mount_points: &[MountPoint],
         hull_parts: &[OwnedSubModel],
-    ) -> Result<
-        (
-            Vec<OwnedSubModel>,
-            HashMap<String, usize>,
-            Vec<ResolvedMount>,
-        ),
-        Report,
-    > {
+    ) -> Result<LoadedMounts, Report> {
         // Collect hardpoint transforms from hull visuals.
         let mut hp_transforms: HashMap<String, [f32; 16]> = HashMap::new();
         for smd in hull_parts {
             for &name_id in &smd.visual.nodes.name_map_name_ids {
-                if let Some(name) = db.strings.get_string_by_id(name_id) {
-                    if name.starts_with("HP_") {
-                        if let Some(xform) = smd.visual.find_hardpoint_transform(name, &db.strings)
-                        {
-                            hp_transforms.insert(name.to_string(), xform);
-                        }
-                    }
+                if let Some(name) = db.strings.get_string_by_id(name_id)
+                    && name.starts_with("HP_")
+                    && let Some(xform) = smd.visual.find_hardpoint_transform(name, &db.strings)
+                {
+                    hp_transforms.insert(name.to_string(), xform);
                 }
             }
         }
@@ -958,7 +958,11 @@ impl ShipAssets {
             });
         }
 
-        Ok((turret_models, turret_model_index, mounts))
+        Ok(LoadedMounts {
+            turret_models,
+            turret_model_index,
+            mounts,
+        })
     }
 
     /// Load unique turret models, deduplicating by model path.
@@ -1563,6 +1567,14 @@ struct OwnedSubModel {
     splash_bytes: Option<Vec<u8>>,
 }
 
+/// Result of [`ShipAssets::load_mounts`].
+struct LoadedMounts {
+    turret_models: Vec<OwnedSubModel>,
+    #[allow(dead_code)]
+    turret_model_index: HashMap<String, usize>,
+    mounts: Vec<ResolvedMount>,
+}
+
 /// A mount instance with resolved transform.
 struct ResolvedMount {
     hp_name: String,
@@ -1716,10 +1728,9 @@ fn resolve_compound_hp(
         if hp_name.len() > hull_hp.len()
             && hp_name.starts_with(hull_hp.as_str())
             && hp_name.as_bytes()[hull_hp.len()] == b'_'
+            && best_parent.is_none_or(|(bp, _)| hull_hp.len() > bp.len())
         {
-            if best_parent.map_or(true, |(bp, _)| hull_hp.len() > bp.len()) {
-                best_parent = Some((hull_hp.as_str(), xform));
-            }
+            best_parent = Some((hull_hp.as_str(), xform));
         }
     }
     let (parent_hp, parent_xform) = best_parent?;
@@ -1799,10 +1810,10 @@ fn build_barrel_pitch(
             .iter()
             .position(|&nid| nid == name_id)
             .map(|i| visual.nodes.name_map_node_ids[i]);
-        if let Some(ni) = node_idx {
-            if ni == rotate_x_idx || visual.is_descendant_of(ni, rotate_x_idx) {
-                barrel_bone_indices.push(blend_idx as u8);
-            }
+        if let Some(ni) = node_idx
+            && (ni == rotate_x_idx || visual.is_descendant_of(ni, rotate_x_idx))
+        {
+            barrel_bone_indices.push(blend_idx as u8);
         }
     }
 

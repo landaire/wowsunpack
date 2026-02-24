@@ -39,6 +39,7 @@ pub enum PrimitiveType {
 }
 
 impl PrimitiveType {
+    #[allow(clippy::result_large_err)]
     fn parse_value<'replay, 'argtype>(
         &'argtype self,
         i: &'replay [u8],
@@ -401,6 +402,7 @@ impl ArgType {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn parse_value<'a, 'b>(&'b self, i: &'a [u8]) -> IResult<&'a [u8], ArgValue<'b>> {
         match self {
             Self::Primitive(p) => p.parse_value(i),
