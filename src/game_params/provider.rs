@@ -438,7 +438,12 @@ fn build_crew_personality(personality: &BTreeMap<HashableValue, Value>) -> CrewP
         ))
         .has_overlay(game_param_to_type!(personality, "hasOverlay", bool))
         .has_rank(game_param_to_type!(personality, "hasRank", bool))
-        .has_sample_voiceover(game_param_to_type!(personality, "hasSampleVO", bool))
+        .has_sample_voiceover(
+            personality
+                .get(&HashableValue::String("hasSampleVO".to_string().into()))
+                .and_then(|v| v.bool_ref().copied())
+                .unwrap_or(false),
+        )
         .is_animated(game_param_to_type!(personality, "isAnimated", bool))
         .is_person(game_param_to_type!(personality, "isPerson", bool))
         .is_retrainable(game_param_to_type!(personality, "isRetrainable", bool))
@@ -607,6 +612,17 @@ fn read_first_string(val: &Value) -> Option<String> {
     list.inner()
         .first()
         .and_then(|v| v.string_ref().map(|s| s.inner().clone()))
+}
+
+/// Helper: extract all strings from a pickled list value.
+fn read_all_strings(val: &Value) -> Vec<String> {
+    let Some(list) = val.list_ref() else {
+        return Vec::new();
+    };
+    list.inner()
+        .iter()
+        .filter_map(|v| v.string_ref().map(|s| s.inner().clone()))
+        .collect()
 }
 
 /// Helper: read a string value from a pickled dict.
@@ -848,14 +864,21 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         let mut config = crate::game_params::types::HullUpgradeConfig::default();
 
         // Extract component name mappings for all component types.
-        for &ct in keys::ALL_COMPONENT_TYPES {
-            if let Some(comp_name) = components.get(&pk(ct)).and_then(|v| read_first_string(v)) {
-                config.component_names.insert(ct.to_string(), comp_name);
+        // Also track alternatives (multiple options per type).
+        for ct in keys::ComponentType::ALL {
+            if let Some(val) = components.get(&pk(ct.key())) {
+                let all_names = read_all_strings(val);
+                if let Some(first) = all_names.first() {
+                    config.component_names.insert(*ct, first.clone());
+                }
+                if all_names.len() > 1 {
+                    config.component_alternatives.insert(*ct, all_names);
+                }
             }
         }
 
         // Read hull detection data and hull model path.
-        if let Some(hull_comp) = config.component_names.get(keys::COMP_HULL) {
+        if let Some(hull_comp) = config.component_names.get(&keys::ComponentType::Hull) {
             if let Some(hull_data) = ship_data.get(&pk(hull_comp)).and_then(|v| v.dict_ref()) {
                 let hull_data = hull_data.inner();
                 config.detection_km =
@@ -870,13 +893,27 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         }
 
         // Extract mount points for all model component types.
-        for &ct in keys::MODEL_COMPONENT_TYPES {
+        for ct in keys::ComponentType::ALL {
             if let Some(comp_name) = config.component_names.get(ct) {
                 let mounts = extract_mounts(ship_data, comp_name);
                 if !mounts.is_empty() {
                     config.mounts_by_type.insert(
-                        ct.to_string(),
+                        *ct,
                         ComponentMounts::new(comp_name.clone(), mounts),
+                    );
+                }
+            }
+        }
+
+        // Extract mount points for alternative components (non-default selections).
+        for (_, alternatives) in &config.component_alternatives {
+            for alt_name in alternatives.iter().skip(1) {
+                // Skip the first (default) since it is already in mounts_by_type.
+                let mounts = extract_mounts(ship_data, alt_name);
+                if !mounts.is_empty() {
+                    config.alternative_mounts.insert(
+                        alt_name.clone(),
+                        ComponentMounts::new(alt_name.clone(), mounts),
                     );
                 }
             }
@@ -1020,6 +1057,16 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         }
     }
 
+    // Resolve the first hull component name from hull upgrades
+    // (e.g. "B_Hull" for Shimakaze). Falls back to "A_Hull" if no hull upgrades exist.
+    let first_hull_comp_name: Option<String> = hull_upgrades
+        .iter()
+        .min_by_key(|(k, _)| (*k).clone())
+        .and_then(|(_, config)| config.component_names.get(&keys::ComponentType::Hull).cloned());
+    let hull_comp_key = first_hull_comp_name
+        .as_deref()
+        .unwrap_or(keys::A_HULL);
+
     let config_data = if hull_upgrades.is_empty()
         && torpedo_ammo.is_empty()
         && main_battery_ammo.is_empty()
@@ -1037,8 +1084,8 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
         })
     };
 
-    // Extract model path, armor map, and hit location groups from A_Hull.
-    let a_hull = ship_data.get(&pk(keys::A_HULL)).and_then(|v| v.dict_ref());
+    // Extract model path, armor map, and hit location groups from the first hull component.
+    let a_hull = ship_data.get(&pk(hull_comp_key)).and_then(|v| v.dict_ref());
 
     let model_path: Option<String> = a_hull
         .as_ref()
@@ -1052,7 +1099,7 @@ fn build_ship(ship_data: &BTreeMap<HashableValue, Value>) -> Vehicle {
             .map(|d| parse_armor_dict(&d.inner()))
     });
 
-    // Hit location zones are stored as top-level entries in A_Hull (e.g. Bow, Cit, SS).
+    // Hit location zones are stored as top-level entries in the hull component (e.g. Bow, Cit, SS).
     // Each zone is a dict with an `hlType` field. We scan all entries and filter by that.
     let hit_locations: Option<HashMap<String, HitLocation>> = a_hull.as_ref().map(|hull_dict| {
         hull_dict

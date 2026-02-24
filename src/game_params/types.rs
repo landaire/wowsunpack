@@ -1126,7 +1126,7 @@ pub struct HullUpgradeConfig {
     pub air_detection_km: Km,
     /// Component type key → component name (e.g. "artillery" → "AB1_Artillery").
     #[cfg_attr(feature = "serde", serde(default))]
-    pub component_names: HashMap<String, String>,
+    pub component_names: HashMap<super::keys::ComponentType, String>,
     /// Model path from the hull component for this upgrade.
     #[cfg_attr(feature = "serde", serde(default))]
     pub hull_model_path: Option<String>,
@@ -1138,15 +1138,24 @@ pub struct HullUpgradeConfig {
     /// Used to position the waterline plane on the ship model.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dock_y_offset: Option<f32>,
-    /// Mount points grouped by component type key.
+    /// Mount points grouped by component type key (default selection).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub mounts_by_type: HashMap<String, ComponentMounts>,
+    pub mounts_by_type: HashMap<super::keys::ComponentType, ComponentMounts>,
+    /// All component name alternatives per type key
+    /// (e.g. "artillery" -> ["AB1_Artillery", "AB2_Artillery"]).
+    /// Only populated for types that have more than one option.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub component_alternatives: HashMap<super::keys::ComponentType, Vec<String>>,
+    /// Mount points for non-default component alternatives, keyed by component name.
+    /// The default component's mounts are in `mounts_by_type`; alternatives live here.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub alternative_mounts: HashMap<String, ComponentMounts>,
 }
 
 impl HullUpgradeConfig {
     /// Get the component name for a given component type (e.g. "artillery").
-    pub fn component_name(&self, component_type: &str) -> Option<&str> {
-        self.component_names.get(component_type).map(|s| s.as_str())
+    pub fn component_name(&self, ct: super::keys::ComponentType) -> Option<&str> {
+        self.component_names.get(&ct).map(|s| s.as_str())
     }
 
     /// Get the hull model path for this upgrade.
@@ -1166,15 +1175,42 @@ impl HullUpgradeConfig {
     }
 
     /// Get mount points for a specific component type.
-    pub fn mounts(&self, component_type: &str) -> Option<&[MountPoint]> {
+    pub fn mounts(&self, ct: super::keys::ComponentType) -> Option<&[MountPoint]> {
         self.mounts_by_type
-            .get(component_type)
+            .get(&ct)
             .map(|cm| cm.mounts())
     }
 
-    /// Iterate over all mount points across all component types.
+    /// Iterate over all mount points across all component types (default selection).
     pub fn all_mount_points(&self) -> impl Iterator<Item = &MountPoint> {
         self.mounts_by_type.values().flat_map(|cm| cm.mounts.iter())
+    }
+
+    /// Get component alternatives for a given type key (empty if only one option).
+    pub fn alternatives(&self, ct: super::keys::ComponentType) -> &[String] {
+        self.component_alternatives
+            .get(&ct)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over all mount points, substituting overrides for specific component types.
+    /// `overrides` maps component type key (e.g. "artillery") to the component name to use.
+    pub fn mount_points_with_overrides<'a>(
+        &'a self,
+        overrides: &'a HashMap<super::keys::ComponentType, String>,
+    ) -> impl Iterator<Item = &'a MountPoint> {
+        self.mounts_by_type.iter().flat_map(move |(ct_key, default_cm)| {
+            if let Some(override_name) = overrides.get(ct_key) {
+                // Use alternative mounts if the override differs from default
+                if override_name != &default_cm.component_name {
+                    if let Some(alt_cm) = self.alternative_mounts.get(override_name) {
+                        return alt_cm.mounts.iter();
+                    }
+                }
+            }
+            default_cm.mounts.iter()
+        })
     }
 }
 

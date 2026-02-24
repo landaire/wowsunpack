@@ -27,6 +27,74 @@ pub const COMP_FINDERS: &str = "finders";
 pub const COMP_RADARS: &str = "radars";
 pub const COMP_TORPEDOES: &str = "torpedoes";
 
+
+/// Typed representation of component type keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(feature = "rkyv", rkyv(derive(Hash, PartialEq, Eq)))]
+pub enum ComponentType {
+    #[cfg_attr(feature = "serde", serde(rename = "hull"))]
+    Hull,
+    #[cfg_attr(feature = "serde", serde(rename = "artillery"))]
+    Artillery,
+    #[cfg_attr(feature = "serde", serde(rename = "atba"))]
+    Atba,
+    #[cfg_attr(feature = "serde", serde(rename = "airDefense"))]
+    AirDefense,
+    #[cfg_attr(feature = "serde", serde(rename = "directors"))]
+    Directors,
+    #[cfg_attr(feature = "serde", serde(rename = "finders"))]
+    Finders,
+    #[cfg_attr(feature = "serde", serde(rename = "radars"))]
+    Radars,
+    #[cfg_attr(feature = "serde", serde(rename = "torpedoes"))]
+    Torpedoes,
+}
+
+impl ComponentType {
+    /// All known component types.
+    pub const ALL: &[ComponentType] = &[
+        Self::Hull,
+        Self::Artillery,
+        Self::Atba,
+        Self::AirDefense,
+        Self::Directors,
+        Self::Finders,
+        Self::Radars,
+        Self::Torpedoes,
+    ];
+
+    /// The raw string key used in GameParams dictionaries.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Hull => "hull",
+            Self::Artillery => "artillery",
+            Self::Atba => "atba",
+            Self::AirDefense => "airDefense",
+            Self::Directors => "directors",
+            Self::Finders => "finders",
+            Self::Radars => "radars",
+            Self::Torpedoes => "torpedoes",
+        }
+    }
+}
+
+impl std::fmt::Display for ComponentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hull => write!(f, "Hull"),
+            Self::Artillery => write!(f, "Main Battery"),
+            Self::Atba => write!(f, "Secondaries"),
+            Self::AirDefense => write!(f, "AA"),
+            Self::Directors => write!(f, "Directors"),
+            Self::Finders => write!(f, "Finders"),
+            Self::Radars => write!(f, "Radars"),
+            Self::Torpedoes => write!(f, "Torpedoes"),
+        }
+    }
+}
+
 /// All component type keys.
 pub const ALL_COMPONENT_TYPES: &[&str] = &[
     COMP_HULL,

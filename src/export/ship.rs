@@ -56,6 +56,9 @@ pub struct ShipExportOptions {
     /// When true, crack geometry is included and patch geometry is excluded.
     /// Default: false (intact hull).
     pub damaged: bool,
+    /// Module overrides: component type key (e.g. "artillery") to component name.
+    /// Overrides the default component for specific types.
+    pub module_overrides: std::collections::HashMap<crate::game_params::keys::ComponentType, String>,
 }
 
 impl Default for ShipExportOptions {
@@ -65,6 +68,7 @@ impl Default for ShipExportOptions {
             hull: None,
             textures: true,
             damaged: false,
+            module_overrides: std::collections::HashMap::new(),
         }
     }
 }
@@ -335,9 +339,9 @@ impl ShipAssets {
 
         for (upgrade_name, config) in sorted {
             let mut components = Vec::new();
-            for &ct in keys::ALL_COMPONENT_TYPES {
-                let comp = config.component_name(ct).unwrap_or("(none)").to_string();
-                let mount_count = config.mounts(ct).map(|m| m.len()).unwrap_or(0);
+            for ct in keys::ComponentType::ALL {
+                let comp = config.component_name(*ct).unwrap_or("(none)").to_string();
+                let mount_count = config.mounts(*ct).map(|m| m.len()).unwrap_or(0);
                 components.push((ct.to_string(), comp, mount_count));
             }
             result.push(HullUpgradeInfo {
@@ -362,7 +366,7 @@ impl ShipAssets {
         // Also load turret models to include their stems.
         let vehicle = self.find_vehicle(&info.model_dir).ok();
         let mount_points = vehicle
-            .and_then(|v| self.select_hull_mount_points(v, None))
+            .and_then(|v| self.select_hull_mount_points(v, None, &std::collections::HashMap::new()))
             .unwrap_or_default();
         let turret_data = self.load_turret_models(&db, &self_id_index, &mount_points)?;
 
@@ -469,7 +473,7 @@ impl ShipAssets {
 
         // Load turret/mount models from GameParams.
         let mount_points: Vec<MountPoint> = vehicle
-            .and_then(|v| self.select_hull_mount_points(v, options.hull.as_deref()))
+            .and_then(|v| self.select_hull_mount_points(v, options.hull.as_deref(), &options.module_overrides))
             .unwrap_or_default();
 
         let (turret_models, _turret_model_index, mounts) =
@@ -803,11 +807,12 @@ impl ShipAssets {
         Ok(result)
     }
 
-    /// Select mount points for the chosen hull upgrade.
+    /// Select mount points for the chosen hull upgrade, with optional module overrides.
     fn select_hull_mount_points(
         &self,
         vehicle: &crate::game_params::types::Vehicle,
         hull_selection: Option<&str>,
+        module_overrides: &std::collections::HashMap<crate::game_params::keys::ComponentType, String>,
     ) -> Option<Vec<MountPoint>> {
         let upgrades = vehicle.hull_upgrades()?;
         let mut sorted: Vec<_> = upgrades.iter().collect();
@@ -821,7 +826,7 @@ impl ShipAssets {
                     let prefix = format!("{sel}_");
                     sorted.iter().find(|(_, config)| {
                         config
-                            .component_name(keys::COMP_HULL)
+                            .component_name(keys::ComponentType::Hull)
                             .map(|n| n.starts_with(&prefix))
                             .unwrap_or(false)
                     })
@@ -831,7 +836,13 @@ impl ShipAssets {
             sorted.first().copied()
         };
 
-        selected.map(|(_, config)| config.all_mount_points().cloned().collect())
+        selected.map(|(_, config)| {
+            if module_overrides.is_empty() {
+                config.all_mount_points().cloned().collect()
+            } else {
+                config.mount_points_with_overrides(module_overrides).cloned().collect()
+            }
+        })
     }
 
     /// Load turret models and build mount resolution data.
