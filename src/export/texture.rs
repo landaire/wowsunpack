@@ -180,11 +180,15 @@ pub fn load_texture_bytes(
     None
 }
 
-/// Load the base albedo texture (`_a.dds`) from the MFM's own directory.
+/// Load the base albedo texture for a hull mesh from the VFS.
 ///
 /// The base albedo is the "default" ship appearance — gray/weathered paint without
-/// any camouflage applied. It lives next to the MFM file, e.g.:
-/// `content/gameplay/japan/ship/battleship/textures/JSB039_Yamato_1945_Hull_a.dds`
+/// any camouflage applied. Textures live in a `textures/` sibling directory next to
+/// the ship folder, e.g.:
+/// `content/gameplay/japan/ship/battleship/textures/JSB039_Yamato_1945_Hull_a.dd0`
+///
+/// Prefers `.dd0` (highest resolution, typically 4096x4096) over `.dds` (low-res
+/// 512x512 mip tail). Falls back to searching the MFM's own directory.
 ///
 /// `mfm_full_path` is the full VFS path to the MFM file (e.g. ending in `.mfm`).
 /// Returns DDS bytes if found.
@@ -193,8 +197,21 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
     let mfm_filename = mfm_full_path.rsplit_once('/')?.1;
     let stem = mfm_filename.strip_suffix(".mfm")?;
 
+    // The textures/ sibling directory: go up from the ship dir to the species dir,
+    // then into textures/. E.g. .../cruiser/JSC010_Mogami_1944/ -> .../cruiser/textures/
+    let tex_sibling_dir = dir.rsplit_once('/').map(|(parent, _)| format!("{parent}/textures"));
+
     for base in texture_base_names(stem) {
-        let candidates = [format!("{dir}/{base}_a.dds"), format!("{dir}/{base}_a.dd0")];
+        // Build candidate paths: prefer dd0 (high-res) over dds (low-res mip tail).
+        // Search textures/ sibling first, then fall back to MFM's own directory.
+        let mut candidates = Vec::new();
+        if let Some(tex_dir) = &tex_sibling_dir {
+            candidates.push(format!("{tex_dir}/{base}_a.dd0"));
+            candidates.push(format!("{tex_dir}/{base}_a.dds"));
+        }
+        candidates.push(format!("{dir}/{base}_a.dd0"));
+        candidates.push(format!("{dir}/{base}_a.dds"));
+
         for path in &candidates {
             if let Ok(vfs_path) = vfs.join(path) {
                 if let Ok(mut file) = vfs_path.open_file() {
