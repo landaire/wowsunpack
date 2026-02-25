@@ -165,9 +165,10 @@ enum Commands {
     },
     /// Export a ship sub-model to GLB format
     ExportModel {
-        /// Model name (e.g. "JSB039_Yamato_1945_Bow"). Resolves to {name}.visual
-        /// in assets.bin and its linked .geometry file.
-        name: String,
+        /// Path to a .geometry file (VFS path by default, disk path with --no-vfs).
+        /// If a matching .visual exists in assets.bin it will be used for material
+        /// names, textures, and LOD filtering. Otherwise raw geometry is exported.
+        file: PathBuf,
 
         /// Output file path
         #[arg(short, long, default_value = "output.glb")]
@@ -188,6 +189,10 @@ enum Commands {
         /// List available camouflage texture schemes, then exit
         #[arg(long)]
         list_textures: bool,
+
+        /// Read file from disk instead of VFS
+        #[clap(long)]
+        no_vfs: bool,
     },
     /// Export all sub-models of a ship to a single GLB file.
     /// Each sub-model becomes a separate named object in Blender.
@@ -965,25 +970,23 @@ fn run() -> Result<(), Report> {
             run_geometry(&file_data, &file.to_string_lossy(), decode)?;
         }
         Commands::ExportModel {
-            name,
+            file,
             output,
             lod,
             no_textures,
             damaged,
             list_textures,
+            no_vfs,
         } => {
-            let Some(vfs) = &vfs else {
-                bail!("VFS required for export-model. Use --game-dir to specify a game install.");
-            };
-
             run_export_model(
-                vfs,
-                &name,
+                &file,
                 &output,
                 lod,
                 no_textures,
                 damaged,
                 list_textures,
+                no_vfs,
+                vfs.as_ref(),
             )?;
         }
         Commands::ExportShip {
@@ -1385,13 +1388,14 @@ fn run_assets_bin(
 }
 
 fn run_export_model(
-    vfs: &VfsPath,
-    name: &str,
+    file: &Path,
     output: &Path,
     lod: usize,
     no_textures: bool,
     damaged: bool,
     list_textures: bool,
+    no_vfs: bool,
+    vfs: Option<&VfsPath>,
 ) -> Result<(), Report> {
     use wowsunpack::export::gltf_export;
     use wowsunpack::export::ship::{build_texture_set, collect_mfm_info};
@@ -1400,83 +1404,12 @@ fn run_export_model(
     use wowsunpack::models::geometry;
     use wowsunpack::models::visual;
 
-    // Load assets.bin from VFS.
-    let mut assets_bin_data = Vec::new();
-    vfs.join("content/assets.bin")
-        .context("VFS path error")?
-        .open_file()
-        .context("Could not find content/assets.bin in VFS")?
-        .read_to_end(&mut assets_bin_data)?;
-
-    let db = assets_bin::parse_assets_bin(&assets_bin_data)?;
-    let self_id_index = db.build_self_id_index();
-
-    // Resolve {name}.visual
-    let visual_suffix = format!("{name}.visual");
-    let (vis_location, vis_full_path) = db
-        .resolve_path(&visual_suffix, &self_id_index)
-        .context_with(|| format!("Could not resolve visual: {visual_suffix}"))?;
-
-    if vis_location.blob_index != 1 {
-        bail!(
-            "Path '{}' resolved to blob {} (expected VisualPrototype blob 1)",
-            visual_suffix,
-            vis_location.blob_index
-        );
-    }
-
-    let vis_data = db
-        .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
-        .context("Failed to get visual prototype data")?;
-    let vp = visual::parse_visual(vis_data).context("Failed to parse VisualPrototype")?;
-
-    println!("Visual: {vis_full_path}");
-    println!(
-        "  {} render sets, {} LODs, {} nodes",
-        vp.render_sets.len(),
-        vp.lods.len(),
-        vp.nodes.name_ids.len()
-    );
-
-    // Handle --list-textures.
-    if list_textures {
-        let mfm_infos = collect_mfm_info(&vp, &db);
-        let stems: Vec<String> = mfm_infos.iter().map(|i| i.stem.clone()).collect();
-        let schemes = texture::discover_texture_schemes(vfs, &stems);
-        if schemes.is_empty() {
-            println!("No camouflage textures found for this model.");
-        } else {
-            println!("Available camouflage schemes:");
-            for scheme in &schemes {
-                println!("  {scheme}");
-            }
-        }
-        return Ok(());
-    }
-
-    // Resolve geometry path from mergedGeometryPathId.
-    let geom_path_idx = self_id_index
-        .get(&vp.merged_geometry_path_id)
-        .ok_or_else(|| {
-            rootcause::report!(
-                "Could not resolve mergedGeometryPathId 0x{:016X}",
-                vp.merged_geometry_path_id
-            )
-        })?;
-    let geom_full_path = db.reconstruct_path(*geom_path_idx, &self_id_index);
-
-    println!("Geometry: {geom_full_path}");
-
-    // Load and parse geometry from VFS.
-    let mut geom_data = Vec::new();
-    vfs.join(&geom_full_path)
-        .context("VFS path error")?
-        .open_file()
-        .context_with(|| format!("Could not open geometry file: {geom_full_path}"))?
-        .read_to_end(&mut geom_data)?;
-
+    // 1. Load geometry file (from disk or VFS).
+    let geom_data = read_file_data(file, no_vfs, vfs)?;
     let geom = geometry::parse_geometry(&geom_data).context("Failed to parse geometry")?;
 
+    let file_str = file.to_string_lossy();
+    println!("Geometry: {file_str}");
     println!(
         "  {} vertex buffers, {} index buffers, {} vertices mappings, {} indices mappings",
         geom.merged_vertices.len(),
@@ -1485,26 +1418,101 @@ fn run_export_model(
         geom.indices_mapping.len(),
     );
 
-    // Load textures.
-    let texture_set = if no_textures {
-        gltf_export::TextureSet::empty()
+    // 2. Try to find a matching .visual (requires VFS + assets.bin).
+    //    Derive the visual suffix by replacing .geometry with .visual in the filename.
+    let visual_suffix = file_str
+        .strip_suffix(".geometry")
+        .map(|stem| format!("{stem}.visual"));
+
+    // Load assets.bin into function scope so the borrow for PrototypeDatabase lives long enough.
+    let assets_bin_data = if vfs.is_some() && visual_suffix.is_some() {
+        let vfs = vfs.unwrap();
+        let result: Result<Vec<u8>, Report> = (|| {
+            let mut buf = Vec::new();
+            vfs.join("content/assets.bin")
+                .context("VFS path error")?
+                .open_file()
+                .context("Could not find content/assets.bin in VFS")?
+                .read_to_end(&mut buf)?;
+            Ok(buf)
+        })();
+        result.ok()
     } else {
-        let mfm_infos = collect_mfm_info(&vp, &db);
-        build_texture_set(&mfm_infos, vfs)
+        None
     };
 
-    // Export to GLB.
-    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
-    gltf_export::export_glb(&vp, &geom, &db, lod, &texture_set, damaged, &mut out_file)
-        .context("Failed to export GLB")?;
+    // Parse assets.bin and try to resolve a matching .visual.
+    let db = assets_bin_data
+        .as_deref()
+        .map(assets_bin::parse_assets_bin)
+        .transpose()?;
+
+    let resolved_visual = if let (Some(db), Some(vis_suffix)) = (&db, &visual_suffix) {
+        let self_id_index = db.build_self_id_index();
+        match db.resolve_path(vis_suffix, &self_id_index) {
+            Ok((vis_location, vis_full_path)) if vis_location.blob_index == 1 => {
+                let vis_data = db
+                    .get_prototype_data(vis_location, visual::VISUAL_ITEM_SIZE)
+                    .context("Failed to get visual prototype data")?;
+                let vp =
+                    visual::parse_visual(vis_data).context("Failed to parse VisualPrototype")?;
+                println!("Visual: {vis_full_path}");
+                println!(
+                    "  {} render sets, {} LODs, {} nodes",
+                    vp.render_sets.len(),
+                    vp.lods.len(),
+                    vp.nodes.name_ids.len()
+                );
+                Some(vp)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // 3. If we have a visual, use the full export pipeline.
+    if let (Some(vp), Some(db), Some(vfs)) = (&resolved_visual, &db, vfs) {
+        if list_textures {
+            let mfm_infos = collect_mfm_info(vp, db);
+            let stems: Vec<String> = mfm_infos.iter().map(|i| i.stem.clone()).collect();
+            let schemes = texture::discover_texture_schemes(vfs, &stems);
+            if schemes.is_empty() {
+                println!("No camouflage textures found for this model.");
+            } else {
+                println!("Available camouflage schemes:");
+                for scheme in &schemes {
+                    println!("  {scheme}");
+                }
+            }
+            return Ok(());
+        }
+
+        let texture_set = if no_textures {
+            gltf_export::TextureSet::empty()
+        } else {
+            let mfm_infos = collect_mfm_info(vp, db);
+            build_texture_set(&mfm_infos, vfs)
+        };
+
+        let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+        gltf_export::export_glb(vp, &geom, db, lod, &texture_set, damaged, &mut out_file)
+            .context("Failed to export GLB")?;
+    } else {
+        // 4. Fallback: raw geometry export (no visual available).
+        if list_textures {
+            println!("No visual found; texture listing not available for raw geometry export.");
+            return Ok(());
+        }
+        println!("No matching .visual found; exporting raw geometry.");
+
+        let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+        gltf_export::export_geometry_raw(&geom, &mut out_file)
+            .context("Failed to export raw geometry GLB")?;
+    }
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "Exported LOD {} to {} ({} bytes)",
-        lod,
-        output.display(),
-        file_size
-    );
+    println!("Exported to {} ({} bytes)", output.display(), file_size);
 
     Ok(())
 }

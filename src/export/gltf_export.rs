@@ -184,6 +184,226 @@ pub fn export_glb(
     Ok(())
 }
 
+/// Export raw geometry to GLB without a visual file.
+///
+/// Pairs `vertices_mapping[i]` with `indices_mapping[i]` by array index. Each
+/// pair becomes a separate glTF primitive. No material names, textures, or LOD
+/// filtering are available without the visual.
+pub fn export_geometry_raw(
+    geometry: &MergedGeometry,
+    writer: &mut impl Write,
+) -> Result<(), Report<ExportError>> {
+    let pair_count = geometry
+        .vertices_mapping
+        .len()
+        .min(geometry.indices_mapping.len());
+
+    if geometry.vertices_mapping.len() != geometry.indices_mapping.len() {
+        eprintln!(
+            "Warning: {} vertex mappings vs {} index mappings; exporting {} pairs",
+            geometry.vertices_mapping.len(),
+            geometry.indices_mapping.len(),
+            pair_count,
+        );
+    }
+
+    if pair_count == 0 {
+        eprintln!("Warning: no mapping entries found; producing empty GLB");
+    }
+
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("wowsunpack".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bin_data: Vec<u8> = Vec::new();
+    let mut gltf_primitives = Vec::new();
+
+    for i in 0..pair_count {
+        let vert_mapping = &geometry.vertices_mapping[i];
+        let idx_mapping = &geometry.indices_mapping[i];
+
+        // Get vertex buffer.
+        let vbuf_idx = vert_mapping.merged_buffer_index as usize;
+        if vbuf_idx >= geometry.merged_vertices.len() {
+            eprintln!(
+                "Warning: primitive {i}: vertex buffer index {vbuf_idx} out of range, skipping"
+            );
+            continue;
+        }
+        let vert_proto = &geometry.merged_vertices[vbuf_idx];
+
+        // Get index buffer.
+        let ibuf_idx = idx_mapping.merged_buffer_index as usize;
+        if ibuf_idx >= geometry.merged_indices.len() {
+            eprintln!(
+                "Warning: primitive {i}: index buffer index {ibuf_idx} out of range, skipping"
+            );
+            continue;
+        }
+        let idx_proto = &geometry.merged_indices[ibuf_idx];
+
+        // Decode buffers.
+        let decoded_vertices = match vert_proto.data.decode() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Warning: primitive {i}: vertex decode error: {e:?}, skipping");
+                continue;
+            }
+        };
+        let decoded_indices = match idx_proto.data.decode() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Warning: primitive {i}: index decode error: {e:?}, skipping");
+                continue;
+            }
+        };
+
+        // Parse vertex format.
+        let format = vertex_format::parse_vertex_format(&vert_proto.format_name);
+        let stride = vert_proto.stride_in_bytes as usize;
+
+        // Extract vertex slice.
+        let vert_offset = vert_mapping.items_offset as usize;
+        let vert_count = vert_mapping.items_count as usize;
+        let vert_start = vert_offset * stride;
+        let vert_end = vert_start + vert_count * stride;
+
+        if vert_end > decoded_vertices.len() {
+            eprintln!(
+                "Warning: primitive {i}: vertex range {vert_start}..{vert_end} exceeds buffer size {}, skipping",
+                decoded_vertices.len()
+            );
+            continue;
+        }
+        let vert_slice = &decoded_vertices[vert_start..vert_end];
+
+        // Extract index slice.
+        let idx_offset = idx_mapping.items_offset as usize;
+        let idx_count = idx_mapping.items_count as usize;
+        let index_size = idx_proto.index_size as usize;
+        let idx_start = idx_offset * index_size;
+        let idx_end = idx_start + idx_count * index_size;
+
+        if idx_end > decoded_indices.len() {
+            eprintln!(
+                "Warning: primitive {i}: index range {idx_start}..{idx_end} exceeds buffer size {}, skipping",
+                decoded_indices.len()
+            );
+            continue;
+        }
+        let idx_slice = &decoded_indices[idx_start..idx_end];
+
+        // Parse indices as u32.
+        let indices: Vec<u32> = match index_size {
+            2 => idx_slice
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                .collect(),
+            4 => idx_slice
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            _ => {
+                eprintln!("Warning: primitive {i}: unsupported index size {index_size}, skipping");
+                continue;
+            }
+        };
+
+        let verts = unpack_vertices(vert_slice, stride, &format);
+
+        // Build a DecodedPrimitive for reuse with add_primitive_to_root.
+        let prim = DecodedPrimitive {
+            positions: verts.positions,
+            normals: verts.normals,
+            uvs: verts.uvs,
+            indices,
+            material_name: format!("Primitive_{i}"),
+            mfm_stem: None,
+        };
+
+        let empty_textures = TextureSet::empty();
+        let mut mat_cache = MaterialCache::new();
+        let gltf_prim = add_primitive_to_root(
+            &mut root,
+            &mut bin_data,
+            &prim,
+            &empty_textures,
+            &mut mat_cache,
+        )?;
+        gltf_primitives.push(gltf_prim);
+    }
+
+    // Pad binary data to 4-byte alignment.
+    while !bin_data.len().is_multiple_of(4) {
+        bin_data.push(0);
+    }
+
+    // Set the buffer byte_length.
+    if !bin_data.is_empty() {
+        let buffer = root.push(json::Buffer {
+            byte_length: USize64::from(bin_data.len()),
+            uri: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        for bv in root.buffer_views.iter_mut() {
+            bv.buffer = buffer;
+        }
+    }
+
+    // Create mesh with all primitives.
+    let mesh = root.push(json::Mesh {
+        primitives: gltf_primitives,
+        weights: None,
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    let root_node = root.push(json::Node {
+        mesh: Some(mesh),
+        ..Default::default()
+    });
+
+    let scene = root.push(json::Scene {
+        nodes: vec![root_node],
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    root.scene = Some(scene);
+
+    // Serialize and write GLB.
+    let json_string = json::serialize::to_string(&root)
+        .map_err(|e| Report::new(ExportError::Serialize(e.to_string())))?;
+
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: 0,
+        },
+        json: Cow::Owned(json_string.into_bytes()),
+        bin: if bin_data.is_empty() {
+            None
+        } else {
+            Some(Cow::Owned(bin_data))
+        },
+    };
+
+    glb.to_writer(writer)
+        .map_err(|e| Report::new(ExportError::Io(e.to_string())))?;
+
+    println!("  Exported {pair_count} raw primitives");
+    Ok(())
+}
+
 /// Render set name substrings to exclude for intact-state export.
 ///
 /// BigWorld ship visuals contain both intact and damaged geometry in the same
