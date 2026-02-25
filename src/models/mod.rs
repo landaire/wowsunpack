@@ -2,6 +2,8 @@ pub mod assets_bin;
 #[cfg(feature = "models")]
 pub mod geometry;
 #[cfg(feature = "models")]
+pub mod merged_models;
+#[cfg(feature = "models")]
 pub mod model;
 #[cfg(feature = "models")]
 pub mod vertex_format;

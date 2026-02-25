@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::game_params::types::ArmorMap;
 use crate::models::assets_bin::PrototypeDatabase;
 use crate::models::geometry::MergedGeometry;
+use crate::models::merged_models::{MergedModels, SpaceInstances};
 use crate::models::vertex_format::{self, AttributeSemantic, VertexFormat};
 use crate::models::visual::VisualPrototype;
 
@@ -86,7 +87,16 @@ pub fn export_glb(
     let lod_entry = &visual.lods[lod];
 
     // Collect render sets for this LOD by matching LOD render_set_names to RS name_ids.
-    let primitives = collect_primitives(visual, geometry, db, lod_entry, damaged, None)?;
+    let self_id_index = db.build_self_id_index();
+    let primitives = collect_primitives(
+        visual,
+        geometry,
+        Some(db),
+        Some(&self_id_index),
+        lod_entry,
+        damaged,
+        None,
+    )?;
 
     if primitives.is_empty() {
         eprintln!("Warning: no primitives found for LOD {lod}");
@@ -169,6 +179,204 @@ pub fn export_glb(
             magic: *b"glTF",
             version: 2,
             length: 0, // to_writer computes this
+        },
+        json: Cow::Owned(json_string.into_bytes()),
+        bin: if bin_data.is_empty() {
+            None
+        } else {
+            Some(Cow::Owned(bin_data))
+        },
+    };
+
+    glb.to_writer(writer)
+        .map_err(|e| Report::new(ExportError::Io(e.to_string())))?;
+
+    Ok(())
+}
+
+/// Export all models from a `models.bin` + `models.geometry` pair to a single GLB.
+///
+/// When `space` is provided, each instance in `space.bin` becomes a separate node
+/// with the world transform applied. The same mesh is reused across instances that
+/// share the same model prototype. When `space` is `None`, one node per prototype
+/// is created at the origin (no transforms).
+pub fn export_merged_models_glb(
+    merged: &MergedModels,
+    geometry: &MergedGeometry,
+    space: Option<&SpaceInstances>,
+    db: Option<&PrototypeDatabase<'_>>,
+    lod: usize,
+    writer: &mut impl Write,
+) -> Result<(), Report<ExportError>> {
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("wowsunpack".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bin_data: Vec<u8> = Vec::new();
+    let mut mat_cache = MaterialCache::new();
+    let empty_textures = TextureSet::empty();
+    let mut scene_nodes = Vec::new();
+    let mut exported = 0usize;
+
+    // Precompute self_id_index once for all models (expensive to rebuild per-RS).
+    let self_id_index = db.map(|db| db.build_self_id_index());
+
+    // Build path_id → model index map for instance lookups.
+    let path_to_model: HashMap<u64, usize> = merged
+        .models
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.path_id, i))
+        .collect();
+
+    // Build one mesh per prototype, lazily (only when referenced by an instance).
+    // Cache: model_index → glTF Mesh index.
+    let mut mesh_cache: HashMap<usize, json::Index<json::Mesh>> = HashMap::new();
+
+    let build_mesh = |model_idx: usize,
+                      root: &mut json::Root,
+                      bin_data: &mut Vec<u8>,
+                      mat_cache: &mut MaterialCache|
+     -> Result<Option<json::Index<json::Mesh>>, Report<ExportError>> {
+        let record = &merged.models[model_idx];
+        let vp = &record.visual_proto;
+
+        if vp.lods.is_empty() || lod >= vp.lods.len() {
+            return Ok(None);
+        }
+
+        let lod_entry = &vp.lods[lod];
+        let primitives = match collect_primitives(
+            vp,
+            geometry,
+            db,
+            self_id_index.as_ref(),
+            lod_entry,
+            false,
+            None,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: model[{model_idx}]: {e}");
+                return Ok(None);
+            }
+        };
+
+        if primitives.is_empty() {
+            return Ok(None);
+        }
+
+        let mut gltf_primitives = Vec::new();
+        for prim in &primitives {
+            let gltf_prim =
+                add_primitive_to_root(root, bin_data, prim, &empty_textures, mat_cache)?;
+            gltf_primitives.push(gltf_prim);
+        }
+
+        let name = format!("Model_{model_idx}");
+        let mesh = root.push(json::Mesh {
+            primitives: gltf_primitives,
+            weights: None,
+            name: Some(name),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        Ok(Some(mesh))
+    };
+
+    if let Some(space) = space {
+        // Instance mode: one node per space.bin instance with world transform.
+        for (i, inst) in space.instances.iter().enumerate() {
+            let Some(&model_idx) = path_to_model.get(&inst.path_id) else {
+                continue;
+            };
+
+            let mesh = if let Some(&cached) = mesh_cache.get(&model_idx) {
+                cached
+            } else {
+                match build_mesh(model_idx, &mut root, &mut bin_data, &mut mat_cache)? {
+                    Some(m) => {
+                        mesh_cache.insert(model_idx, m);
+                        m
+                    }
+                    None => continue,
+                }
+            };
+
+            // Apply world transform. glTF uses column-major 4×4 matrices.
+            let node = root.push(json::Node {
+                mesh: Some(mesh),
+                name: Some(format!("Instance_{i}")),
+                matrix: Some(inst.transform.0),
+                ..Default::default()
+            });
+
+            scene_nodes.push(node);
+            exported += 1;
+        }
+    } else {
+        // Prototype mode: one node per model at origin (no transforms).
+        for (i, _record) in merged.models.iter().enumerate() {
+            let Some(mesh) = build_mesh(i, &mut root, &mut bin_data, &mut mat_cache)? else {
+                continue;
+            };
+
+            let node = root.push(json::Node {
+                mesh: Some(mesh),
+                name: Some(format!("Model_{i}")),
+                ..Default::default()
+            });
+
+            scene_nodes.push(node);
+            exported += 1;
+        }
+    }
+
+    if exported == 0 {
+        eprintln!("Warning: no models exported for LOD {lod}");
+    }
+
+    // Pad binary data to 4-byte alignment.
+    while !bin_data.len().is_multiple_of(4) {
+        bin_data.push(0);
+    }
+
+    // Set the buffer byte_length.
+    if !bin_data.is_empty() {
+        let buffer = root.push(json::Buffer {
+            byte_length: USize64::from(bin_data.len()),
+            uri: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        for bv in root.buffer_views.iter_mut() {
+            bv.buffer = buffer;
+        }
+    }
+
+    let scene = root.push(json::Scene {
+        nodes: scene_nodes,
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    root.scene = Some(scene);
+
+    let json_string = json::serialize::to_string(&root)
+        .map_err(|e| Report::new(ExportError::Serialize(e.to_string())))?;
+
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: 0,
         },
         json: Cow::Owned(json_string.into_bytes()),
         bin: if bin_data.is_empty() {
@@ -424,7 +632,8 @@ const DAMAGED_EXCLUDE: &[&str] = &["_patch_", "_hide"];
 fn collect_primitives(
     visual: &VisualPrototype,
     geometry: &MergedGeometry,
-    db: &PrototypeDatabase<'_>,
+    db: Option<&PrototypeDatabase<'_>>,
+    self_id_index: Option<&HashMap<u64, usize>>,
     lod: &crate::models::visual::Lod,
     damaged: bool,
     barrel_pitch: Option<&BarrelPitch>,
@@ -444,8 +653,9 @@ fn collect_primitives(
             .find(|rs| rs.name_id == rs_name_id)
             .ok_or_else(|| Report::new(ExportError::RenderSetNotFound(rs_name_id)))?;
 
-        // Skip render sets based on damage state.
-        if let Some(rs_name) = db.strings.get_string_by_id(rs_name_id)
+        // Skip render sets based on damage state (requires string table).
+        if let Some(db) = db
+            && let Some(rs_name) = db.strings.get_string_by_id(rs_name_id)
             && exclude.iter().any(|sub| rs_name.contains(sub))
         {
             continue;
@@ -590,21 +800,23 @@ fn collect_primitives(
 
         // Material name for this render set.
         let material_name = db
-            .strings
-            .get_string_by_id(rs.material_name_id)
-            .unwrap_or("<unknown>")
-            .to_string();
+            .and_then(|db| db.strings.get_string_by_id(rs.material_name_id))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("material_0x{:08X}", rs.material_name_id));
 
-        // Resolve MFM stem for texture lookup.
-        let self_id_index = db.build_self_id_index();
+        // Resolve MFM stem for texture lookup (requires db + self_id_index).
         let mfm_stem = if rs.material_mfm_path_id != 0 {
-            self_id_index.get(&rs.material_mfm_path_id).map(|&idx| {
-                db.paths_storage[idx]
-                    .name
-                    .strip_suffix(".mfm")
-                    .unwrap_or(&db.paths_storage[idx].name)
-                    .to_string()
-            })
+            self_id_index
+                .and_then(|idx_map| idx_map.get(&rs.material_mfm_path_id))
+                .and_then(|&idx| {
+                    db.map(|db| {
+                        db.paths_storage[idx]
+                            .name
+                            .strip_suffix(".mfm")
+                            .unwrap_or(&db.paths_storage[idx].name)
+                            .to_string()
+                    })
+                })
         } else {
             None
         };
@@ -2485,6 +2697,8 @@ pub fn export_ship_glb(
     // Collect mesh nodes grouped by category.
     let mut grouped_nodes: BTreeMap<&str, Vec<json::Index<json::Node>>> = BTreeMap::new();
 
+    let self_id_index = db.build_self_id_index();
+
     for sub in sub_models {
         // Validate LOD — skip sub-models that don't have enough LODs.
         if sub.visual.lods.is_empty() || lod >= sub.visual.lods.len() {
@@ -2501,7 +2715,8 @@ pub fn export_ship_glb(
         let primitives = collect_primitives(
             sub.visual,
             sub.geometry,
-            db,
+            Some(db),
+            Some(&self_id_index),
             lod_entry,
             damaged,
             sub.barrel_pitch.as_ref(),

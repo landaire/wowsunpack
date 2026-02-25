@@ -869,3 +869,190 @@ All armor state lives in a global singleton at `data_142ba78d8` (`Armor::System`
 about which materials to show, what colors to assign, and how to handle
 multi-layer visibility are made in encrypted Python scripts
 (`scripts/ArmorConstants.pyc`, `scripts/ModelArmor.pyc`, etc.).
+
+
+---
+
+# MergedModels (`models.bin`) Format
+
+Reverse-engineered from `WorldOfWarships64.exe` using Binary Ninja.
+
+Space/map directories contain a `models.bin` file that packs **all model prototypes**
+for the space into a flat array. Each record inlines a ModelPrototype, VisualPrototype,
+and reference to a shared SkeletonProto. These reference the sibling `models.geometry`
+file for actual mesh data.
+
+**Parser**: `src/models/merged_models.rs` → `parse_merged_models()`
+
+## Header (0x18 = 24 bytes)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     u32    modelsCount           # number of model records
+0x04    2     u16    skeletonsCount        # number of shared skeleton prototypes
+0x06    2     u16    modelBoneCount        # total bone count across all skeletons
+0x08    8     i64    modelsRelptr          # -> MergedModelRecord[] (relative to file start)
+0x10    8     i64    skeletonsRelptr       # -> SkeletonProto[] (relative to file start)
+```
+
+## MergedModelRecord (0xA8 = 168 bytes each)
+
+```
+Offset  Size  Type              Field
+------  ----  ----              -----
+0x00    8     u64               pathId              # selfId in pathsStorage
+0x08    40    ModelPrototype    modelProto           # inlined (0x28 bytes, same as assets.bin blob 3)
+0x30    112   VisualProto       visualProto          # inlined (0x70 bytes, see below)
+0xA0    4     u32               skeletonProtoIndex   # index into shared skeletons array
+0xA4    2     u16               rsGeometryStartIdx   # first geometry mapping index
+0xA6    2     u16               rsGeometryCount      # number of geometry mappings
+```
+
+### Inlined VisualProto (0x70 bytes at record+0x30)
+
+The first 0x30 bytes are an inlined SkeletonProto (VisualNodes), followed by
+visual-specific fields. All relptrs are relative to `vp_base` (= record + 0x30).
+
+```
+Offset  Size  Type         Field
+------  ----  ----         -----
++0x00   48    SkeletonProto  inlineNodes        # VisualNodes (0x30 bytes)
++0x30   8     u64            mergedGeomPathId   # selfId of the models.geometry file
++0x38   1     u8             underwaterModel    # 1 if underwater variant
++0x39   1     u8             abovewaterModel    # 1 if above-water variant
++0x3A   2     u16            renderSetsCount
++0x3C   2     u16            lodsCount
++0x3E   2     ---            (padding)
++0x40   12    3×f32          boundingBoxMin
++0x4C   4     ---            (padding)
++0x50   12    3×f32          boundingBoxMax
++0x5C   4     ---            (padding)
++0x60   8     i64            renderSetsRelptr   # -> RenderSet[] (relative to vp_base)
++0x68   8     i64            lodsRelptr         # -> Lod[] (relative to vp_base)
+```
+
+### RenderSet (0x28 = 40 bytes each)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     u32    nameId                 # string hash of RS name
+0x04    4     u32    materialNameId         # string hash of material name
+0x08    4     u32    verticesMappingIndex   # mapping_id in geometry vertices_mapping
+0x0C    4     u32    indicesMappingIndex    # mapping_id in geometry indices_mapping
+0x10    8     u64    materialMfmPathId      # selfId of .mfm material in pathsStorage
+0x18    1     u8     skinned
+0x19    1     u8     nodesCount             # number of node name IDs
+0x1A    6     ---    (padding)
+0x20    8     i64    nodeNameIdsRelptr      # -> u32[] (relative to rs_base)
+```
+
+**Note**: `verticesMappingIndex` and `indicesMappingIndex` are `mapping_id` values
+(NOT array indices). They must be looked up by scanning `geometry.vertices_mapping`
+for a matching `mapping_id` field.
+
+### LOD (0x10 = 16 bytes each)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     u32    rsNamesCount           # number of render set name IDs in this LOD
+0x04    4     ---    (padding)
+0x08    8     i64    rsNamesRelptr          # -> u32[] (relative to lod_base)
+```
+
+## Shared Skeleton Array
+
+The skeletons array contains `skeletonsCount` entries, each 0x30 bytes. Layout is
+identical to the inline SkeletonProto in VisualProto (a VisualNodes structure).
+
+Each model record's `skeletonProtoIndex` is an index into this array.
+
+## Data Layout
+
+Sub-arrays (render sets, LODs, node IDs) are stored contiguously between the
+model records and the skeleton array. Relptrs in each record/sub-struct point
+into this region.
+
+### Example (`16_OC_bees_to_honey/models.bin`, 1,210,508 bytes)
+
+```
+0x000000 - 0x000017    Header (24 bytes)
+0x000018 - 0x012CA7    Model records (458 × 0xA8 = 76,944 bytes)
+0x012CA8 - 0x0B3BBF    Sub-arrays: RenderSets, LODs, node IDs (659,224 bytes)
+0x0B3BC0 - 0x0B8A1F    Shared skeletons (418 × 0x30 = 20,064 bytes)
+0x0B8A20 - end         Skeleton sub-arrays: transforms, names, parents (454,252 bytes)
+```
+
+---
+
+# Space Instances (`space.bin`) Format
+
+Reverse-engineered by analysis of `space.bin` files in space directories.
+
+The `space.bin` file in each space directory contains **instance placement data** —
+the world transform for every model instance in the space. Each instance references
+a model prototype in the sibling `models.bin` via `pathId`.
+
+**Parser**: `src/models/merged_models.rs` → `parse_space_instances()`
+
+## Header (0x60 = 96 bytes)
+
+```
+Offset  Size  Type   Field
+------  ----  ----   -----
+0x00    4     u32    instanceCount          # number of model instance entries
+0x04    4     u32    (unknown)              # secondary count (other section)
+0x08    4     u32    (unknown)
+0x0C    84    ---    (other section offsets / metadata)
+```
+
+Only `instanceCount` at offset 0x00 is needed for instance extraction.
+
+## Instance Entry (0x70 = 112 bytes each, starting at file offset 0x60)
+
+```
+Offset  Size  Type       Field
+------  ----  ----       -----
+0x00    64    16×f32     transform        # 4×4 world transform matrix (row-major)
+0x40    16    ---        (padding, all zeros)
+0x50    8     u64        pathId           # matches MergedModelRecord.pathId in models.bin
+0x58    8     u64        flags            # observed as 0x0000000004000001
+0x60    16    ---        (padding, all zeros)
+```
+
+### Transform Matrix
+
+The 4×4 f32 matrix is stored row-major with the following layout:
+
+```
+[ R00  R01  R02  0 ]    row 0: rotation/scale
+[ R10  R11  R12  0 ]    row 1: rotation/scale
+[ R20  R21  R22  0 ]    row 2: rotation/scale
+[ Tx   Ty   Tz   1 ]    row 3: translation + w=1
+```
+
+Column 3 is always `[0, 0, 0, 1]` (affine transform). The rotation component
+may include non-uniform scaling (e.g. `1.389, -1.896` in the rotation block
+indicates a scaled + rotated placement).
+
+### Instance-to-Prototype Mapping
+
+Each `pathId` matches exactly one `MergedModelRecord.pathId` in the sibling
+`models.bin`. Multiple instances can share the same `pathId` (same model placed
+at different locations with different transforms).
+
+### Example (`16_OC_bees_to_honey`)
+
+- 3174 instances referencing 458 unique prototypes
+- Most-instanced model: 763 copies (vegetation/rocks)
+- Instance entries start at file offset 0x60
+- After instances: ASCII hash strings and other section data
+
+### GLB Export
+
+When `space.bin` is available, the exporter creates one glTF mesh per unique
+prototype and one node per instance with the world transform applied via the
+glTF `matrix` property. This enables efficient mesh reuse — 3174 nodes sharing
+only 458 unique meshes.

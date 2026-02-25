@@ -161,6 +161,7 @@ pub fn parse_vertex_format(format_name: &str) -> VertexFormat {
             }
             'i' => {
                 // iiiww → bone indices + weights (8 bytes)
+                // lone i → single index (4 bytes)
                 chars.next();
                 if chars.peek() == Some(&'i') {
                     chars.next(); // second i
@@ -186,8 +187,15 @@ pub fn parse_vertex_format(format_name: &str) -> VertexFormat {
                         offset,
                     });
                     offset += 4;
+                } else {
+                    // lone 'i' → single index (4 bytes)
+                    attrs.push(VertexAttribute {
+                        semantic: AttributeSemantic::BoneIndices,
+                        format: AttributeFormat::Raw4,
+                        offset,
+                    });
+                    offset += 4;
                 }
-                // lone 'i' (instance flag) — no bytes
             }
             'r' => {
                 chars.next();
@@ -315,6 +323,13 @@ mod tests {
             })
             .collect();
         assert_eq!(uv_attrs.len(), 2);
+    }
+
+    #[test]
+    fn test_xyznuvtbipc() {
+        // xyz(12) + n(4) + uv(4) + tb(8) + i(4) + pc(0) = 32
+        let fmt = parse_vertex_format("set3/xyznuvtbipc");
+        assert_eq!(fmt.stride, 32);
     }
 
     #[test]

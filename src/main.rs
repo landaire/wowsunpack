@@ -234,6 +234,24 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
+    /// Export all models from a space/map to a single GLB file.
+    /// Reads models.geometry and its sibling models.bin for material/LOD info.
+    ExportMap {
+        /// Path to a models.geometry file (VFS path by default, disk path with --no-vfs)
+        file: PathBuf,
+
+        /// Output file path
+        #[arg(short, long, default_value = "output.glb")]
+        output: PathBuf,
+
+        /// LOD level (0 = highest detail)
+        #[arg(long, default_value = "0")]
+        lod: usize,
+
+        /// Read files from disk instead of VFS
+        #[clap(long)]
+        no_vfs: bool,
+    },
     /// Inspect armor model geometry and GameParams thickness data for a ship
     Armor {
         /// Ship name — either a model directory name (e.g. "JSB039_Yamato_1945")
@@ -1019,6 +1037,14 @@ fn run() -> Result<(), Report> {
                 debug,
             )?;
         }
+        Commands::ExportMap {
+            file,
+            output,
+            lod,
+            no_vfs,
+        } => {
+            run_export_map(&file, &output, lod, no_vfs, vfs.as_ref())?;
+        }
         Commands::Armor { name, hull } => {
             let Some(vfs) = &vfs else {
                 bail!(
@@ -1510,6 +1536,154 @@ fn run_export_model(
         gltf_export::export_geometry_raw(&geom, &mut out_file)
             .context("Failed to export raw geometry GLB")?;
     }
+
+    let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    println!("Exported to {} ({} bytes)", output.display(), file_size);
+
+    Ok(())
+}
+
+fn run_export_map(
+    file: &Path,
+    output: &Path,
+    lod: usize,
+    no_vfs: bool,
+    vfs: Option<&VfsPath>,
+) -> Result<(), Report> {
+    use wowsunpack::export::gltf_export;
+    use wowsunpack::models::assets_bin;
+    use wowsunpack::models::geometry;
+    use wowsunpack::models::merged_models;
+
+    // 1. Load models.geometry.
+    let geom_data = read_file_data(file, no_vfs, vfs)?;
+    let geom = geometry::parse_geometry(&geom_data).context("Failed to parse geometry")?;
+
+    let file_str = file.to_string_lossy();
+    println!("Geometry: {file_str}");
+    println!(
+        "  {} vertex buffers, {} index buffers, {} vertices mappings, {} indices mappings",
+        geom.merged_vertices.len(),
+        geom.merged_indices.len(),
+        geom.vertices_mapping.len(),
+        geom.indices_mapping.len(),
+    );
+
+    // 2. Load sibling models.bin.
+    let models_bin_path = if no_vfs {
+        PathBuf::from(file).with_file_name("models.bin")
+    } else {
+        // VFS: replace filename in the path string.
+        let vfs_str = file_str.replace('\\', "/");
+        let parent = vfs_str.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        if parent.is_empty() {
+            PathBuf::from("models.bin")
+        } else {
+            PathBuf::from(format!("{parent}/models.bin"))
+        }
+    };
+
+    let models_bin_data = match read_file_data(&models_bin_path, no_vfs, vfs) {
+        Ok(data) => data,
+        Err(e) => {
+            if no_vfs {
+                eprintln!(
+                    "Warning: could not load models.bin at '{}': {e}",
+                    models_bin_path.display()
+                );
+                eprintln!("Falling back to raw geometry export.");
+                let mut out_file =
+                    std::fs::File::create(output).context("Failed to create output file")?;
+                gltf_export::export_geometry_raw(&geom, &mut out_file)
+                    .context("Failed to export raw geometry GLB")?;
+                let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+                println!("Exported to {} ({} bytes)", output.display(), file_size);
+                return Ok(());
+            }
+            bail!(
+                "Failed to load models.bin at '{}': {e}",
+                models_bin_path.display()
+            );
+        }
+    };
+
+    let merged = merged_models::parse_merged_models(&models_bin_data)
+        .context("Failed to parse models.bin")?;
+
+    println!(
+        "Models: {} records, {} skeletons",
+        merged.models.len(),
+        merged.skeletons.len()
+    );
+
+    // 3. Load sibling space.bin for instance transforms.
+    let space_bin_path = if no_vfs {
+        PathBuf::from(file).with_file_name("space.bin")
+    } else {
+        let vfs_str = file_str.replace('\\', "/");
+        let parent = vfs_str.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        if parent.is_empty() {
+            PathBuf::from("space.bin")
+        } else {
+            PathBuf::from(format!("{parent}/space.bin"))
+        }
+    };
+
+    let space = match read_file_data(&space_bin_path, no_vfs, vfs) {
+        Ok(data) => match merged_models::parse_space_instances(&data) {
+            Ok(s) => {
+                println!("Space: {} instances", s.instances.len());
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("Warning: could not parse space.bin: {e}");
+                None
+            }
+        },
+        Err(_) => {
+            eprintln!("Warning: space.bin not found; models will be placed at origin.");
+            None
+        }
+    };
+
+    // 4. Optionally load assets.bin for string resolution (VFS only).
+    let assets_bin_data = if let Some(vfs) = vfs {
+        let result: Result<Vec<u8>, Report> = (|| {
+            let mut buf = Vec::new();
+            vfs.join("content/assets.bin")
+                .context("VFS path error")?
+                .open_file()
+                .context("Could not find content/assets.bin in VFS")?
+                .read_to_end(&mut buf)?;
+            Ok(buf)
+        })();
+        match result {
+            Ok(data) => Some(data),
+            Err(_) => {
+                eprintln!("Warning: could not load assets.bin; material names will be hex IDs.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let db = assets_bin_data
+        .as_deref()
+        .map(assets_bin::parse_assets_bin)
+        .transpose()?;
+
+    // 4. Export.
+    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+    gltf_export::export_merged_models_glb(
+        &merged,
+        &geom,
+        space.as_ref(),
+        db.as_ref(),
+        lod,
+        &mut out_file,
+    )
+    .context("Failed to export merged models GLB")?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!("Exported to {} ({} bytes)", output.display(), file_size);
