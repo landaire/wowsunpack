@@ -1,8 +1,17 @@
 use rootcause::Report;
 use thiserror::Error;
+use winnow::Parser;
+use winnow::binary::{le_i64, le_u8, le_u16, le_u32, le_u64};
+use winnow::error::{ContextError, ErrMode};
 
-use crate::data::parser_utils::resolve_relptr;
+use crate::data::parser_utils::{
+    self, WResult, parse_lod_fields, parse_matrix_array, parse_render_set_fields, parse_u16_array,
+    parse_u32_array, resolve_relptr,
+};
 use crate::models::assets_bin::{PrototypeDatabase, StringsSection};
+
+// Re-export shared types so existing `use crate::models::visual::Matrix4x4` etc. still work.
+pub use crate::data::parser_utils::{BoundingBox, Matrix4x4};
 
 /// Errors that can occur during VisualPrototype parsing.
 #[derive(Debug, Error)]
@@ -42,26 +51,13 @@ pub struct VisualNodes {
     pub parent_ids: Vec<u16>,
 }
 
-/// 4x4 transformation matrix (column-major, 64 bytes).
-#[derive(Debug, Clone)]
-pub struct Matrix4x4(pub [f32; 16]);
-
-/// Axis-aligned bounding box.
-#[derive(Debug, Clone)]
-pub struct BoundingBox {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-}
-
 /// A render set binding a mesh to a material.
 #[derive(Debug)]
 pub struct RenderSet {
     pub name_id: u32,
     pub material_name_id: u32,
-    /// Unknown u64 at offset +0x08 in the RenderSet struct.
-    /// Hypothesis: low32=vertices_mapping_id, high32=indices_mapping_id.
-    pub unknown_u64: u64,
-    /// selfId of the .mfm file in pathsStorage (u64 path hash).
+    pub vertices_mapping_id: u32,
+    pub indices_mapping_id: u32,
     pub material_mfm_path_id: u64,
     pub skinned: bool,
     pub node_name_ids: Vec<u32>,
@@ -75,77 +71,69 @@ pub struct Lod {
     pub render_set_names: Vec<u32>,
 }
 
-/// Read a little-endian u16 from a byte slice.
-fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+// ---------------------------------------------------------------------------
+// Winnow sub-parsers (visual-specific header only; shared parsers in parser_utils)
+// ---------------------------------------------------------------------------
+
+/// Parse the fixed header of a VisualPrototype record (0x70 bytes).
+struct VisualHeader {
+    nodes_count: u32,
+    name_map_name_ids_relptr: i64,
+    name_map_node_ids_relptr: i64,
+    name_ids_relptr: i64,
+    matrices_relptr: i64,
+    parent_ids_relptr: i64,
+    merged_geometry_path_id: u64,
+    underwater_model: bool,
+    abovewater_model: bool,
+    render_sets_count: u16,
+    lods_count: u8,
+    bounding_box: BoundingBox,
+    render_sets_relptr: i64,
+    lods_relptr: i64,
 }
 
-/// Read a little-endian u32 from a byte slice.
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+fn parse_visual_header(input: &mut &[u8]) -> WResult<VisualHeader> {
+    let nodes_count = le_u32.parse_next(input)?;
+    let _pad = le_u32.parse_next(input)?;
+    let name_map_name_ids_relptr = le_i64.parse_next(input)?;
+    let name_map_node_ids_relptr = le_i64.parse_next(input)?;
+    let name_ids_relptr = le_i64.parse_next(input)?;
+    let matrices_relptr = le_i64.parse_next(input)?;
+    let parent_ids_relptr = le_i64.parse_next(input)?;
+    let merged_geometry_path_id = le_u64.parse_next(input)?;
+    let underwater_model = le_u8.parse_next(input)? != 0;
+    let abovewater_model = le_u8.parse_next(input)? != 0;
+    let render_sets_count = le_u16.parse_next(input)?;
+    let lods_count = le_u8.parse_next(input)?;
+    let _pad1 = le_u8.parse_next(input)?;
+    let _pad2 = le_u8.parse_next(input)?;
+    let _pad3 = le_u8.parse_next(input)?;
+    let bounding_box = parser_utils::parse_bounding_box(input)?;
+    let render_sets_relptr = le_i64.parse_next(input)?;
+    let lods_relptr = le_i64.parse_next(input)?;
+
+    Ok(VisualHeader {
+        nodes_count,
+        name_map_name_ids_relptr,
+        name_map_node_ids_relptr,
+        name_ids_relptr,
+        matrices_relptr,
+        parent_ids_relptr,
+        merged_geometry_path_id,
+        underwater_model,
+        abovewater_model,
+        render_sets_count,
+        lods_count,
+        bounding_box,
+        render_sets_relptr,
+        lods_relptr,
+    })
 }
 
-/// Read a little-endian u64 from a byte slice.
-fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
-}
-
-/// Read a little-endian f32 from a byte slice.
-fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
-
-/// Read a little-endian i64 from a byte slice.
-fn read_i64(data: &[u8], offset: usize) -> i64 {
-    i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
-}
-
-/// Read `count` little-endian u32 values from a relptr.
-///
-/// `base` is the absolute offset in the blob data where the containing struct starts.
-/// `relptr_offset` is the offset within the struct where the i64 relptr is stored.
-fn read_u32_array(
-    blob_data: &[u8],
-    base: usize,
-    relptr_offset: usize,
-    count: usize,
-) -> Result<Vec<u32>, Report<VisualError>> {
-    let relptr = read_i64(blob_data, base + relptr_offset);
-    let abs = resolve_relptr(base, relptr);
-    let need = count * 4;
-    if abs + need > blob_data.len() {
-        return Err(Report::new(VisualError::DataTooShort {
-            offset: abs,
-            need,
-            have: blob_data.len(),
-        }));
-    }
-    Ok((0..count)
-        .map(|i| read_u32(blob_data, abs + i * 4))
-        .collect())
-}
-
-/// Read `count` little-endian u16 values from a relptr.
-fn read_u16_array(
-    blob_data: &[u8],
-    base: usize,
-    relptr_offset: usize,
-    count: usize,
-) -> Result<Vec<u16>, Report<VisualError>> {
-    let relptr = read_i64(blob_data, base + relptr_offset);
-    let abs = resolve_relptr(base, relptr);
-    let need = count * 2;
-    if abs + need > blob_data.len() {
-        return Err(Report::new(VisualError::DataTooShort {
-            offset: abs,
-            need,
-            have: blob_data.len(),
-        }));
-    }
-    Ok((0..count)
-        .map(|i| read_u16(blob_data, abs + i * 2))
-        .collect())
-}
+// ---------------------------------------------------------------------------
+// Top-level parse entry point
+// ---------------------------------------------------------------------------
 
 /// Parse a VisualPrototype from blob data.
 ///
@@ -161,41 +149,47 @@ pub fn parse_visual(record_data: &[u8]) -> Result<VisualPrototype, Report<Visual
         }));
     }
 
-    // The record base is at offset 0 within record_data.
-    // All top-level relptrs are relative to this base.
-    let base = 0usize;
+    let hdr = {
+        let input = &mut &record_data[..];
+        parse_visual_header(input).map_err(|e: ErrMode<ContextError>| {
+            Report::new(VisualError::ParseError(format!("header: {e}")))
+        })?
+    };
 
-    // Node sub-struct (+0x00 to +0x2F)
-    let nodes_count = read_u32(record_data, base) as usize;
+    let base = 0usize;
+    let nodes_count = hdr.nodes_count as usize;
 
     let nodes = if nodes_count > 0 {
-        let name_map_name_ids = read_u32_array(record_data, base, 0x08, nodes_count)?;
-        let name_map_node_ids = read_u16_array(record_data, base, 0x10, nodes_count)?;
-        let name_ids = read_u32_array(record_data, base, 0x18, nodes_count)?;
-
-        // Matrices: 64 bytes each (16 x f32)
-        let matrices_relptr = read_i64(record_data, base + 0x20);
-        let matrices_abs = resolve_relptr(base, matrices_relptr);
-        let matrices_need = nodes_count * 64;
-        if matrices_abs + matrices_need > record_data.len() {
-            return Err(Report::new(VisualError::DataTooShort {
-                offset: matrices_abs,
-                need: matrices_need,
-                have: record_data.len(),
-            }));
-        }
-        let matrices = (0..nodes_count)
-            .map(|i| {
-                let mat_base = matrices_abs + i * 64;
-                let mut m = [0f32; 16];
-                for (j, val) in m.iter_mut().enumerate() {
-                    *val = read_f32(record_data, mat_base + j * 4);
-                }
-                Matrix4x4(m)
-            })
-            .collect();
-
-        let parent_ids = read_u16_array(record_data, base, 0x28, nodes_count)?;
+        let name_map_name_ids = parse_array_at(
+            record_data,
+            resolve_relptr(base, hdr.name_map_name_ids_relptr),
+            nodes_count,
+            parse_u32_array,
+        )?;
+        let name_map_node_ids = parse_array_at(
+            record_data,
+            resolve_relptr(base, hdr.name_map_node_ids_relptr),
+            nodes_count,
+            parse_u16_array,
+        )?;
+        let name_ids = parse_array_at(
+            record_data,
+            resolve_relptr(base, hdr.name_ids_relptr),
+            nodes_count,
+            parse_u32_array,
+        )?;
+        let matrices = parse_array_at(
+            record_data,
+            resolve_relptr(base, hdr.matrices_relptr),
+            nodes_count,
+            parse_matrix_array,
+        )?;
+        let parent_ids = parse_array_at(
+            record_data,
+            resolve_relptr(base, hdr.parent_ids_relptr),
+            nodes_count,
+            parse_u16_array,
+        )?;
 
         VisualNodes {
             name_map_name_ids,
@@ -214,38 +208,18 @@ pub fn parse_visual(record_data: &[u8]) -> Result<VisualPrototype, Report<Visual
         }
     };
 
-    let merged_geometry_path_id = read_u64(record_data, base + 0x30);
-    let underwater_model = record_data[base + 0x38] != 0;
-    let abovewater_model = record_data[base + 0x39] != 0;
-    let render_sets_count = read_u16(record_data, base + 0x3A) as usize;
-    let lods_count = record_data[base + 0x3C] as usize;
+    let render_sets_count = hdr.render_sets_count as usize;
+    let lods_count = hdr.lods_count as usize;
 
-    let bounding_box = BoundingBox {
-        min: [
-            read_f32(record_data, base + 0x40),
-            read_f32(record_data, base + 0x44),
-            read_f32(record_data, base + 0x48),
-        ],
-        max: [
-            read_f32(record_data, base + 0x50),
-            read_f32(record_data, base + 0x54),
-            read_f32(record_data, base + 0x58),
-        ],
-    };
-
-    // RenderSets: 0x28 bytes each, relptr at +0x60
     let render_sets = if render_sets_count > 0 {
-        let rs_relptr = read_i64(record_data, base + 0x60);
-        let rs_abs = resolve_relptr(base, rs_relptr);
+        let rs_abs = resolve_relptr(base, hdr.render_sets_relptr);
         parse_render_sets(record_data, rs_abs, render_sets_count)?
     } else {
         Vec::new()
     };
 
-    // LODs: 0x10 bytes each, relptr at +0x68
     let lods = if lods_count > 0 {
-        let lod_relptr = read_i64(record_data, base + 0x68);
-        let lod_abs = resolve_relptr(base, lod_relptr);
+        let lod_abs = resolve_relptr(base, hdr.lods_relptr);
         parse_lods(record_data, lod_abs, lods_count)?
     } else {
         Vec::new()
@@ -253,14 +227,36 @@ pub fn parse_visual(record_data: &[u8]) -> Result<VisualPrototype, Report<Visual
 
     Ok(VisualPrototype {
         nodes,
-        merged_geometry_path_id,
-        underwater_model,
-        abovewater_model,
-        bounding_box,
+        merged_geometry_path_id: hdr.merged_geometry_path_id,
+        underwater_model: hdr.underwater_model,
+        abovewater_model: hdr.abovewater_model,
+        bounding_box: hdr.bounding_box,
         render_sets,
         lods,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Helper: parse an array at a given offset, wrapping winnow errors
+// ---------------------------------------------------------------------------
+
+fn parse_array_at<T>(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    parser: fn(&mut &[u8], usize) -> WResult<Vec<T>>,
+) -> Result<Vec<T>, Report<VisualError>> {
+    let input = &mut &data[offset..];
+    parser(input, count).map_err(|e: ErrMode<ContextError>| {
+        Report::new(VisualError::ParseError(format!(
+            "array at 0x{offset:X}: {e}"
+        )))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sub-structure parsers
+// ---------------------------------------------------------------------------
 
 const RENDER_SET_SIZE: usize = 0x28;
 
@@ -281,27 +277,26 @@ fn parse_render_sets(
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let rs_base = offset + i * RENDER_SET_SIZE;
+        let input = &mut &blob_data[rs_base..];
 
-        let name_id = read_u32(blob_data, rs_base);
-        let material_name_id = read_u32(blob_data, rs_base + 0x04);
-        let unknown_u64 = read_u64(blob_data, rs_base + 0x08);
-        let material_mfm_path_id = read_u64(blob_data, rs_base + 0x10);
-        let skinned = blob_data[rs_base + 0x18] != 0;
-        let nodes_count = blob_data[rs_base + 0x19] as usize;
+        let fields = parse_render_set_fields(input).map_err(|e: ErrMode<ContextError>| {
+            Report::new(VisualError::ParseError(format!("render_set[{i}]: {e}")))
+        })?;
 
-        // nodeNameIds relptr is relative to the RS base
-        let node_name_ids = if nodes_count > 0 {
-            read_u32_array(blob_data, rs_base, 0x20, nodes_count)?
+        let node_name_ids = if fields.nodes_count > 0 {
+            let abs = resolve_relptr(rs_base, fields.node_name_ids_relptr);
+            parse_array_at(blob_data, abs, fields.nodes_count as usize, parse_u32_array)?
         } else {
             Vec::new()
         };
 
         result.push(RenderSet {
-            name_id,
-            material_name_id,
-            unknown_u64,
-            material_mfm_path_id,
-            skinned,
+            name_id: fields.name_id,
+            material_name_id: fields.material_name_id,
+            vertices_mapping_id: fields.vertices_mapping_id,
+            indices_mapping_id: fields.indices_mapping_id,
+            material_mfm_path_id: fields.material_mfm_path_id,
+            skinned: fields.skinned,
             node_name_ids,
         });
     }
@@ -328,21 +323,27 @@ fn parse_lods(
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let lod_base = offset + i * LOD_SIZE;
+        let input = &mut &blob_data[lod_base..];
 
-        let extent = read_f32(blob_data, lod_base);
-        let casts_shadow = blob_data[lod_base + 0x04] != 0;
-        let render_set_names_count = read_u16(blob_data, lod_base + 0x06) as usize;
+        let fields = parse_lod_fields(input).map_err(|e: ErrMode<ContextError>| {
+            Report::new(VisualError::ParseError(format!("lod[{i}]: {e}")))
+        })?;
 
-        // renderSetNames relptr is relative to the LOD base
-        let render_set_names = if render_set_names_count > 0 {
-            read_u32_array(blob_data, lod_base, 0x08, render_set_names_count)?
+        let render_set_names = if fields.render_set_names_count > 0 {
+            let abs = resolve_relptr(lod_base, fields.render_set_names_relptr);
+            parse_array_at(
+                blob_data,
+                abs,
+                fields.render_set_names_count as usize,
+                parse_u32_array,
+            )?
         } else {
             Vec::new()
         };
 
         result.push(Lod {
-            extent,
-            casts_shadow,
+            extent: fields.extent,
+            casts_shadow: fields.casts_shadow,
             render_set_names,
         });
     }
@@ -350,13 +351,16 @@ fn parse_lods(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// VisualPrototype methods (unchanged)
+// ---------------------------------------------------------------------------
+
 impl VisualPrototype {
     /// Resolve string IDs and path IDs using the database.
     pub fn print_summary(&self, db: &PrototypeDatabase<'_>) {
         let strings = &db.strings;
         let self_id_index = db.build_self_id_index();
 
-        // Helper to resolve a u64 selfId to a path leaf name
         let resolve_path_leaf = |self_id: u64| -> String {
             if self_id == 0 {
                 return "(none)".to_string();
@@ -400,15 +404,12 @@ impl VisualPrototype {
                 .get_string_by_id(rs.material_name_id)
                 .unwrap_or("<unknown>");
             let mfm_name = resolve_path_leaf(rs.material_mfm_path_id);
-            let low32 = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
-            let high32 = (rs.unknown_u64 >> 32) as u32;
             println!(
-                "    [{i}] name=\"{name}\" material=\"{mat_name}\" mfm=\"{mfm_name}\" skinned={} nodes={}\n        unknown_u64=0x{:016X} (low32=0x{:08X} high32=0x{:08X})",
+                "    [{i}] name=\"{name}\" material=\"{mat_name}\" mfm=\"{mfm_name}\" skinned={} nodes={}\n        vertices_mapping=0x{:08X} indices_mapping=0x{:08X}",
                 rs.skinned,
                 rs.node_name_ids.len(),
-                rs.unknown_u64,
-                low32,
-                high32,
+                rs.vertices_mapping_id,
+                rs.indices_mapping_id,
             );
         }
 
@@ -434,20 +435,13 @@ impl VisualPrototype {
     }
 
     /// Find the world-space transform for a named hardpoint node.
-    ///
-    /// Looks up `hp_name` in the visual's name_map by resolving each name_map_name_id
-    /// via the strings section, then composes transforms walking up the parent chain.
-    ///
-    /// Returns `None` if the node name is not found.
     pub fn find_hardpoint_transform(
         &self,
         hp_name: &str,
         strings: &StringsSection<'_>,
     ) -> Option<[f32; 16]> {
-        // Find the node index for this hardpoint name.
         let node_idx = self.find_node_index_by_name(hp_name, strings)?;
 
-        // Compose transforms walking up the parent chain.
         let mut result = self.nodes.matrices[node_idx as usize].0;
         let mut current = node_idx;
         loop {

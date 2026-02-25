@@ -661,9 +661,8 @@ fn collect_primitives(
             continue;
         }
 
-        // Decode unknown_u64 → (vertices_mapping_id, indices_mapping_id)
-        let vertices_mapping_id = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
-        let indices_mapping_id = (rs.unknown_u64 >> 32) as u32;
+        let vertices_mapping_id = rs.vertices_mapping_id;
+        let indices_mapping_id = rs.indices_mapping_id;
 
         // Find mapping entries.
         let vert_mapping = geometry
@@ -1918,8 +1917,8 @@ pub fn collect_hull_meshes(
             continue;
         }
 
-        let vertices_mapping_id = (rs.unknown_u64 & 0xFFFFFFFF) as u32;
-        let indices_mapping_id = (rs.unknown_u64 >> 32) as u32;
+        let vertices_mapping_id = rs.vertices_mapping_id;
+        let indices_mapping_id = rs.indices_mapping_id;
 
         let vert_mapping = geometry
             .vertices_mapping

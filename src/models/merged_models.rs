@@ -8,10 +8,17 @@
 
 use rootcause::Report;
 use thiserror::Error;
+use winnow::Parser;
+use winnow::binary::{le_i64, le_u8, le_u16, le_u32, le_u64};
+use winnow::error::{ContextError, ErrMode};
+use winnow::token::take;
 
-use crate::data::parser_utils::resolve_relptr;
+use crate::data::parser_utils::{
+    self, BoundingBox, Matrix4x4, WResult, parse_lod_fields, parse_matrix_array,
+    parse_render_set_fields, parse_u16_array, parse_u32_array, resolve_relptr, resolve_relptr_at,
+};
 use crate::models::model::{ModelPrototype, parse_model};
-use crate::models::visual::{BoundingBox, Lod, Matrix4x4, RenderSet, VisualNodes, VisualPrototype};
+use crate::models::visual::{Lod, RenderSet, VisualNodes, VisualPrototype};
 
 /// Errors during `models.bin` parsing.
 #[derive(Debug, Error)]
@@ -73,71 +80,116 @@ pub struct SpaceInstances {
     pub instances: Vec<SpaceInstance>,
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Winnow sub-parsers (merged-specific) ────────────────────────────────────
 
-fn read_u8(data: &[u8], offset: usize) -> u8 {
-    data[offset]
+// models.bin header (0x18 bytes)
+
+struct MergedHeader {
+    models_count: u32,
+    skeletons_count: u16,
+    model_bone_count: u16,
+    models_relptr: i64,
+    skeletons_relptr: i64,
 }
 
-fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+fn parse_merged_header(input: &mut &[u8]) -> WResult<MergedHeader> {
+    let models_count = le_u32.parse_next(input)?;
+    let skeletons_count = le_u16.parse_next(input)?;
+    let model_bone_count = le_u16.parse_next(input)?;
+    let models_relptr = le_i64.parse_next(input)?;
+    let skeletons_relptr = le_i64.parse_next(input)?;
+    Ok(MergedHeader {
+        models_count,
+        skeletons_count,
+        model_bone_count,
+        models_relptr,
+        skeletons_relptr,
+    })
 }
 
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+// VisualProto inline fields (0x70 bytes at rec+0x30)
+
+struct VisualProtoInlineFields {
+    nodes_count: u32,
+    name_map_name_ids_relptr: i64,
+    name_map_node_ids_relptr: i64,
+    name_ids_relptr: i64,
+    matrices_relptr: i64,
+    parent_ids_relptr: i64,
+    merged_geometry_path_id: u64,
+    underwater_model: bool,
+    abovewater_model: bool,
+    render_sets_count: u16,
+    lods_count: u16,
+    bounding_box: BoundingBox,
+    render_sets_relptr: i64,
+    lods_relptr: i64,
 }
 
-fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+fn parse_visual_proto_inline_fields(input: &mut &[u8]) -> WResult<VisualProtoInlineFields> {
+    // Skeleton sub-struct: +0x00..+0x30
+    let nodes_count = le_u32.parse_next(input)?;
+    let _pad = le_u32.parse_next(input)?;
+    let name_map_name_ids_relptr = le_i64.parse_next(input)?;
+    let name_map_node_ids_relptr = le_i64.parse_next(input)?;
+    let name_ids_relptr = le_i64.parse_next(input)?;
+    let matrices_relptr = le_i64.parse_next(input)?;
+    let parent_ids_relptr = le_i64.parse_next(input)?;
+    // VisualProto fields: +0x30..+0x70
+    let merged_geometry_path_id = le_u64.parse_next(input)?;
+    let underwater_model = le_u8.parse_next(input)? != 0;
+    let abovewater_model = le_u8.parse_next(input)? != 0;
+    let render_sets_count = le_u16.parse_next(input)?;
+    let lods_count = le_u16.parse_next(input)?;
+    let _ = take(2usize).parse_next(input)?; // padding to +0x40
+    let bounding_box = parser_utils::parse_bounding_box(input)?;
+    let render_sets_relptr = le_i64.parse_next(input)?;
+    let lods_relptr = le_i64.parse_next(input)?;
+    Ok(VisualProtoInlineFields {
+        nodes_count,
+        name_map_name_ids_relptr,
+        name_map_node_ids_relptr,
+        name_ids_relptr,
+        matrices_relptr,
+        parent_ids_relptr,
+        merged_geometry_path_id,
+        underwater_model,
+        abovewater_model,
+        render_sets_count,
+        lods_count,
+        bounding_box,
+        render_sets_relptr,
+        lods_relptr,
+    })
 }
 
-fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+// space.bin instance entry
+
+fn parse_space_instance_entry(input: &mut &[u8]) -> WResult<SpaceInstance> {
+    let transform = parser_utils::parse_matrix4x4(input)?;
+    let _ = take(16usize).parse_next(input)?; // padding +0x40..+0x50
+    let path_id = le_u64.parse_next(input)?;
+    let _ = take(24usize).parse_next(input)?; // remaining to 0x70 stride
+    Ok(SpaceInstance { transform, path_id })
 }
 
-fn read_i64(data: &[u8], offset: usize) -> i64 {
-    i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
-}
+// ── Helper: parse array at offset, wrapping winnow errors ───────────────────
 
-fn bounds_check(data: &[u8], offset: usize, need: usize) -> Result<(), Report<MergedModelsError>> {
-    if offset + need > data.len() {
-        return Err(Report::new(MergedModelsError::DataTooShort {
-            offset,
-            need,
-            have: data.len(),
-        }));
-    }
-    Ok(())
-}
-
-fn read_u32_array(
+fn parse_array_at<T>(
     data: &[u8],
-    base: usize,
-    relptr_offset: usize,
+    offset: usize,
     count: usize,
-) -> Result<Vec<u32>, Report<MergedModelsError>> {
+    parser: fn(&mut &[u8], usize) -> WResult<Vec<T>>,
+) -> Result<Vec<T>, Report<MergedModelsError>> {
     if count == 0 {
         return Ok(Vec::new());
     }
-    let relptr = read_i64(data, base + relptr_offset);
-    let abs = resolve_relptr(base, relptr);
-    bounds_check(data, abs, count * 4)?;
-    Ok((0..count).map(|i| read_u32(data, abs + i * 4)).collect())
-}
-
-fn read_u16_array(
-    data: &[u8],
-    base: usize,
-    relptr_offset: usize,
-    count: usize,
-) -> Result<Vec<u16>, Report<MergedModelsError>> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let relptr = read_i64(data, base + relptr_offset);
-    let abs = resolve_relptr(base, relptr);
-    bounds_check(data, abs, count * 2)?;
-    Ok((0..count).map(|i| read_u16(data, abs + i * 2)).collect())
+    let input = &mut &data[offset..];
+    parser(input, count).map_err(|e: ErrMode<ContextError>| {
+        Report::new(MergedModelsError::ParseError(format!(
+            "array at 0x{offset:X}: {e}"
+        )))
+    })
 }
 
 // ── Header ───────────────────────────────────────────────────────────────────
@@ -150,19 +202,33 @@ const LOD_SIZE: usize = 0x10;
 
 /// Parse a `models.bin` file.
 pub fn parse_merged_models(file_data: &[u8]) -> Result<MergedModels, Report<MergedModelsError>> {
-    bounds_check(file_data, 0, HEADER_SIZE)?;
+    if file_data.len() < HEADER_SIZE {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: 0,
+            need: HEADER_SIZE,
+            have: file_data.len(),
+        }));
+    }
 
-    let models_count = read_u32(file_data, 0x00) as usize;
-    let skeletons_count = read_u16(file_data, 0x04) as usize;
-    let model_bone_count = read_u16(file_data, 0x06);
-    let models_relptr = read_i64(file_data, 0x08);
-    let skeletons_relptr = read_i64(file_data, 0x10);
+    let input = &mut &file_data[..];
+    let hdr = parse_merged_header(input).map_err(|e: ErrMode<ContextError>| {
+        Report::new(MergedModelsError::ParseError(format!("header: {e}")))
+    })?;
 
-    let models_offset = resolve_relptr(0, models_relptr);
-    let skeletons_offset = resolve_relptr(0, skeletons_relptr);
+    let models_count = hdr.models_count as usize;
+    let skeletons_count = hdr.skeletons_count as usize;
+    let models_offset = resolve_relptr(0, hdr.models_relptr);
+    let skeletons_offset = resolve_relptr(0, hdr.skeletons_relptr);
 
     // Parse model records
-    bounds_check(file_data, models_offset, models_count * MODEL_RECORD_SIZE)?;
+    let need = models_count * MODEL_RECORD_SIZE;
+    if models_offset + need > file_data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: models_offset,
+            need,
+            have: file_data.len(),
+        }));
+    }
     let mut models = Vec::with_capacity(models_count);
     for i in 0..models_count {
         let rec_base = models_offset + i * MODEL_RECORD_SIZE;
@@ -172,7 +238,14 @@ pub fn parse_merged_models(file_data: &[u8]) -> Result<MergedModels, Report<Merg
     }
 
     // Parse shared skeleton prototypes
-    bounds_check(file_data, skeletons_offset, skeletons_count * SKELETON_SIZE)?;
+    let need = skeletons_count * SKELETON_SIZE;
+    if skeletons_offset + need > file_data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: skeletons_offset,
+            need,
+            have: file_data.len(),
+        }));
+    }
     let mut skeletons = Vec::with_capacity(skeletons_count);
     for i in 0..skeletons_count {
         let skel_base = skeletons_offset + i * SKELETON_SIZE;
@@ -184,7 +257,7 @@ pub fn parse_merged_models(file_data: &[u8]) -> Result<MergedModels, Report<Merg
     Ok(MergedModels {
         models,
         skeletons,
-        model_bone_count,
+        model_bone_count: hdr.model_bone_count,
     })
 }
 
@@ -197,32 +270,39 @@ const SPACE_INSTANCE_SIZE: usize = 0x70;
 pub fn parse_space_instances(
     file_data: &[u8],
 ) -> Result<SpaceInstances, Report<MergedModelsError>> {
-    bounds_check(file_data, 0, SPACE_HEADER_SIZE)?;
-
-    let instance_count = read_u32(file_data, 0x00) as usize;
-
-    bounds_check(
-        file_data,
-        SPACE_HEADER_SIZE,
-        instance_count * SPACE_INSTANCE_SIZE,
-    )?;
-
-    let mut instances = Vec::with_capacity(instance_count);
-    for i in 0..instance_count {
-        let base = SPACE_HEADER_SIZE + i * SPACE_INSTANCE_SIZE;
-
-        // 4×4 f32 matrix at +0x00 (64 bytes)
-        let mut m = [0f32; 16];
-        for (j, val) in m.iter_mut().enumerate() {
-            *val = read_f32(file_data, base + j * 4);
-        }
-        let transform = Matrix4x4(m);
-
-        // path_id at +0x50
-        let path_id = read_u64(file_data, base + 0x50);
-
-        instances.push(SpaceInstance { transform, path_id });
+    if file_data.len() < SPACE_HEADER_SIZE {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: 0,
+            need: SPACE_HEADER_SIZE,
+            have: file_data.len(),
+        }));
     }
+
+    let input = &mut &file_data[..];
+    let instance_count = le_u32
+        .parse_next(input)
+        .map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!("space header: {e}")))
+        })? as usize;
+
+    let need = instance_count * SPACE_INSTANCE_SIZE;
+    if SPACE_HEADER_SIZE + need > file_data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: SPACE_HEADER_SIZE,
+            need,
+            have: file_data.len(),
+        }));
+    }
+
+    let input = &mut &file_data[SPACE_HEADER_SIZE..];
+    let instances: Vec<SpaceInstance> =
+        winnow::combinator::repeat(instance_count, parse_space_instance_entry)
+            .parse_next(input)
+            .map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!(
+                    "space instances: {e}"
+                )))
+            })?;
 
     Ok(SpaceInstances { instances })
 }
@@ -233,31 +313,52 @@ fn parse_model_record(
     data: &[u8],
     rec: usize,
 ) -> Result<MergedModelRecord, Report<MergedModelsError>> {
-    bounds_check(data, rec, MODEL_RECORD_SIZE)?;
-
-    let path_id = read_u64(data, rec + 0x00);
-
-    // ModelProto at rec+0x08 (0x28 bytes). We reuse the existing model.rs parser
-    // by slicing from the ModelProto base to end of file.
-    let model_proto_base = rec + 0x08;
-    if model_proto_base >= data.len() {
+    if rec + MODEL_RECORD_SIZE > data.len() {
         return Err(Report::new(MergedModelsError::DataTooShort {
-            offset: model_proto_base,
-            need: 0x28,
+            offset: rec,
+            need: MODEL_RECORD_SIZE,
             have: data.len(),
         }));
     }
+
+    let input = &mut &data[rec..];
+    let path_id = le_u64
+        .parse_next(input)
+        .map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!("path_id: {e}")))
+        })?;
+
+    // ModelProto at rec+0x08 (0x28 bytes)
+    let model_proto_base = rec + 0x08;
     let model_proto = parse_model(&data[model_proto_base..]).map_err(|e| {
         MergedModelsError::ParseError(format!("ModelProto at 0x{model_proto_base:X}: {e}"))
     })?;
 
-    // VisualProto at rec+0x30 (0x70 bytes). Parse inline.
+    // VisualProto at rec+0x30 (0x70 bytes)
     let vp_base = rec + 0x30;
     let visual_proto = parse_visual_proto_inline(data, vp_base)?;
 
-    let skeleton_proto_index = read_u32(data, rec + 0xA0);
-    let render_set_geometry_start_idx = read_u16(data, rec + 0xA4);
-    let render_set_geometry_count = read_u16(data, rec + 0xA6);
+    // Tail fields at rec+0xA0
+    let input = &mut &data[rec + 0xA0..];
+    let skeleton_proto_index = le_u32
+        .parse_next(input)
+        .map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!(
+                "skeleton_proto_index: {e}"
+            )))
+        })?;
+    let render_set_geometry_start_idx =
+        le_u16
+            .parse_next(input)
+            .map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("rs_geom_start: {e}")))
+            })?;
+    let render_set_geometry_count =
+        le_u16
+            .parse_next(input)
+            .map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("rs_geom_count: {e}")))
+            })?;
 
     Ok(MergedModelRecord {
         path_id,
@@ -275,43 +376,84 @@ fn parse_visual_proto_inline(
     data: &[u8],
     vp_base: usize,
 ) -> Result<VisualPrototype, Report<MergedModelsError>> {
-    bounds_check(data, vp_base, 0x70)?;
+    if vp_base + 0x70 > data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: vp_base,
+            need: 0x70,
+            have: data.len(),
+        }));
+    }
 
-    // SkeletonProto is the first 0x30 bytes of VisualProto
-    let nodes = parse_skeleton_nodes(data, vp_base)?;
+    let input = &mut &data[vp_base..];
+    let fields = parse_visual_proto_inline_fields(input).map_err(|e: ErrMode<ContextError>| {
+        Report::new(MergedModelsError::ParseError(format!(
+            "visual_proto at 0x{vp_base:X}: {e}"
+        )))
+    })?;
 
-    let merged_geometry_path_id = read_u64(data, vp_base + 0x30);
-    let underwater_model = read_u8(data, vp_base + 0x38) != 0;
-    let abovewater_model = read_u8(data, vp_base + 0x39) != 0;
-    let render_sets_count = read_u16(data, vp_base + 0x3A) as usize;
-    let lods_count = read_u16(data, vp_base + 0x3C) as usize;
+    let nodes_count = fields.nodes_count as usize;
 
-    let bounding_box = BoundingBox {
-        min: [
-            read_f32(data, vp_base + 0x40),
-            read_f32(data, vp_base + 0x44),
-            read_f32(data, vp_base + 0x48),
-        ],
-        max: [
-            read_f32(data, vp_base + 0x50),
-            read_f32(data, vp_base + 0x54),
-            read_f32(data, vp_base + 0x58),
-        ],
+    let nodes = if nodes_count > 0 {
+        let name_map_name_ids = parse_array_at(
+            data,
+            resolve_relptr(vp_base, fields.name_map_name_ids_relptr),
+            nodes_count,
+            parse_u32_array,
+        )?;
+        let name_map_node_ids = parse_array_at(
+            data,
+            resolve_relptr(vp_base, fields.name_map_node_ids_relptr),
+            nodes_count,
+            parse_u16_array,
+        )?;
+        let name_ids = parse_array_at(
+            data,
+            resolve_relptr(vp_base, fields.name_ids_relptr),
+            nodes_count,
+            parse_u32_array,
+        )?;
+        let matrices = parse_array_at(
+            data,
+            resolve_relptr(vp_base, fields.matrices_relptr),
+            nodes_count,
+            parse_matrix_array,
+        )?;
+        let parent_ids = parse_array_at(
+            data,
+            resolve_relptr(vp_base, fields.parent_ids_relptr),
+            nodes_count,
+            parse_u16_array,
+        )?;
+
+        VisualNodes {
+            name_map_name_ids,
+            name_map_node_ids,
+            name_ids,
+            matrices,
+            parent_ids,
+        }
+    } else {
+        VisualNodes {
+            name_map_name_ids: Vec::new(),
+            name_map_node_ids: Vec::new(),
+            name_ids: Vec::new(),
+            matrices: Vec::new(),
+            parent_ids: Vec::new(),
+        }
     };
 
-    // RenderSets: relptr at vp_base+0x60, base = vp_base
+    let render_sets_count = fields.render_sets_count as usize;
+    let lods_count = fields.lods_count as usize;
+
     let render_sets = if render_sets_count > 0 {
-        let rs_relptr = read_i64(data, vp_base + 0x60);
-        let rs_abs = resolve_relptr(vp_base, rs_relptr);
+        let rs_abs = resolve_relptr(vp_base, fields.render_sets_relptr);
         parse_render_sets_merged(data, rs_abs, render_sets_count)?
     } else {
         Vec::new()
     };
 
-    // LODs: relptr at vp_base+0x68, base = vp_base
     let lods = if lods_count > 0 {
-        let lod_relptr = read_i64(data, vp_base + 0x68);
-        let lod_abs = resolve_relptr(vp_base, lod_relptr);
+        let lod_abs = resolve_relptr(vp_base, fields.lods_relptr);
         parse_lods_merged(data, lod_abs, lods_count)?
     } else {
         Vec::new()
@@ -319,24 +461,35 @@ fn parse_visual_proto_inline(
 
     Ok(VisualPrototype {
         nodes,
-        merged_geometry_path_id,
-        underwater_model,
-        abovewater_model,
-        bounding_box,
+        merged_geometry_path_id: fields.merged_geometry_path_id,
+        underwater_model: fields.underwater_model,
+        abovewater_model: fields.abovewater_model,
+        bounding_box: fields.bounding_box,
         render_sets,
         lods,
     })
 }
 
-// ── Skeleton nodes (shared between inline SkeletonProto and shared skeletons)
+// ── Skeleton nodes ──────────────────────────────────────────────────────────
 
 fn parse_skeleton_nodes(
     data: &[u8],
     skel_base: usize,
 ) -> Result<VisualNodes, Report<MergedModelsError>> {
-    bounds_check(data, skel_base, 0x30)?;
+    if skel_base + 0x30 > data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset: skel_base,
+            need: 0x30,
+            have: data.len(),
+        }));
+    }
 
-    let nodes_count = read_u32(data, skel_base) as usize;
+    let input = &mut &data[skel_base..];
+    let nodes_count = le_u32
+        .parse_next(input)
+        .map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!("nodes_count: {e}")))
+        })? as usize;
 
     if nodes_count == 0 {
         return Ok(VisualNodes {
@@ -348,27 +501,41 @@ fn parse_skeleton_nodes(
         });
     }
 
-    let name_map_name_ids = read_u32_array(data, skel_base, 0x08, nodes_count)?;
-    let name_map_node_ids = read_u16_array(data, skel_base, 0x10, nodes_count)?;
-    let name_ids = read_u32_array(data, skel_base, 0x18, nodes_count)?;
-
-    // Matrices: 64 bytes each (16 × f32)
-    let matrices_relptr = read_i64(data, skel_base + 0x20);
-    let matrices_abs = resolve_relptr(skel_base, matrices_relptr);
-    let matrices_need = nodes_count * 64;
-    bounds_check(data, matrices_abs, matrices_need)?;
-    let matrices = (0..nodes_count)
-        .map(|i| {
-            let mat_base = matrices_abs + i * 64;
-            let mut m = [0f32; 16];
-            for (j, val) in m.iter_mut().enumerate() {
-                *val = read_f32(data, mat_base + j * 4);
-            }
-            Matrix4x4(m)
-        })
-        .collect();
-
-    let parent_ids = read_u16_array(data, skel_base, 0x28, nodes_count)?;
+    let name_map_name_ids = {
+        let abs =
+            resolve_relptr_at(data, skel_base, 0x08).map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("skel relptr: {e}")))
+            })?;
+        parse_array_at(data, abs, nodes_count, parse_u32_array)?
+    };
+    let name_map_node_ids = {
+        let abs =
+            resolve_relptr_at(data, skel_base, 0x10).map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("skel relptr: {e}")))
+            })?;
+        parse_array_at(data, abs, nodes_count, parse_u16_array)?
+    };
+    let name_ids = {
+        let abs =
+            resolve_relptr_at(data, skel_base, 0x18).map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("skel relptr: {e}")))
+            })?;
+        parse_array_at(data, abs, nodes_count, parse_u32_array)?
+    };
+    let matrices = {
+        let abs =
+            resolve_relptr_at(data, skel_base, 0x20).map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("skel relptr: {e}")))
+            })?;
+        parse_array_at(data, abs, nodes_count, parse_matrix_array)?
+    };
+    let parent_ids = {
+        let abs =
+            resolve_relptr_at(data, skel_base, 0x28).map_err(|e: ErrMode<ContextError>| {
+                Report::new(MergedModelsError::ParseError(format!("skel relptr: {e}")))
+            })?;
+        parse_array_at(data, abs, nodes_count, parse_u16_array)?
+    };
 
     Ok(VisualNodes {
         name_map_name_ids,
@@ -394,32 +561,40 @@ fn parse_render_sets_merged(
     offset: usize,
     count: usize,
 ) -> Result<Vec<RenderSet>, Report<MergedModelsError>> {
-    bounds_check(data, offset, count * RENDER_SET_SIZE)?;
+    let need = count * RENDER_SET_SIZE;
+    if offset + need > data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset,
+            need,
+            have: data.len(),
+        }));
+    }
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let rs_base = offset + i * RENDER_SET_SIZE;
+        let input = &mut &data[rs_base..];
 
-        let name_id = read_u32(data, rs_base);
-        let material_name_id = read_u32(data, rs_base + 0x04);
-        let vertices_mapping_index = read_u32(data, rs_base + 0x08);
-        let indices_mapping_index = read_u32(data, rs_base + 0x0C);
-        let material_mfm_path_id = read_u64(data, rs_base + 0x10);
-        let skinned = read_u8(data, rs_base + 0x18) != 0;
-        let nodes_count = read_u8(data, rs_base + 0x19) as usize;
+        let fields = parse_render_set_fields(input).map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!(
+                "render_set[{i}]: {e}"
+            )))
+        })?;
 
-        let node_name_ids = read_u32_array(data, rs_base, 0x20, nodes_count)?;
-
-        // Pack the two u32 indices into the u64 field for compatibility with
-        // the existing VisualPrototype RenderSet type.
-        let unknown_u64 = ((indices_mapping_index as u64) << 32) | (vertices_mapping_index as u64);
+        let node_name_ids = if fields.nodes_count > 0 {
+            let abs = resolve_relptr(rs_base, fields.node_name_ids_relptr);
+            parse_array_at(data, abs, fields.nodes_count as usize, parse_u32_array)?
+        } else {
+            Vec::new()
+        };
 
         result.push(RenderSet {
-            name_id,
-            material_name_id,
-            unknown_u64,
-            material_mfm_path_id,
-            skinned,
+            name_id: fields.name_id,
+            material_name_id: fields.material_name_id,
+            vertices_mapping_id: fields.vertices_mapping_id,
+            indices_mapping_id: fields.indices_mapping_id,
+            material_mfm_path_id: fields.material_mfm_path_id,
+            skinned: fields.skinned,
             node_name_ids,
         });
     }
@@ -434,20 +609,39 @@ fn parse_lods_merged(
     offset: usize,
     count: usize,
 ) -> Result<Vec<Lod>, Report<MergedModelsError>> {
-    bounds_check(data, offset, count * LOD_SIZE)?;
+    let need = count * LOD_SIZE;
+    if offset + need > data.len() {
+        return Err(Report::new(MergedModelsError::DataTooShort {
+            offset,
+            need,
+            have: data.len(),
+        }));
+    }
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let lod_base = offset + i * LOD_SIZE;
+        let input = &mut &data[lod_base..];
 
-        let extent = read_f32(data, lod_base);
-        let casts_shadow = read_u8(data, lod_base + 0x04) != 0;
-        let render_set_names_count = read_u16(data, lod_base + 0x06) as usize;
-        let render_set_names = read_u32_array(data, lod_base, 0x08, render_set_names_count)?;
+        let fields = parse_lod_fields(input).map_err(|e: ErrMode<ContextError>| {
+            Report::new(MergedModelsError::ParseError(format!("lod[{i}]: {e}")))
+        })?;
+
+        let render_set_names = if fields.render_set_names_count > 0 {
+            let abs = resolve_relptr(lod_base, fields.render_set_names_relptr);
+            parse_array_at(
+                data,
+                abs,
+                fields.render_set_names_count as usize,
+                parse_u32_array,
+            )?
+        } else {
+            Vec::new()
+        };
 
         result.push(Lod {
-            extent,
-            casts_shadow,
+            extent: fields.extent,
+            casts_shadow: fields.casts_shadow,
             render_set_names,
         });
     }
