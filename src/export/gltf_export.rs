@@ -14,8 +14,11 @@ use crate::game_params::types::ArmorMap;
 use crate::models::assets_bin::PrototypeDatabase;
 use crate::models::geometry::MergedGeometry;
 use crate::models::merged_models::{MergedModels, SpaceInstances};
+use crate::models::terrain::Terrain;
 use crate::models::vertex_format::{self, AttributeSemantic, VertexFormat};
 use crate::models::visual::VisualPrototype;
+
+use super::texture;
 
 #[derive(Debug, Error)]
 pub enum ExportError {
@@ -57,6 +60,8 @@ struct DecodedPrimitive {
     material_name: String,
     /// MFM stem for texture lookup (e.g. "JSB039_Yamato_1945_Hull").
     mfm_stem: Option<String>,
+    /// Full VFS path to the .mfm file (e.g. "content/location/.../textures/LBC001.mfm").
+    mfm_full_path: Option<String>,
 }
 
 /// Export a visual + geometry pair to a GLB binary and write it.
@@ -192,6 +197,829 @@ pub fn export_glb(
         .map_err(|e| Report::new(ExportError::Io(e.to_string())))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Map scene: format-agnostic intermediate representation
+// ---------------------------------------------------------------------------
+
+/// World-space bounds for a map, derived from space.settings chunk coordinates.
+#[derive(Debug, Clone)]
+pub struct SpaceBounds {
+    /// Minimum world X (chunk min × 100).
+    pub min_x: f32,
+    /// Maximum world X ((chunk max + 1) × 100).
+    pub max_x: f32,
+    /// Minimum world Z (chunk min × 100, row axis).
+    pub min_z: f32,
+    /// Maximum world Z ((chunk max + 1) × 100).
+    pub max_z: f32,
+}
+
+/// Configuration for terrain mesh generation.
+pub struct TerrainConfig<'a> {
+    pub terrain: &'a Terrain,
+    pub bounds: &'a SpaceBounds,
+    /// Decimation step: 1 = full res, 4 = default (~858K tris), 8 = coarse.
+    pub step: u32,
+}
+
+/// Configuration for water plane generation.
+pub struct WaterConfig<'a> {
+    pub bounds: &'a SpaceBounds,
+    pub sea_level: f32,
+}
+
+/// All optional map environment layers.
+pub struct MapEnvironment<'a> {
+    pub terrain: Option<TerrainConfig<'a>>,
+    pub water: Option<WaterConfig<'a>>,
+}
+
+/// A decoded mesh primitive (one render set, terrain, or water).
+pub struct MapMesh {
+    /// Human-readable name (e.g. render set name or "Terrain").
+    pub name: String,
+    /// Vertex positions (right-handed: Z negated).
+    pub positions: Vec<[f32; 3]>,
+    /// Vertex normals (same length as positions).
+    pub normals: Vec<[f32; 3]>,
+    /// Vertex UVs (same length as positions, or empty).
+    pub uvs: Vec<[f32; 2]>,
+    /// Triangle indices into the vertex arrays.
+    pub indices: Vec<u32>,
+    /// Albedo texture as PNG bytes, if available.
+    pub albedo_png: Option<Vec<u8>>,
+    /// Base color factor (used when no texture). RGBA linear.
+    pub base_color: [f32; 4],
+    /// Alpha blending mode: false = opaque, true = blend.
+    pub alpha_blend: bool,
+}
+
+/// A positioned model instance in the map.
+pub struct MapModelInstance {
+    /// Range of indices into [`MapScene::model_meshes`] for this model's primitives.
+    pub mesh_range: std::ops::Range<usize>,
+    /// Column-major 4×4 world transform (right-handed, Z negated).
+    pub transform: [f32; 16],
+}
+
+/// Complete decoded map scene, format-agnostic.
+///
+/// All geometry is decoded and textures are loaded. This struct can be consumed
+/// by a GLB exporter, an egui renderer, or any other visualization backend.
+pub struct MapScene {
+    /// Unique mesh primitives for instanced models (render sets, grouped per model).
+    pub model_meshes: Vec<MapMesh>,
+    /// Positioned model instances referencing `model_meshes` by range.
+    pub model_instances: Vec<MapModelInstance>,
+    /// Terrain mesh, if generated.
+    pub terrain: Option<MapMesh>,
+    /// Water plane mesh, if generated.
+    pub water: Option<MapMesh>,
+    /// World-space bounds of the map.
+    pub bounds: SpaceBounds,
+}
+
+/// Build a complete map scene from parsed data.
+///
+/// Decodes all model geometry, loads textures on demand, generates terrain mesh
+/// and water plane as configured. The returned [`MapScene`] is format-agnostic
+/// and can be serialized to GLB via [`export_map_scene_glb`] or consumed
+/// directly by a renderer.
+pub fn build_map_scene(
+    merged: &MergedModels,
+    geometry: &MergedGeometry,
+    space: Option<&SpaceInstances>,
+    db: Option<&PrototypeDatabase<'_>>,
+    lod: usize,
+    vfs: Option<&vfs::VfsPath>,
+    env: &MapEnvironment<'_>,
+    bounds: SpaceBounds,
+) -> Result<MapScene, Report<ExportError>> {
+    let self_id_index = db.map(|db| db.build_self_id_index());
+
+    // Cache: MFM full path → Option<PNG bytes>
+    let mut texture_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+
+    // Build path_id → model index map for instance lookups.
+    let path_to_model: HashMap<u64, usize> = merged
+        .models
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.path_id, i))
+        .collect();
+
+    // Decode model meshes: one set of MapMesh entries per model prototype.
+    // model_mesh_ranges[i] = range in model_meshes for model index i.
+    let mut model_meshes: Vec<MapMesh> = Vec::new();
+    let mut model_mesh_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for (model_idx, record) in merged.models.iter().enumerate() {
+        let vp = &record.visual_proto;
+        let range_start = model_meshes.len();
+
+        if vp.lods.is_empty() || lod >= vp.lods.len() {
+            model_mesh_ranges.push(range_start..range_start);
+            continue;
+        }
+
+        let lod_entry = &vp.lods[lod];
+        let primitives = match collect_primitives(
+            vp,
+            geometry,
+            db,
+            self_id_index.as_ref(),
+            lod_entry,
+            false,
+            None,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: model[{model_idx}]: {e}");
+                model_mesh_ranges.push(range_start..range_start);
+                continue;
+            }
+        };
+
+        for prim in primitives {
+            // Load texture on demand via full MFM path.
+            let albedo_png = if let Some(vfs) = vfs
+                && let Some(mfm_path) = &prim.mfm_full_path
+            {
+                texture_cache
+                    .entry(mfm_path.clone())
+                    .or_insert_with(|| {
+                        texture::load_base_albedo_bytes(vfs, mfm_path)
+                            .and_then(|dds_bytes| texture::dds_to_png(&dds_bytes).ok())
+                    })
+                    .clone()
+            } else {
+                None
+            };
+
+            model_meshes.push(MapMesh {
+                name: prim.material_name,
+                positions: prim.positions,
+                normals: prim.normals,
+                uvs: prim.uvs,
+                indices: prim.indices,
+                albedo_png,
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                alpha_blend: false,
+            });
+        }
+
+        model_mesh_ranges.push(range_start..model_meshes.len());
+    }
+
+    // Build model instances from space.bin transforms.
+    let mut model_instances: Vec<MapModelInstance> = Vec::new();
+    if let Some(space) = space {
+        for inst in &space.instances {
+            let Some(&model_idx) = path_to_model.get(&inst.path_id) else {
+                continue;
+            };
+            let range = &model_mesh_ranges[model_idx];
+            if range.is_empty() {
+                continue;
+            }
+
+            model_instances.push(MapModelInstance {
+                mesh_range: range.clone(),
+                transform: inst.transform.0,
+            });
+        }
+    } else {
+        // No space.bin: place each model at origin.
+        for (model_idx, range) in model_mesh_ranges.iter().enumerate() {
+            if range.is_empty() {
+                continue;
+            }
+            let _ = model_idx;
+            model_instances.push(MapModelInstance {
+                mesh_range: range.clone(),
+                transform: [
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+            });
+        }
+    }
+
+    // Generate terrain mesh.
+    let terrain = env.terrain.as_ref().map(generate_terrain_mesh);
+
+    // Generate water plane.
+    let water = env.water.as_ref().map(generate_water_mesh);
+
+    let tex_count = texture_cache.values().filter(|v| v.is_some()).count();
+    let tex_total = texture_cache.len();
+    eprintln!(
+        "Map scene: {} model meshes, {} instances, {tex_count}/{tex_total} textures loaded",
+        model_meshes.len(),
+        model_instances.len(),
+    );
+    if terrain.is_some() {
+        eprintln!("  Terrain mesh generated");
+    }
+    if water.is_some() {
+        eprintln!("  Water plane generated");
+    }
+
+    Ok(MapScene {
+        model_meshes,
+        model_instances,
+        terrain,
+        water,
+        bounds,
+    })
+}
+
+/// Generate a terrain mesh from the heightmap.
+fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
+    let terrain = cfg.terrain;
+    let bounds = cfg.bounds;
+    let step = cfg.step.max(1);
+
+    let src_w = terrain.width as usize;
+    let src_h = terrain.height as usize;
+
+    // Output grid dimensions (decimated).
+    let out_w = (src_w - 1) / step as usize + 1;
+    let out_h = (src_h - 1) / step as usize + 1;
+
+    let world_width = bounds.max_x - bounds.min_x;
+    let world_depth = bounds.max_z - bounds.min_z;
+    let cell_x = world_width / (src_w - 1) as f32;
+    let cell_z = world_depth / (src_h - 1) as f32;
+
+    let vert_count = out_w * out_h;
+    let mut positions = Vec::with_capacity(vert_count);
+    let mut normals = Vec::with_capacity(vert_count);
+    let mut uvs = Vec::with_capacity(vert_count);
+
+    for gy in 0..out_h {
+        let sy = (gy * step as usize).min(src_h - 1);
+        for gx in 0..out_w {
+            let sx = (gx * step as usize).min(src_w - 1);
+
+            let world_x = bounds.min_x + sx as f32 * cell_x;
+            let world_z = bounds.min_z + sy as f32 * cell_z;
+            let height = terrain.heightmap[sy * src_w + sx];
+
+            // Negate Z for right-handed coordinates.
+            positions.push([world_x, height, -world_z]);
+
+            // UV: normalized [0..1].
+            let u = sx as f32 / (src_w - 1) as f32;
+            let v = sy as f32 / (src_h - 1) as f32;
+            uvs.push([u, v]);
+        }
+    }
+
+    // Compute normals via central differences on the heightmap.
+    for gy in 0..out_h {
+        let sy = (gy * step as usize).min(src_h - 1);
+        for gx in 0..out_w {
+            let sx = (gx * step as usize).min(src_w - 1);
+
+            let sx_left = if sx >= step as usize {
+                sx - step as usize
+            } else {
+                0
+            };
+            let sx_right = (sx + step as usize).min(src_w - 1);
+            let sy_up = if sy >= step as usize {
+                sy - step as usize
+            } else {
+                0
+            };
+            let sy_down = (sy + step as usize).min(src_h - 1);
+
+            let h_left = terrain.heightmap[sy * src_w + sx_left];
+            let h_right = terrain.heightmap[sy * src_w + sx_right];
+            let h_up = terrain.heightmap[sy_up * src_w + sx];
+            let h_down = terrain.heightmap[sy_down * src_w + sx];
+
+            let dx = (sx_right - sx_left) as f32 * cell_x;
+            let dz = (sy_down - sy_up) as f32 * cell_z;
+
+            // Normal = cross(tangent_x, tangent_z) — tangent_x = (dx, dh_x, 0),
+            // tangent_z = (0, dh_z, dz). But Z is negated, so adjust.
+            let dh_x = h_right - h_left;
+            let dh_z = h_down - h_up;
+
+            // In right-handed (Z negated): tangent_x = (dx, dh_x, 0),
+            // tangent_z = (0, dh_z, -dz). Normal = cross(tangent_x, tangent_z).
+            let nx = -dh_x * (-dz);
+            let ny = dx * (-dz);
+            let nz = -dx * dh_z; // == -(dx * dh_z - 0)
+            // Simplify: nx = dh_x * dz, ny = dx * dz, nz = -dx * dh_z
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-10 {
+                normals.push([nx / len, ny / len, nz / len]);
+            } else {
+                normals.push([0.0, 1.0, 0.0]);
+            }
+        }
+    }
+
+    // Generate triangle indices.
+    let tri_count = (out_w - 1) * (out_h - 1) * 2;
+    let mut indices = Vec::with_capacity(tri_count * 3);
+
+    for gy in 0..(out_h - 1) {
+        for gx in 0..(out_w - 1) {
+            let tl = (gy * out_w + gx) as u32;
+            let tr = tl + 1;
+            let bl = ((gy + 1) * out_w + gx) as u32;
+            let br = bl + 1;
+
+            // Two triangles per cell. Winding for right-handed (CCW front).
+            indices.push(tl);
+            indices.push(bl);
+            indices.push(tr);
+
+            indices.push(tr);
+            indices.push(bl);
+            indices.push(br);
+        }
+    }
+
+    eprintln!(
+        "  Terrain: {}×{} grid (step {}), {} vertices, {} triangles",
+        out_w,
+        out_h,
+        step,
+        positions.len(),
+        indices.len() / 3,
+    );
+
+    MapMesh {
+        name: "Terrain".to_string(),
+        positions,
+        normals,
+        uvs,
+        indices,
+        albedo_png: None,
+        base_color: [0.3, 0.35, 0.25, 1.0],
+        alpha_blend: false,
+    }
+}
+
+/// Generate a water plane quad.
+fn generate_water_mesh(cfg: &WaterConfig<'_>) -> MapMesh {
+    let bounds = cfg.bounds;
+    let y = cfg.sea_level;
+
+    // Four corners of the water plane, Z negated for right-handed.
+    let positions = vec![
+        [bounds.min_x, y, -bounds.min_z],
+        [bounds.max_x, y, -bounds.min_z],
+        [bounds.max_x, y, -bounds.max_z],
+        [bounds.min_x, y, -bounds.max_z],
+    ];
+    let normals = vec![[0.0, 1.0, 0.0]; 4];
+    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+    // Two triangles (CCW winding for right-handed).
+    let indices = vec![0, 3, 1, 1, 3, 2];
+
+    MapMesh {
+        name: "Water".to_string(),
+        positions,
+        normals,
+        uvs,
+        indices,
+        albedo_png: None,
+        base_color: [0.1, 0.3, 0.5, 0.6],
+        alpha_blend: true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GLB serialization for MapScene
+// ---------------------------------------------------------------------------
+
+/// Serialize a [`MapScene`] to GLB format.
+pub fn export_map_scene_glb(
+    scene: &MapScene,
+    writer: &mut impl Write,
+) -> Result<(), Report<ExportError>> {
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("wowsunpack".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bin_data: Vec<u8> = Vec::new();
+
+    // Material cache: mesh index → glTF material index.
+    let mut mat_cache: HashMap<usize, json::Index<json::Material>> = HashMap::new();
+
+    // glTF mesh cache: mesh index → glTF Mesh index.
+    let mut gltf_mesh_cache: HashMap<usize, json::Index<json::Mesh>> = HashMap::new();
+
+    let mut scene_nodes: Vec<json::Index<json::Node>> = Vec::new();
+
+    // Helper: create or get a glTF Mesh for a MapMesh by index.
+    let get_or_create_mesh = |mesh_idx: usize,
+                              mesh: &MapMesh,
+                              root: &mut json::Root,
+                              bin_data: &mut Vec<u8>,
+                              mat_cache: &mut HashMap<usize, json::Index<json::Material>>,
+                              gltf_mesh_cache: &mut HashMap<usize, json::Index<json::Mesh>>|
+     -> json::Index<json::Mesh> {
+        if let Some(&cached) = gltf_mesh_cache.get(&mesh_idx) {
+            return cached;
+        }
+
+        let prim = build_map_mesh_primitive(root, bin_data, mesh, mesh_idx, mat_cache);
+        let gltf_mesh = root.push(json::Mesh {
+            primitives: vec![prim],
+            weights: None,
+            name: Some(mesh.name.clone()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        gltf_mesh_cache.insert(mesh_idx, gltf_mesh);
+        gltf_mesh
+    };
+
+    // Export model instances.
+    for (i, inst) in scene.model_instances.iter().enumerate() {
+        // Collect glTF meshes for this instance's model.
+        let mut instance_meshes = Vec::new();
+        for mesh_idx in inst.mesh_range.clone() {
+            let mesh = &scene.model_meshes[mesh_idx];
+            let gltf_mesh = get_or_create_mesh(
+                mesh_idx,
+                mesh,
+                &mut root,
+                &mut bin_data,
+                &mut mat_cache,
+                &mut gltf_mesh_cache,
+            );
+            instance_meshes.push(gltf_mesh);
+        }
+
+        if instance_meshes.is_empty() {
+            continue;
+        }
+
+        // If the model has a single mesh, create one node with the transform.
+        // If multiple, create a parent node with children.
+        if instance_meshes.len() == 1 {
+            let node = root.push(json::Node {
+                mesh: Some(instance_meshes[0]),
+                name: Some(format!("Instance_{i}")),
+                matrix: Some(inst.transform),
+                ..Default::default()
+            });
+            scene_nodes.push(node);
+        } else {
+            let children: Vec<json::Index<json::Node>> = instance_meshes
+                .iter()
+                .enumerate()
+                .map(|(j, &mesh)| {
+                    root.push(json::Node {
+                        mesh: Some(mesh),
+                        name: Some(format!("Instance_{i}_part_{j}")),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            let parent = root.push(json::Node {
+                children: Some(children),
+                name: Some(format!("Instance_{i}")),
+                matrix: Some(inst.transform),
+                ..Default::default()
+            });
+            scene_nodes.push(parent);
+        }
+    }
+
+    // Export terrain mesh.
+    if let Some(terrain) = &scene.terrain {
+        let mesh_idx = scene.model_meshes.len(); // unique index beyond model meshes
+        let prim =
+            build_map_mesh_primitive(&mut root, &mut bin_data, terrain, mesh_idx, &mut mat_cache);
+        let gltf_mesh = root.push(json::Mesh {
+            primitives: vec![prim],
+            weights: None,
+            name: Some("Terrain".to_string()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        let node = root.push(json::Node {
+            mesh: Some(gltf_mesh),
+            name: Some("Terrain".to_string()),
+            ..Default::default()
+        });
+        scene_nodes.push(node);
+    }
+
+    // Export water plane.
+    if let Some(water) = &scene.water {
+        let mesh_idx = scene.model_meshes.len() + 1;
+        let prim =
+            build_map_mesh_primitive(&mut root, &mut bin_data, water, mesh_idx, &mut mat_cache);
+        let gltf_mesh = root.push(json::Mesh {
+            primitives: vec![prim],
+            weights: None,
+            name: Some("Water".to_string()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        let node = root.push(json::Node {
+            mesh: Some(gltf_mesh),
+            name: Some("Water".to_string()),
+            ..Default::default()
+        });
+        scene_nodes.push(node);
+    }
+
+    // Finalize GLB.
+    while !bin_data.len().is_multiple_of(4) {
+        bin_data.push(0);
+    }
+
+    if !bin_data.is_empty() {
+        let buffer = root.push(json::Buffer {
+            byte_length: USize64::from(bin_data.len()),
+            uri: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        for bv in root.buffer_views.iter_mut() {
+            bv.buffer = buffer;
+        }
+    }
+
+    let scene = root.push(json::Scene {
+        nodes: scene_nodes,
+        name: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    root.scene = Some(scene);
+
+    let json_string = json::serialize::to_string(&root)
+        .map_err(|e| Report::new(ExportError::Serialize(e.to_string())))?;
+
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: 0,
+        },
+        json: Cow::Owned(json_string.into_bytes()),
+        bin: if bin_data.is_empty() {
+            None
+        } else {
+            Some(Cow::Owned(bin_data))
+        },
+    };
+
+    glb.to_writer(writer)
+        .map_err(|e| Report::new(ExportError::Io(e.to_string())))?;
+
+    Ok(())
+}
+
+/// Build a single glTF primitive from a [`MapMesh`].
+fn build_map_mesh_primitive(
+    root: &mut json::Root,
+    bin_data: &mut Vec<u8>,
+    mesh: &MapMesh,
+    mesh_idx: usize,
+    mat_cache: &mut HashMap<usize, json::Index<json::Material>>,
+) -> json::mesh::Primitive {
+    let mut attributes = BTreeMap::new();
+
+    // --- Positions ---
+    let pos_accessor = if !mesh.positions.is_empty() {
+        let (min, max) = bounding_coords(&mesh.positions);
+        let byte_offset = bin_data.len();
+        for pos in &mesh.positions {
+            bin_data.extend_from_slice(&pos[0].to_le_bytes());
+            bin_data.extend_from_slice(&pos[1].to_le_bytes());
+            bin_data.extend_from_slice(&pos[2].to_le_bytes());
+        }
+        pad_to_4(bin_data);
+        let byte_length = bin_data.len() - byte_offset;
+
+        let bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(byte_length),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        Some(root.push(json::Accessor {
+            buffer_view: Some(bv),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(mesh.positions.len()),
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::F32,
+            )),
+            type_: Valid(json::accessor::Type::Vec3),
+            min: Some(json::Value::from(min.to_vec())),
+            max: Some(json::Value::from(max.to_vec())),
+            name: None,
+            normalized: false,
+            sparse: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        }))
+    } else {
+        None
+    };
+
+    // --- Normals ---
+    let norm_accessor = if !mesh.normals.is_empty() {
+        let byte_offset = bin_data.len();
+        for n in &mesh.normals {
+            bin_data.extend_from_slice(&n[0].to_le_bytes());
+            bin_data.extend_from_slice(&n[1].to_le_bytes());
+            bin_data.extend_from_slice(&n[2].to_le_bytes());
+        }
+        pad_to_4(bin_data);
+        let byte_length = bin_data.len() - byte_offset;
+
+        let bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(byte_length),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        Some(root.push(json::Accessor {
+            buffer_view: Some(bv),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(mesh.normals.len()),
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::F32,
+            )),
+            type_: Valid(json::accessor::Type::Vec3),
+            min: None,
+            max: None,
+            name: None,
+            normalized: false,
+            sparse: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        }))
+    } else {
+        None
+    };
+
+    // --- UVs ---
+    let uv_accessor = if !mesh.uvs.is_empty() {
+        let byte_offset = bin_data.len();
+        for uv in &mesh.uvs {
+            bin_data.extend_from_slice(&uv[0].to_le_bytes());
+            bin_data.extend_from_slice(&uv[1].to_le_bytes());
+        }
+        pad_to_4(bin_data);
+        let byte_length = bin_data.len() - byte_offset;
+
+        let bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(byte_length),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        Some(root.push(json::Accessor {
+            buffer_view: Some(bv),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(mesh.uvs.len()),
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::F32,
+            )),
+            type_: Valid(json::accessor::Type::Vec2),
+            min: None,
+            max: None,
+            name: None,
+            normalized: false,
+            sparse: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        }))
+    } else {
+        None
+    };
+
+    // --- Indices ---
+    let indices_accessor = if !mesh.indices.is_empty() {
+        let byte_offset = bin_data.len();
+        for &idx in &mesh.indices {
+            bin_data.extend_from_slice(&idx.to_le_bytes());
+        }
+        pad_to_4(bin_data);
+        let byte_length = bin_data.len() - byte_offset;
+
+        let bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(byte_length),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: Some(Valid(json::buffer::Target::ElementArrayBuffer)),
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        Some(root.push(json::Accessor {
+            buffer_view: Some(bv),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(mesh.indices.len()),
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::U32,
+            )),
+            type_: Valid(json::accessor::Type::Scalar),
+            min: None,
+            max: None,
+            name: None,
+            normalized: false,
+            sparse: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        }))
+    } else {
+        None
+    };
+
+    // Build attribute map.
+    if let Some(pos) = pos_accessor {
+        attributes.insert(Valid(json::mesh::Semantic::Positions), pos);
+    }
+    if let Some(norm) = norm_accessor {
+        attributes.insert(Valid(json::mesh::Semantic::Normals), norm);
+    }
+    if let Some(uv) = uv_accessor {
+        attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), uv);
+    }
+
+    // Material: reuse or create.
+    let material = *mat_cache.entry(mesh_idx).or_insert_with(|| {
+        if let Some(png_bytes) = &mesh.albedo_png {
+            create_textured_material(
+                root,
+                bin_data,
+                png_bytes,
+                &mesh.name,
+                Some(mesh.name.clone()),
+                None,
+            )
+        } else if mesh.alpha_blend {
+            root.push(json::Material {
+                name: Some(mesh.name.clone()),
+                pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+                    base_color_factor: json::material::PbrBaseColorFactor(mesh.base_color),
+                    ..Default::default()
+                },
+                alpha_mode: Valid(json::material::AlphaMode::Blend),
+                ..Default::default()
+            })
+        } else {
+            root.push(json::Material {
+                name: Some(mesh.name.clone()),
+                pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+                    base_color_factor: json::material::PbrBaseColorFactor(mesh.base_color),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }
+    });
+
+    json::mesh::Primitive {
+        attributes,
+        indices: indices_accessor,
+        material: Some(material),
+        mode: Valid(json::mesh::Mode::Triangles),
+        targets: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    }
 }
 
 /// Export all models from a `models.bin` + `models.geometry` pair to a single GLB.
@@ -532,6 +1360,7 @@ pub fn export_geometry_raw(
             indices,
             material_name: format!("Primitive_{i}"),
             mfm_stem: None,
+            mfm_full_path: None,
         };
 
         let empty_textures = TextureSet::empty();
@@ -803,21 +1632,21 @@ fn collect_primitives(
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("material_0x{:08X}", rs.material_name_id));
 
-        // Resolve MFM stem for texture lookup (requires db + self_id_index).
-        let mfm_stem = if rs.material_mfm_path_id != 0 {
+        // Resolve MFM stem + full path for texture lookup (requires db + self_id_index).
+        let (mfm_stem, mfm_full_path) = if rs.material_mfm_path_id != 0 {
             self_id_index
                 .and_then(|idx_map| idx_map.get(&rs.material_mfm_path_id))
                 .and_then(|&idx| {
                     db.map(|db| {
-                        db.paths_storage[idx]
-                            .name
-                            .strip_suffix(".mfm")
-                            .unwrap_or(&db.paths_storage[idx].name)
-                            .to_string()
+                        let full_path = db.reconstruct_path(idx, self_id_index.unwrap());
+                        let leaf = &db.paths_storage[idx].name;
+                        let stem = leaf.strip_suffix(".mfm").unwrap_or(leaf).to_string();
+                        (Some(stem), Some(full_path))
                     })
                 })
+                .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
 
         result.push(DecodedPrimitive {
@@ -827,6 +1656,7 @@ fn collect_primitives(
             indices,
             material_name,
             mfm_stem,
+            mfm_full_path,
         });
     }
 

@@ -24,6 +24,7 @@ use wowsunpack::data::{
     serialization,
     wrappers::mmap::MmapPkgSource,
 };
+use wowsunpack::export::gltf_export;
 use wowsunpack::game_params::convert::game_params_to_pickle;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -234,11 +235,12 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Export all models from a space/map to a single GLB file.
-    /// Reads models.geometry and its sibling models.bin for material/LOD info.
+    /// Export a complete map/space to a single GLB file (models, terrain, water).
+    /// Takes a space directory path (e.g. "spaces/16_OC_bees_to_honey") and loads
+    /// models.geometry, models.bin, space.bin, space.settings, and terrain.bin from it.
     ExportMap {
-        /// Path to a models.geometry file (VFS path by default, disk path with --no-vfs)
-        file: PathBuf,
+        /// Path to a space directory (e.g. "spaces/16_OC_bees_to_honey")
+        space_dir: PathBuf,
 
         /// Output file path
         #[arg(short, long, default_value = "output.glb")]
@@ -251,6 +253,22 @@ enum Commands {
         /// Read files from disk instead of VFS
         #[clap(long)]
         no_vfs: bool,
+
+        /// Terrain decimation step (1=full, 4=default, 8=coarse)
+        #[arg(long, default_value = "4")]
+        terrain_step: u32,
+
+        /// Skip terrain mesh generation
+        #[arg(long)]
+        no_terrain: bool,
+
+        /// Skip water plane generation
+        #[arg(long)]
+        no_water: bool,
+
+        /// Skip loading model textures
+        #[arg(long)]
+        no_textures: bool,
     },
     /// Inspect armor model geometry and GameParams thickness data for a ship
     Armor {
@@ -1038,12 +1056,26 @@ fn run() -> Result<(), Report> {
             )?;
         }
         Commands::ExportMap {
-            file,
+            space_dir,
             output,
             lod,
             no_vfs,
+            terrain_step,
+            no_terrain,
+            no_water,
+            no_textures,
         } => {
-            run_export_map(&file, &output, lod, no_vfs, vfs.as_ref())?;
+            run_export_map(
+                &space_dir,
+                &output,
+                lod,
+                no_vfs,
+                vfs.as_ref(),
+                terrain_step,
+                no_terrain,
+                no_water,
+                no_textures,
+            )?;
         }
         Commands::Armor { name, hull } => {
             let Some(vfs) = &vfs else {
@@ -1543,24 +1575,74 @@ fn run_export_model(
     Ok(())
 }
 
+/// Parse space.settings XML to extract world-space bounds.
+///
+/// The `<bounds>` element has chunk coordinates (100m per chunk). We convert to
+/// world units: `min * 100`, `(max + 1) * 100`.
+fn parse_space_bounds(xml: &str) -> Option<gltf_export::SpaceBounds> {
+    // Simple string-based extraction — the XML is ~500 bytes.
+    // Attributes may be on separate lines with tabs/spaces.
+    let bounds_start = xml.find("<bounds")?;
+    let bounds_end = xml[bounds_start..].find("/>")? + bounds_start + 2;
+    let tag = &xml[bounds_start..bounds_end];
+
+    let attr = |name: &str| -> Option<f32> {
+        let prefix = format!("{name}=\"");
+        let start = tag.find(&prefix)? + prefix.len();
+        let end = tag[start..].find('"')? + start;
+        tag[start..end].parse().ok()
+    };
+
+    let min_x = attr("minX")?;
+    let max_x = attr("maxX")?;
+    let min_y = attr("minY")?; // row axis → world Z
+    let max_y = attr("maxY")?;
+
+    Some(gltf_export::SpaceBounds {
+        min_x: min_x * 100.0,
+        max_x: (max_x + 1.0) * 100.0,
+        min_z: min_y * 100.0,
+        max_z: (max_y + 1.0) * 100.0,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_export_map(
-    file: &Path,
+    space_dir: &Path,
     output: &Path,
     lod: usize,
     no_vfs: bool,
     vfs: Option<&VfsPath>,
+    terrain_step: u32,
+    no_terrain: bool,
+    no_water: bool,
+    no_textures: bool,
 ) -> Result<(), Report> {
     use wowsunpack::export::gltf_export;
     use wowsunpack::models::assets_bin;
     use wowsunpack::models::geometry;
     use wowsunpack::models::merged_models;
+    use wowsunpack::models::terrain;
+
+    /// Join a directory path with a filename, handling both VFS and disk paths.
+    fn space_file(dir: &Path, name: &str, no_vfs: bool) -> PathBuf {
+        if no_vfs {
+            dir.join(name)
+        } else {
+            let s = dir.to_string_lossy().replace('\\', "/");
+            PathBuf::from(format!("{s}/{name}"))
+        }
+    }
+
+    let dir_str = space_dir.to_string_lossy();
+    println!("Space: {dir_str}");
 
     // 1. Load models.geometry.
-    let geom_data = read_file_data(file, no_vfs, vfs)?;
+    let geom_path = space_file(space_dir, "models.geometry", no_vfs);
+    let geom_data =
+        read_file_data(&geom_path, no_vfs, vfs).context("Failed to load models.geometry")?;
     let geom = geometry::parse_geometry(&geom_data).context("Failed to parse geometry")?;
 
-    let file_str = file.to_string_lossy();
-    println!("Geometry: {file_str}");
     println!(
         "  {} vertex buffers, {} index buffers, {} vertices mappings, {} indices mappings",
         geom.merged_vertices.len(),
@@ -1569,70 +1651,27 @@ fn run_export_map(
         geom.indices_mapping.len(),
     );
 
-    // 2. Load sibling models.bin.
-    let models_bin_path = if no_vfs {
-        PathBuf::from(file).with_file_name("models.bin")
-    } else {
-        // VFS: replace filename in the path string.
-        let vfs_str = file_str.replace('\\', "/");
-        let parent = vfs_str.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-        if parent.is_empty() {
-            PathBuf::from("models.bin")
-        } else {
-            PathBuf::from(format!("{parent}/models.bin"))
-        }
-    };
-
-    let models_bin_data = match read_file_data(&models_bin_path, no_vfs, vfs) {
-        Ok(data) => data,
-        Err(e) => {
-            if no_vfs {
-                eprintln!(
-                    "Warning: could not load models.bin at '{}': {e}",
-                    models_bin_path.display()
-                );
-                eprintln!("Falling back to raw geometry export.");
-                let mut out_file =
-                    std::fs::File::create(output).context("Failed to create output file")?;
-                gltf_export::export_geometry_raw(&geom, &mut out_file)
-                    .context("Failed to export raw geometry GLB")?;
-                let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
-                println!("Exported to {} ({} bytes)", output.display(), file_size);
-                return Ok(());
-            }
-            bail!(
-                "Failed to load models.bin at '{}': {e}",
-                models_bin_path.display()
-            );
-        }
-    };
+    // 2. Load models.bin.
+    let models_bin_path = space_file(space_dir, "models.bin", no_vfs);
+    let models_bin_data =
+        read_file_data(&models_bin_path, no_vfs, vfs).context("Failed to load models.bin")?;
 
     let merged = merged_models::parse_merged_models(&models_bin_data)
         .context("Failed to parse models.bin")?;
 
     println!(
-        "Models: {} records, {} skeletons",
+        "  {} model prototypes, {} skeletons",
         merged.models.len(),
         merged.skeletons.len()
     );
 
-    // 3. Load sibling space.bin for instance transforms.
-    let space_bin_path = if no_vfs {
-        PathBuf::from(file).with_file_name("space.bin")
-    } else {
-        let vfs_str = file_str.replace('\\', "/");
-        let parent = vfs_str.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-        if parent.is_empty() {
-            PathBuf::from("space.bin")
-        } else {
-            PathBuf::from(format!("{parent}/space.bin"))
-        }
-    };
+    // 3. Load space.bin for instance transforms.
+    let space_bin_path = space_file(space_dir, "space.bin", no_vfs);
 
     let space = match read_file_data(&space_bin_path, no_vfs, vfs) {
         Ok(data) => match merged_models::parse_space_instances(&data) {
             Ok(s) => {
-                println!("Space: {} instances", s.instances.len());
+                println!("  {} instances", s.instances.len());
                 Some(s)
             }
             Err(e) => {
@@ -1673,17 +1712,108 @@ fn run_export_map(
         .map(assets_bin::parse_assets_bin)
         .transpose()?;
 
-    // 4. Export.
-    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
-    gltf_export::export_merged_models_glb(
+    // 5. Load space.settings for world bounds.
+    let bounds = {
+        let settings_path = space_file(space_dir, "space.settings", no_vfs);
+        match read_file_data(&settings_path, no_vfs, vfs) {
+            Ok(data) => {
+                let xml = String::from_utf8_lossy(&data);
+                match parse_space_bounds(&xml) {
+                    Some(b) => {
+                        println!(
+                            "Space bounds: X [{}, {}], Z [{}, {}]",
+                            b.min_x, b.max_x, b.min_z, b.max_z
+                        );
+                        b
+                    }
+                    None => {
+                        eprintln!(
+                            "Warning: could not parse bounds from space.settings; using defaults."
+                        );
+                        gltf_export::SpaceBounds {
+                            min_x: -1000.0,
+                            max_x: 1000.0,
+                            min_z: -1000.0,
+                            max_z: 1000.0,
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("Warning: space.settings not found; using default bounds.");
+                gltf_export::SpaceBounds {
+                    min_x: -1000.0,
+                    max_x: 1000.0,
+                    min_z: -1000.0,
+                    max_z: 1000.0,
+                }
+            }
+        }
+    };
+
+    // 6. Load terrain.bin if terrain is enabled.
+    let terrain_data = if !no_terrain {
+        let terrain_path = space_file(space_dir, "terrain.bin", no_vfs);
+        match read_file_data(&terrain_path, no_vfs, vfs) {
+            Ok(data) => match terrain::parse_terrain(&data) {
+                Ok(t) => {
+                    println!(
+                        "Terrain: {}×{} heightmap ({} tiles, tile_size={})",
+                        t.width, t.height, t.tiles_per_axis, t.tile_size
+                    );
+                    Some(t)
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not parse terrain.bin: {e}");
+                    None
+                }
+            },
+            Err(_) => {
+                eprintln!("Warning: terrain.bin not found; skipping terrain mesh.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 7. Build map environment config.
+    let terrain_cfg = terrain_data.as_ref().map(|t| gltf_export::TerrainConfig {
+        terrain: t,
+        bounds: &bounds,
+        step: terrain_step,
+    });
+    let water_cfg = if !no_water {
+        Some(gltf_export::WaterConfig {
+            bounds: &bounds,
+            sea_level: 0.0,
+        })
+    } else {
+        None
+    };
+    let env = gltf_export::MapEnvironment {
+        terrain: terrain_cfg,
+        water: water_cfg,
+    };
+
+    // 8. Build the format-agnostic MapScene.
+    let vfs_for_textures = if no_textures { None } else { vfs };
+    let scene = gltf_export::build_map_scene(
         &merged,
         &geom,
         space.as_ref(),
         db.as_ref(),
         lod,
-        &mut out_file,
+        vfs_for_textures,
+        &env,
+        bounds.clone(),
     )
-    .context("Failed to export merged models GLB")?;
+    .context("Failed to build map scene")?;
+
+    // 9. Export to GLB.
+    let mut out_file = std::fs::File::create(output).context("Failed to create output file")?;
+    gltf_export::export_map_scene_glb(&scene, &mut out_file)
+        .context("Failed to export map scene GLB")?;
 
     let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     println!("Exported to {} ({} bytes)", output.display(), file_size);
