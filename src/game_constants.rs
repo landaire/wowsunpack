@@ -4,7 +4,8 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 use crate::game_types::{
-    BuoyancyState, CameraMode, CollisionType, Consumable, DeathCause, FinishType, ShellHitType,
+    BuoyancyState, CameraMode, CollisionType, ControlPointType, Consumable, DeathCause, FinishType,
+    InteractiveZoneType, ShellHitType,
     WeaponType,
 };
 
@@ -49,6 +50,8 @@ pub struct BattleConstants {
     depth_states: HashMap<i32, Cow<'static, str>>,
     building_types: HashMap<i32, Cow<'static, str>>,
     torpedo_marker_types: HashMap<i32, Cow<'static, str>>,
+    interactive_zone_types: HashMap<i32, Cow<'static, str>>,
+    control_point_types: HashMap<i32, Cow<'static, str>>,
 }
 
 impl BattleConstants {
@@ -103,6 +106,8 @@ impl BattleConstants {
                 .unwrap_or(defaults.building_types),
             torpedo_marker_types: parse_positional_enum(xml_str, "TORPEDO_MARKER_TYPE")
                 .unwrap_or(defaults.torpedo_marker_types),
+            interactive_zone_types: defaults.interactive_zone_types,
+            control_point_types: defaults.control_point_types,
         }
     }
 
@@ -416,6 +421,28 @@ impl BattleConstants {
                 (3, Cow::Borrowed("MAGNETIC")),
                 (4, Cow::Borrowed("NOT_DANGEROUS")),
             ]),
+            interactive_zone_types: HashMap::from([
+                (0, Cow::Borrowed(InteractiveZoneType::NoType.name())),
+                (1, Cow::Borrowed(InteractiveZoneType::ResourceZone.name())),
+                (2, Cow::Borrowed(InteractiveZoneType::ConvoyZone.name())),
+                (3, Cow::Borrowed(InteractiveZoneType::RepairZone.name())),
+                (4, Cow::Borrowed(InteractiveZoneType::FelZone.name())),
+                (5, Cow::Borrowed(InteractiveZoneType::WeatherZone.name())),
+                (6, Cow::Borrowed(InteractiveZoneType::DropZone.name())),
+                (7, Cow::Borrowed(InteractiveZoneType::ConsumableZone.name())),
+                (8, Cow::Borrowed(InteractiveZoneType::ColoredByRelation.name())),
+                (9, Cow::Borrowed(InteractiveZoneType::ControlPoint.name())),
+                (10, Cow::Borrowed(InteractiveZoneType::RescueZone.name())),
+                (11, Cow::Borrowed(InteractiveZoneType::OrbitalStrikeZone.name())),
+            ]),
+            control_point_types: HashMap::from([
+                (1, Cow::Borrowed(ControlPointType::Control.name())),
+                (2, Cow::Borrowed(ControlPointType::Base.name())),
+                (3, Cow::Borrowed(ControlPointType::MegaBase.name())),
+                (4, Cow::Borrowed(ControlPointType::BuildingCp.name())),
+                (5, Cow::Borrowed(ControlPointType::BaseWithPoints.name())),
+                (6, Cow::Borrowed(ControlPointType::EpicenterCp.name())),
+            ]),
         }
     }
 
@@ -487,6 +514,14 @@ impl BattleConstants {
         self.torpedo_marker_types.get(&id).map(|s| s.as_ref())
     }
 
+    pub fn interactive_zone_type(&self, id: i32) -> Option<&str> {
+        self.interactive_zone_types.get(&id).map(|s| s.as_ref())
+    }
+
+    pub fn control_point_type(&self, id: i32) -> Option<&str> {
+        self.control_point_types.get(&id).map(|s| s.as_ref())
+    }
+
     pub fn camera_modes_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
         &mut self.camera_modes
     }
@@ -555,6 +590,14 @@ impl BattleConstants {
         &mut self.torpedo_marker_types
     }
 
+    pub fn interactive_zone_types_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
+        &mut self.interactive_zone_types
+    }
+
+    pub fn control_point_types_mut(&mut self) -> &mut HashMap<i32, Cow<'static, str>> {
+        &mut self.control_point_types
+    }
+
     pub fn camera_modes(&self) -> &HashMap<i32, Cow<'static, str>> {
         &self.camera_modes
     }
@@ -621,6 +664,14 @@ impl BattleConstants {
 
     pub fn torpedo_marker_types(&self) -> &HashMap<i32, Cow<'static, str>> {
         &self.torpedo_marker_types
+    }
+
+    pub fn interactive_zone_types(&self) -> &HashMap<i32, Cow<'static, str>> {
+        &self.interactive_zone_types
+    }
+
+    pub fn control_point_types(&self) -> &HashMap<i32, Cow<'static, str>> {
+        &self.control_point_types
     }
 }
 

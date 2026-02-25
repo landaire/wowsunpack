@@ -1740,3 +1740,141 @@ impl fmt::Display for ShellHitType {
         f.write_str(self.name())
     }
 }
+
+/// InteractiveZone entity type.
+///
+/// From `BattleLogicComponentsConstants.InteractiveZoneTypes`, generated via
+/// `idGenerator()` (0-based sequential).
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum InteractiveZoneType {
+    NoType,
+    ResourceZone,
+    ConvoyZone,
+    RepairZone,
+    FelZone,
+    WeatherZone,
+    DropZone,
+    ConsumableZone,
+    ColoredByRelation,
+    ControlPoint,
+    RescueZone,
+    OrbitalStrikeZone,
+}
+
+impl InteractiveZoneType {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .interactive_zone_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
+        match name {
+            "noType" => Recognized::Known(Self::NoType),
+            "resourceZone" => Recognized::Known(Self::ResourceZone),
+            "convoyZone" => Recognized::Known(Self::ConvoyZone),
+            "repairZone" => Recognized::Known(Self::RepairZone),
+            "felZone" => Recognized::Known(Self::FelZone),
+            "weatherZone" => Recognized::Known(Self::WeatherZone),
+            "dropZone" => Recognized::Known(Self::DropZone),
+            "consumableZone" => Recognized::Known(Self::ConsumableZone),
+            "coloredByRelation" => Recognized::Known(Self::ColoredByRelation),
+            "controlPoint" => Recognized::Known(Self::ControlPoint),
+            "rescue_zone" => Recognized::Known(Self::RescueZone),
+            "orbital_strike_zone" => Recognized::Known(Self::OrbitalStrikeZone),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::NoType => "noType",
+            Self::ResourceZone => "resourceZone",
+            Self::ConvoyZone => "convoyZone",
+            Self::RepairZone => "repairZone",
+            Self::FelZone => "felZone",
+            Self::WeatherZone => "weatherZone",
+            Self::DropZone => "dropZone",
+            Self::ConsumableZone => "consumableZone",
+            Self::ColoredByRelation => "coloredByRelation",
+            Self::ControlPoint => "controlPoint",
+            Self::RescueZone => "rescue_zone",
+            Self::OrbitalStrikeZone => "orbital_strike_zone",
+        }
+    }
+}
+
+impl fmt::Display for InteractiveZoneType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Control point sub-type within an InteractiveZone.
+///
+/// From `CapturePointConstants.CONTROL_POINT_TYPE` (in `ma7c29490.pyc`),
+/// generated via `idGenerator(start=1)`.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum ControlPointType {
+    Control,
+    Base,
+    MegaBase,
+    BuildingCp,
+    BaseWithPoints,
+    EpicenterCp,
+}
+
+impl ControlPointType {
+    pub fn from_id(
+        id: i32,
+        constants: &BattleConstants,
+        version: Version,
+    ) -> Option<Recognized<Self>> {
+        constants
+            .control_point_type(id)
+            .map(|name| Self::from_name(name, version))
+    }
+
+    pub fn from_name(name: &str, _version: Version) -> Recognized<Self> {
+        match name {
+            "Control" => Recognized::Known(Self::Control),
+            "Base" => Recognized::Known(Self::Base),
+            "MegaBase" => Recognized::Known(Self::MegaBase),
+            "BuildingCP" => Recognized::Known(Self::BuildingCp),
+            "BaseWithPoints" => Recognized::Known(Self::BaseWithPoints),
+            "EpicenterCP" => Recognized::Known(Self::EpicenterCp),
+            other => Recognized::Unknown(other.to_string()),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Control => "Control",
+            Self::Base => "Base",
+            Self::MegaBase => "MegaBase",
+            Self::BuildingCp => "BuildingCP",
+            Self::BaseWithPoints => "BaseWithPoints",
+            Self::EpicenterCp => "EpicenterCP",
+        }
+    }
+}
+
+impl fmt::Display for ControlPointType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
