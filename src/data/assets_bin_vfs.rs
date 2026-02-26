@@ -61,15 +61,26 @@ fn subslice_offset(parent: &[u8], child: &[u8]) -> usize {
 }
 
 /// Register a file path's directory ancestors in the directory map.
+///
+/// Paths use `/`-prefixed format (e.g. `/content/foo.visual`), root = `"/"`.
 fn register_path_in_dirs(path: &str, dirs: &mut HashMap<String, BTreeSet<String>>) {
     let mut current = path.to_string();
     loop {
-        let (parent, child_name) = match current.rfind('/') {
-            Some(pos) => (current[..pos].to_string(), current[pos + 1..].to_string()),
-            None => (String::new(), current.clone()),
+        let mut parent = match current.rfind('/') {
+            Some(pos) => current[..pos].to_string(),
+            None => break,
         };
-        dirs.entry(parent.clone()).or_default().insert(child_name);
+
         if parent.is_empty() {
+            parent = "/".to_string();
+        }
+
+        let child_name = &current[current.rfind('/').unwrap() + 1..];
+        dirs.entry(parent.clone())
+            .or_default()
+            .insert(child_name.to_string());
+
+        if parent == "/" {
             break;
         }
         current = parent;
@@ -97,7 +108,7 @@ impl AssetsBinVfs {
         let mut dir_children: HashMap<String, BTreeSet<String>> = HashMap::new();
 
         // Ensure root directory exists.
-        dir_children.entry(String::new()).or_default();
+        dir_children.entry("/".to_string()).or_default();
 
         // Register all paths that have prototype data as files.
         for (i, entry) in db.paths_storage.iter().enumerate() {
@@ -111,8 +122,8 @@ impl AssetsBinVfs {
                 continue;
             }
 
-            let full_path = db.reconstruct_path(i, &self_id_index);
-            if full_path.is_empty() {
+            let raw_path = db.reconstruct_path(i, &self_id_index);
+            if raw_path.is_empty() {
                 continue;
             }
 
@@ -128,6 +139,7 @@ impl AssetsBinVfs {
                 continue;
             }
 
+            let full_path = format!("/{raw_path}");
             files.insert(
                 full_path.clone(),
                 FileLocation {
@@ -147,8 +159,9 @@ impl AssetsBinVfs {
             if db.lookup_r2p(entry.self_id).is_some() {
                 continue;
             }
-            let full_path = db.reconstruct_path(i, &self_id_index);
-            if !full_path.is_empty() {
+            let raw_path = db.reconstruct_path(i, &self_id_index);
+            if !raw_path.is_empty() {
+                let full_path = format!("/{raw_path}");
                 register_path_in_dirs(&full_path, &mut dir_children);
             }
         }
@@ -184,27 +197,18 @@ impl AssetsBinVfs {
     }
 }
 
-fn normalize_path(path: &str) -> &str {
-    path.trim_start_matches('/')
+fn lookup_key(path: &str) -> &str {
+    if path.is_empty() { "/" } else { path }
 }
 
 impl FileSystem for AssetsBinVfs {
     fn read_dir(&self, path: &str) -> vfs::VfsResult<Box<dyn Iterator<Item = String> + Send>> {
-        let path = normalize_path(path);
+        let key = lookup_key(path);
         let children = self
             .dirs
-            .get(path)
+            .get(key)
             .ok_or_else(|| vfs::VfsError::from(VfsErrorKind::FileNotFound))?;
-        let prefix = if path.is_empty() {
-            String::new()
-        } else {
-            format!("/{path}")
-        };
-        let items: Vec<String> = children
-            .iter()
-            .map(|name| format!("{prefix}/{name}"))
-            .collect();
-        Ok(Box::new(items.into_iter()))
+        Ok(Box::new(children.clone().into_iter()))
     }
 
     fn create_dir(&self, _path: &str) -> vfs::VfsResult<()> {
@@ -212,10 +216,10 @@ impl FileSystem for AssetsBinVfs {
     }
 
     fn open_file(&self, path: &str) -> vfs::VfsResult<Box<dyn vfs::SeekAndRead + Send>> {
-        let path = normalize_path(path);
+        let key = lookup_key(path);
         let loc = self
             .files
-            .get(path)
+            .get(key)
             .ok_or_else(|| vfs::VfsError::from(VfsErrorKind::FileNotFound))?;
         let data = self.data[loc.byte_offset..loc.byte_end].to_vec();
         Ok(Box::new(Cursor::new(data)))
@@ -230,8 +234,8 @@ impl FileSystem for AssetsBinVfs {
     }
 
     fn metadata(&self, path: &str) -> vfs::VfsResult<VfsMetadata> {
-        let path = normalize_path(path);
-        if let Some(loc) = self.files.get(path) {
+        let key = lookup_key(path);
+        if let Some(loc) = self.files.get(key) {
             Ok(VfsMetadata {
                 file_type: vfs::VfsFileType::File,
                 len: (loc.byte_end - loc.byte_offset) as u64,
@@ -239,7 +243,7 @@ impl FileSystem for AssetsBinVfs {
                 modified: None,
                 accessed: None,
             })
-        } else if self.dirs.contains_key(path) {
+        } else if self.dirs.contains_key(key) {
             Ok(VfsMetadata {
                 file_type: vfs::VfsFileType::Directory,
                 len: 0,
@@ -253,8 +257,8 @@ impl FileSystem for AssetsBinVfs {
     }
 
     fn exists(&self, path: &str) -> vfs::VfsResult<bool> {
-        let path = normalize_path(path);
-        Ok(self.files.contains_key(path) || self.dirs.contains_key(path))
+        let key = lookup_key(path);
+        Ok(self.files.contains_key(key) || self.dirs.contains_key(key))
     }
 
     fn remove_file(&self, _path: &str) -> vfs::VfsResult<()> {

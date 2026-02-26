@@ -165,7 +165,7 @@ pub fn achievement_icon_path(icon_key: &str) -> String {
 }
 
 /// Directory path for ribbon icons.
-pub const RIBBON_ICONS_DIR: &str = "gui/ribbons/";
+pub const RIBBON_ICONS_DIR: &str = "gui/ribbons";
 
 /// Directory path for sub-ribbon icons.
-pub const RIBBON_SUBICONS_DIR: &str = "gui/ribbons/subribbons/";
+pub const RIBBON_SUBICONS_DIR: &str = "gui/ribbons/subribbons";

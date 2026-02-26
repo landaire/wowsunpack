@@ -4,7 +4,7 @@ use pickled::HashableValue;
 use serde::Serialize;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::{BufWriter, Read, Write, stdout},
     path::{Path, PathBuf},
@@ -372,13 +372,13 @@ fn read_file_data(path: &Path, no_vfs: bool, vfs: Option<&VfsPath>) -> Result<Ve
 /// Add entries from an AssetsBinVfs to the IDX file tree so list/extract can see them.
 fn add_vfs_entries_to_file_tree(
     assets_vfs: &AssetsBinVfs,
-    file_tree: &mut BTreeMap<String, VfsEntry>,
+    file_tree: &mut HashMap<String, VfsEntry>,
 ) -> HashSet<String> {
     let mut assets_bin_paths = HashSet::new();
 
-    // Add directory entries (skip empty root).
+    // Add directory entries (skip root "/").
     for dir_path in assets_vfs.dirs() {
-        if !dir_path.is_empty() {
+        if dir_path != "/" {
             let path = dir_path.to_string();
             assets_bin_paths.insert(path.clone());
             file_tree.entry(path).or_insert(VfsEntry::Directory);
@@ -428,7 +428,7 @@ fn run() -> Result<(), Report> {
     // Try to set up VFS from game directory / idx files. This is best-effort:
     // if no game dir is provided and no idx files exist, vfs will be None.
     let mut vfs: Option<VfsPath> = None;
-    let mut file_tree = BTreeMap::new();
+    let mut file_tree = HashMap::new();
     let mut assets_bin_paths = HashSet::new();
 
     if args.idx_files.is_empty() {

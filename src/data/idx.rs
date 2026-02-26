@@ -7,10 +7,11 @@
 //! - A file info table (compression, offset, size metadata)
 //! - A volumes table (which `.pkg` file contains the data)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 
 use thiserror::Error;
+use tracing::warn;
 use winnow::Parser;
 use winnow::binary::{le_u32, le_u64};
 
@@ -301,14 +302,17 @@ pub enum VfsEntry {
 
 /// Build a flat path → entry map from parsed IDX files.
 ///
-/// Returns a `BTreeMap` mapping full paths (using `/` separators, no leading slash)
+/// Returns a `HashMap` mapping full paths (using `/` separators, no leading slash)
 /// to their VFS entries. Directory entries are inferred from the parent-child
 /// relationships and do not have file info.
-pub fn build_file_tree(idx_files: &[IdxFile]) -> BTreeMap<String, VfsEntry> {
+pub fn build_file_tree(idx_files: &[IdxFile]) -> HashMap<String, VfsEntry> {
+    let count = idx_files
+        .iter()
+        .fold(0, |acc, file| acc + file.resources.len());
     // Create lookup tables across all IDX files
-    let mut packed_resources = BTreeMap::new();
-    let mut file_infos = BTreeMap::new();
-    let mut volumes = BTreeMap::new();
+    let mut packed_resources = HashMap::with_capacity(count);
+    let mut file_infos = HashMap::with_capacity(count);
+    let mut volumes = HashMap::with_capacity(count);
 
     for idx_file in idx_files {
         for resource in &idx_file.resources {
@@ -318,19 +322,21 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> BTreeMap<String, VfsEntry> {
             file_infos.insert(file_info.resource_id, file_info.clone());
         }
         for volume in &idx_file.volumes {
-            volumes.insert(volume.volume_id, volume.clone());
+            if volumes.insert(volume.volume_id, volume.clone()).is_some() {
+                warn!("duplicate volume ID?");
+            }
         }
     }
 
-    let mut entries = BTreeMap::<String, VfsEntry>::new();
+    let mut entries = HashMap::<String, VfsEntry>::with_capacity(count);
     // Cache: resource_id → full path
-    let mut path_cache = BTreeMap::<u64, String>::new();
+    let mut path_cache = HashMap::<u64, String>::with_capacity(count);
 
     // Resolve the full path for a resource by walking the parent chain
     fn resolve_path(
         id: u64,
-        packed_resources: &BTreeMap<u64, PackedFileMetadata>,
-        path_cache: &mut BTreeMap<u64, String>,
+        packed_resources: &HashMap<u64, PackedFileMetadata>,
+        path_cache: &mut HashMap<u64, String>,
     ) -> String {
         if let Some(cached) = path_cache.get(&id) {
             return cached.clone();
@@ -341,10 +347,16 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> BTreeMap<String, VfsEntry> {
             .expect("failed to find packed resource");
 
         let path = if resource.parent_id == ROOT_PARENT_ID {
-            resource.filename.clone()
+            format!("/{}", &resource.filename)
         } else {
-            let parent_path = resolve_path(resource.parent_id, packed_resources, path_cache);
-            format!("{}/{}", parent_path, resource.filename)
+            let mut parent_path = resolve_path(resource.parent_id, packed_resources, path_cache);
+            parent_path.reserve(1 + resource.filename.len());
+            if resource.parent_id != ROOT_PARENT_ID {
+                parent_path.push('/');
+            }
+            parent_path.push_str(resource.filename.as_str());
+
+            parent_path
         };
 
         path_cache.insert(id, path.clone());
@@ -368,14 +380,17 @@ pub fn build_file_tree(idx_files: &[IdxFile]) -> BTreeMap<String, VfsEntry> {
 
     // Ensure parent directories exist in the map
     let paths: Vec<String> = entries.keys().cloned().collect();
+    let mut current = String::new();
     for path in &paths {
-        let mut current = String::new();
+        current.clear();
         let parts: Vec<&str> = path.split('/').collect();
+
         // All parts except the last are directories
         for part in &parts[..parts.len().saturating_sub(1)] {
-            if !current.is_empty() {
+            if current != "/" {
                 current.push('/');
             }
+
             current.push_str(part);
             entries
                 .entry(current.clone())

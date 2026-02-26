@@ -75,9 +75,10 @@ impl<T> IdxVfs<T> {
 
     /// Look up an entry by path.
     pub fn entry_at(&self, path: &str) -> vfs::VfsResult<&VfsEntryMeta> {
-        let lookup = normalize_path(path);
+        let lookup_key = if path.is_empty() { "/" } else { path };
+
         self.entries
-            .get(lookup.as_str())
+            .get(lookup_key)
             .ok_or_else(|| VfsError::from(VfsErrorKind::FileNotFound))
     }
 
@@ -92,16 +93,10 @@ impl<T> IdxVfs<T> {
     }
 }
 
-/// Normalize a VFS path: strip leading `/`, use empty string for root.
-fn normalize_path(path: &str) -> String {
-    let trimmed = path.trim_start_matches('/');
-    trimmed.to_string()
-}
-
 /// Convert the flat `BTreeMap<String, VfsEntry>` from `build_file_tree` into
 /// a `HashMap<String, VfsEntryMeta>` with directory children populated.
-fn build_vfs_entries(tree: &BTreeMap<String, VfsEntry>) -> HashMap<String, VfsEntryMeta> {
-    let mut entries = HashMap::new();
+fn build_vfs_entries(tree: &HashMap<String, VfsEntry>) -> HashMap<String, VfsEntryMeta> {
+    let mut entries = HashMap::with_capacity(tree.len());
 
     // First pass: add all entries
     for (path, entry) in tree {
@@ -118,6 +113,7 @@ fn build_vfs_entries(tree: &BTreeMap<String, VfsEntry>) -> HashMap<String, VfsEn
                 children: Vec::new(),
             },
         };
+
         entries.insert(path.clone(), meta);
     }
 
@@ -125,13 +121,15 @@ fn build_vfs_entries(tree: &BTreeMap<String, VfsEntry>) -> HashMap<String, VfsEn
     // Collect all paths first to avoid borrow issues
     let all_paths: Vec<String> = entries.keys().cloned().collect();
     for path in &all_paths {
-        if path.is_empty() {
-            continue;
-        }
-        let parent_path = match path.rfind('/') {
+        let mut parent_path = match path.rfind('/') {
             Some(pos) => &path[..pos],
-            None => "", // top-level entry, parent is root
+            None => "/", // top-level entry, parent is root
         };
+
+        if parent_path.is_empty() {
+            parent_path = "/";
+        }
+
         let child_name = match path.rfind('/') {
             Some(pos) => &path[pos + 1..],
             None => path.as_str(),
@@ -144,6 +142,11 @@ fn build_vfs_entries(tree: &BTreeMap<String, VfsEntry>) -> HashMap<String, VfsEn
                 .or_insert_with(|| VfsEntryMeta::Directory {
                     children: Vec::new(),
                 });
+
+        if child_name.is_empty() {
+            continue;
+        }
+
         if let VfsEntryMeta::Directory { children } = parent {
             children.push(child_name.to_string());
         }
@@ -169,20 +172,7 @@ where
     fn read_dir(&self, path: &str) -> vfs::VfsResult<Box<dyn Iterator<Item = String> + Send>> {
         let entry = self.entry_at(path)?;
         match entry {
-            VfsEntryMeta::Directory { children } => {
-                let prefix = normalize_path(path);
-                let items: Vec<String> = children
-                    .iter()
-                    .map(|name| {
-                        if prefix.is_empty() {
-                            format!("/{name}")
-                        } else {
-                            format!("/{prefix}/{name}")
-                        }
-                    })
-                    .collect();
-                Ok(Box::new(items.into_iter()))
-            }
+            VfsEntryMeta::Directory { children } => Ok(Box::new(children.clone().into_iter())),
             VfsEntryMeta::File(_) => Err(VfsError::from(VfsErrorKind::Other(
                 "not a directory".into(),
             ))),
@@ -309,18 +299,7 @@ mod async_impl {
             let entry = self.entry_at(path)?;
             match entry {
                 VfsEntryMeta::Directory { children } => {
-                    let prefix = normalize_path(path);
-                    let items: Vec<String> = children
-                        .iter()
-                        .map(|name| {
-                            if prefix.is_empty() {
-                                format!("/{name}")
-                            } else {
-                                format!("/{prefix}/{name}")
-                            }
-                        })
-                        .collect();
-                    Ok(Box::new(futures::stream::iter(items)))
+                    Ok(Box::new(futures::stream::iter(children.clone())))
                 }
                 VfsEntryMeta::File(_) => Err(VfsError::from(VfsErrorKind::Other(
                     "not a directory".into(),

@@ -1,5 +1,5 @@
 use crate::data::idx::VfsEntry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -42,7 +42,7 @@ impl SerializedFile {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SerializedFileInfo {}
 
-pub fn tree_to_serialized_files(entries: &BTreeMap<String, VfsEntry>) -> Vec<SerializedFile> {
+pub fn tree_to_serialized_files(entries: &HashMap<String, VfsEntry>) -> Vec<SerializedFile> {
     let mut out = Vec::with_capacity(entries.len());
 
     for (path, entry) in entries {
