@@ -1,8 +1,8 @@
 //! Export ship visual + geometry to glTF/GLB format.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{Read, Write};
 
 use gltf_json as json;
 use json::validation::Checked::Valid;
@@ -14,6 +14,7 @@ use crate::game_params::types::ArmorMap;
 use crate::models::assets_bin::PrototypeDatabase;
 use crate::models::geometry::MergedGeometry;
 use crate::models::merged_models::{MergedModels, SpaceInstances};
+use crate::models::speedtree::SpeedTreeMesh;
 use crate::models::terrain::Terrain;
 use crate::models::vertex_format::{self, AttributeSemantic, VertexFormat};
 use crate::models::visual::VisualPrototype;
@@ -222,6 +223,11 @@ pub struct TerrainConfig<'a> {
     pub bounds: &'a SpaceBounds,
     /// Decimation step: 1 = full res, 4 = default (~858K tris), 8 = coarse.
     pub step: u32,
+    /// Sea level height. Terrain vertices below this are clamped; fully
+    /// submerged cells are culled to avoid ugly seabed through translucent water.
+    pub sea_level: f32,
+    /// VFS path to the lightmap shadow DDS, if available (e.g. from space.ubersettings).
+    pub lightmap_path: Option<String>,
 }
 
 /// Configuration for water plane generation.
@@ -254,6 +260,8 @@ pub struct MapMesh {
     pub base_color: [f32; 4],
     /// Alpha blending mode: false = opaque, true = blend.
     pub alpha_blend: bool,
+    /// Alpha cutoff for mask mode (e.g. `Some(0.5)` for leaf transparency).
+    pub alpha_cutoff: Option<f32>,
 }
 
 /// A positioned model instance in the map.
@@ -281,6 +289,22 @@ pub struct MapScene {
     pub water: Option<MapMesh>,
     /// World-space bounds of the map.
     pub bounds: SpaceBounds,
+    /// GPU-instanced vegetation: `(mesh_idx, positions)` per species.
+    /// Exported as `EXT_mesh_gpu_instancing` nodes (one node per species).
+    pub vegetation_instances: Vec<(usize, Vec<[f32; 3]>)>,
+}
+
+/// A single SpeedTree species with its mesh and optional albedo texture.
+pub struct VegetationSpecies {
+    pub mesh: SpeedTreeMesh,
+    pub albedo_png: Option<Vec<u8>>,
+}
+
+/// Vegetation data: species meshes + positioned instances.
+pub struct VegetationData {
+    pub species: Vec<VegetationSpecies>,
+    /// `(species_index, world_position [x, y, z])` per instance.
+    pub instances: Vec<(usize, [f32; 3])>,
 }
 
 /// Build a complete map scene from parsed data.
@@ -299,6 +323,8 @@ pub fn build_map_scene(
     env: &MapEnvironment<'_>,
     bounds: SpaceBounds,
     max_texture_size: Option<u32>,
+    vegetation: Option<&VegetationData>,
+    vegetation_density: f32,
 ) -> Result<MapScene, Report<ExportError>> {
     let self_id_index = db.map(|db| db.build_self_id_index());
 
@@ -376,6 +402,7 @@ pub fn build_map_scene(
                 albedo_texture,
                 base_color: [1.0, 1.0, 1.0, 1.0],
                 alpha_blend: false,
+                alpha_cutoff: None,
             });
         }
 
@@ -384,6 +411,7 @@ pub fn build_map_scene(
 
     // Build model instances from space.bin transforms.
     let mut model_instances: Vec<MapModelInstance> = Vec::new();
+    let mut vegetation_instances: Vec<(usize, Vec<[f32; 3]>)> = Vec::new();
     if let Some(space) = space {
         for inst in &space.instances {
             let Some(&model_idx) = path_to_model.get(&inst.path_id) else {
@@ -415,11 +443,125 @@ pub fn build_map_scene(
         }
     }
 
-    // Generate terrain mesh.
-    let terrain = env.terrain.as_ref().map(generate_terrain_mesh);
+    // Generate terrain mesh, optionally with lightmap texture.
+    let terrain = env.terrain.as_ref().map(|cfg| {
+        let mut mesh = generate_terrain_mesh(cfg);
+
+        // Try to load the lightmap shadow DDS as terrain albedo.
+        if let Some(vfs) = vfs
+            && let Some(lm_path) = &cfg.lightmap_path
+        {
+            let dds_bytes: Option<Vec<u8>> = (|| {
+                let mut buf = Vec::new();
+                vfs.join(lm_path)
+                    .ok()?
+                    .open_file()
+                    .ok()?
+                    .read_to_end(&mut buf)
+                    .ok()?;
+                if buf.is_empty() { None } else { Some(buf) }
+            })();
+            match dds_bytes {
+                Some(dds_bytes) => {
+                    match texture::dds_to_png_resized(&dds_bytes, max_texture_size) {
+                        Ok(png_bytes) => {
+                            let idx = textures.len();
+                            textures.push(png_bytes);
+                            mesh.albedo_texture = Some(idx);
+                            mesh.base_color = [1.0, 1.0, 1.0, 1.0];
+                            eprintln!("  Terrain lightmap loaded: {lm_path}");
+                        }
+                        Err(e) => eprintln!("  Warning: failed to decode terrain lightmap: {e}"),
+                    }
+                }
+                None => eprintln!("  Warning: terrain lightmap not found: {lm_path}"),
+            }
+        }
+
+        mesh
+    });
 
     // Generate water plane.
     let water = env.water.as_ref().map(generate_water_mesh);
+
+    // Add vegetation meshes and instances.
+    if let Some(veg) = vegetation {
+        // Map species index → mesh range in model_meshes.
+        let mut species_mesh_ranges: Vec<Option<usize>> = Vec::new();
+
+        for (sp_idx, species) in veg.species.iter().enumerate() {
+            if species.mesh.positions.is_empty() || species.mesh.indices.is_empty() {
+                species_mesh_ranges.push(None);
+                continue;
+            }
+
+            let albedo_texture = species.albedo_png.as_ref().map(|png| {
+                let idx = textures.len();
+                textures.push(png.clone());
+                idx
+            });
+
+            let mesh_idx = model_meshes.len();
+            model_meshes.push(MapMesh {
+                name: format!("Vegetation_{sp_idx}"),
+                positions: species.mesh.positions.clone(),
+                normals: species.mesh.normals.clone(),
+                uvs: species.mesh.uvs.clone(),
+                indices: species.mesh.indices.clone(),
+                albedo_texture,
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                alpha_blend: false,
+                alpha_cutoff: Some(0.5),
+            });
+            species_mesh_ranges.push(Some(mesh_idx));
+        }
+
+        // Group instances by species, with optional grid-based decimation.
+        let num_species = veg.species.len();
+        let mut per_species: Vec<Vec<[f32; 3]>> = vec![Vec::new(); num_species];
+        let mut kept = 0usize;
+
+        if vegetation_density > 0.0 {
+            let inv_cell = 1.0 / vegetation_density;
+            let mut occupied: HashSet<(usize, i32, i32)> = HashSet::new();
+            for &(sp_idx, [x, y, z]) in &veg.instances {
+                if species_mesh_ranges.get(sp_idx).and_then(|v| *v).is_none() {
+                    continue;
+                }
+                let cx = (x * inv_cell).floor() as i32;
+                let cz = (z * inv_cell).floor() as i32;
+                if !occupied.insert((sp_idx, cx, cz)) {
+                    continue;
+                }
+                per_species[sp_idx].push([x, y, -z]);
+                kept += 1;
+            }
+        } else {
+            for &(sp_idx, [x, y, z]) in &veg.instances {
+                if species_mesh_ranges.get(sp_idx).and_then(|v| *v).is_none() {
+                    continue;
+                }
+                per_species[sp_idx].push([x, y, -z]);
+                kept += 1;
+            }
+        }
+
+        // Collect into vegetation_instances (mesh_idx, positions) per species.
+        for (sp_idx, positions) in per_species.into_iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            if let Some(Some(mesh_idx)) = species_mesh_ranges.get(sp_idx) {
+                vegetation_instances.push((*mesh_idx, positions));
+            }
+        }
+
+        eprintln!(
+            "  Vegetation: {} species, {} instances (kept {kept}, cell {vegetation_density}m)",
+            veg.species.len(),
+            veg.instances.len(),
+        );
+    }
 
     let tex_tried = texture_cache.len();
     let tex_loaded = textures.len();
@@ -442,6 +584,7 @@ pub fn build_map_scene(
         terrain,
         water,
         bounds,
+        vegetation_instances,
     })
 }
 
@@ -450,6 +593,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
     let terrain = cfg.terrain;
     let bounds = cfg.bounds;
     let step = cfg.step.max(1);
+    let sea = cfg.sea_level;
 
     let src_w = terrain.width as usize;
     let src_h = terrain.height as usize;
@@ -463,6 +607,21 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
     let cell_x = world_width / (src_w - 1) as f32;
     let cell_z = world_depth / (src_h - 1) as f32;
 
+    // Helper: read height from source heightmap, clamped to sea level.
+    let height_at = |sx: usize, sy: usize| -> f32 { terrain.heightmap[sy * src_w + sx].max(sea) };
+
+    // First pass: determine which output grid vertices are above sea level
+    // (i.e. NOT clamped flat at sea). We only emit triangles where at least
+    // one vertex is above sea level, to cull fully-submerged flat seabed.
+    let mut above_sea = vec![false; out_w * out_h];
+    for gy in 0..out_h {
+        let sy = (gy * step as usize).min(src_h - 1);
+        for gx in 0..out_w {
+            let sx = (gx * step as usize).min(src_w - 1);
+            above_sea[gy * out_w + gx] = terrain.heightmap[sy * src_w + sx] > sea;
+        }
+    }
+
     let vert_count = out_w * out_h;
     let mut positions = Vec::with_capacity(vert_count);
     let mut normals = Vec::with_capacity(vert_count);
@@ -475,7 +634,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
 
             let world_x = bounds.min_x + sx as f32 * cell_x;
             let world_z = bounds.min_z + sy as f32 * cell_z;
-            let height = terrain.heightmap[sy * src_w + sx];
+            let height = height_at(sx, sy);
 
             // Negate Z for right-handed coordinates.
             positions.push([world_x, height, -world_z]);
@@ -487,7 +646,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
         }
     }
 
-    // Compute normals via central differences on the heightmap.
+    // Compute normals via central differences on the clamped heightmap.
     for gy in 0..out_h {
         let sy = (gy * step as usize).min(src_h - 1);
         for gx in 0..out_w {
@@ -506,25 +665,24 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
             };
             let sy_down = (sy + step as usize).min(src_h - 1);
 
-            let h_left = terrain.heightmap[sy * src_w + sx_left];
-            let h_right = terrain.heightmap[sy * src_w + sx_right];
-            let h_up = terrain.heightmap[sy_up * src_w + sx];
-            let h_down = terrain.heightmap[sy_down * src_w + sx];
+            let h_left = height_at(sx_left, sy);
+            let h_right = height_at(sx_right, sy);
+            let h_up = height_at(sx, sy_up);
+            let h_down = height_at(sx, sy_down);
 
             let dx = (sx_right - sx_left) as f32 * cell_x;
             let dz = (sy_down - sy_up) as f32 * cell_z;
 
-            // Normal = cross(tangent_x, tangent_z) — tangent_x = (dx, dh_x, 0),
-            // tangent_z = (0, dh_z, dz). But Z is negated, so adjust.
             let dh_x = h_right - h_left;
             let dh_z = h_down - h_up;
 
-            // In right-handed (Z negated): tangent_x = (dx, dh_x, 0),
-            // tangent_z = (0, dh_z, -dz). Normal = cross(tangent_x, tangent_z).
-            let nx = -dh_x * (-dz);
-            let ny = dx * (-dz);
-            let nz = -dx * dh_z; // == -(dx * dh_z - 0)
-            // Simplify: nx = dh_x * dz, ny = dx * dz, nz = -dx * dh_z
+            // In right-handed coords (Z negated on export):
+            //   tangent_x = (dx, dh_x, 0)
+            //   tangent_z = (0, dh_z, -dz)
+            //   normal = tangent_x × tangent_z = (-dh_x*dz, dx*dz, dx*dh_z)
+            let nx = -dh_x * dz;
+            let ny = dx * dz;
+            let nz = dx * dh_z;
             let len = (nx * nx + ny * ny + nz * nz).sqrt();
             if len > 1e-10 {
                 normals.push([nx / len, ny / len, nz / len]);
@@ -534,16 +692,26 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
         }
     }
 
-    // Generate triangle indices.
-    let tri_count = (out_w - 1) * (out_h - 1) * 2;
-    let mut indices = Vec::with_capacity(tri_count * 3);
+    // Generate triangle indices, culling fully-submerged cells.
+    let mut indices = Vec::new();
 
     for gy in 0..(out_h - 1) {
         for gx in 0..(out_w - 1) {
-            let tl = (gy * out_w + gx) as u32;
-            let tr = tl + 1;
-            let bl = ((gy + 1) * out_w + gx) as u32;
-            let br = bl + 1;
+            let tl_idx = gy * out_w + gx;
+            let tr_idx = tl_idx + 1;
+            let bl_idx = (gy + 1) * out_w + gx;
+            let br_idx = bl_idx + 1;
+
+            // Skip cells where all four corners are at or below sea level.
+            if !above_sea[tl_idx] && !above_sea[tr_idx] && !above_sea[bl_idx] && !above_sea[br_idx]
+            {
+                continue;
+            }
+
+            let tl = tl_idx as u32;
+            let tr = tr_idx as u32;
+            let bl = bl_idx as u32;
+            let br = br_idx as u32;
 
             // Two triangles per cell. Winding for right-handed (CCW front).
             indices.push(tl);
@@ -557,7 +725,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
     }
 
     eprintln!(
-        "  Terrain: {}×{} grid (step {}), {} vertices, {} triangles",
+        "  Terrain: {}×{} grid (step {}), {} vertices, {} triangles (culled submerged)",
         out_w,
         out_h,
         step,
@@ -574,6 +742,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
         albedo_texture: None,
         base_color: [0.3, 0.35, 0.25, 1.0],
         alpha_blend: false,
+        alpha_cutoff: None,
     }
 }
 
@@ -602,8 +771,9 @@ fn generate_water_mesh(cfg: &WaterConfig<'_>) -> MapMesh {
         uvs,
         indices,
         albedo_texture: None,
-        base_color: [0.1, 0.3, 0.5, 0.6],
+        base_color: [0.1, 0.3, 0.5, 0.85],
         alpha_blend: true,
+        alpha_cutoff: None,
     }
 }
 
@@ -664,8 +834,10 @@ pub fn export_map_scene_glb(
 
     // Material cache: (texture_index or None, base_color, alpha_blend) → glTF material.
     // This deduplicates materials that share the same texture + color + blend mode.
-    let mut mat_cache: HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>> =
-        HashMap::new();
+    let mut mat_cache: HashMap<
+        (Option<usize>, [u32; 4], bool, Option<u32>),
+        json::Index<json::Material>,
+    > = HashMap::new();
 
     // glTF mesh cache: mesh index → glTF Mesh index.
     let mut gltf_mesh_cache: HashMap<usize, json::Index<json::Mesh>> = HashMap::new();
@@ -673,24 +845,25 @@ pub fn export_map_scene_glb(
     let mut scene_nodes: Vec<json::Index<json::Node>> = Vec::new();
 
     // Helper closure args collected into a struct to avoid borrowing issues.
-    let build_gltf_mesh =
-        |_mesh_idx: usize,
-         mesh: &MapMesh,
-         root: &mut json::Root,
-         bin_data: &mut Vec<u8>,
-         mat_cache: &mut HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>>,
-         gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>|
-         -> json::Index<json::Mesh> {
-            let prim =
-                build_map_mesh_primitive(root, bin_data, mesh, mat_cache, gltf_texture_cache);
-            root.push(json::Mesh {
-                primitives: vec![prim],
-                weights: None,
-                name: Some(mesh.name.clone()),
-                extensions: Default::default(),
-                extras: Default::default(),
-            })
-        };
+    let build_gltf_mesh = |_mesh_idx: usize,
+                           mesh: &MapMesh,
+                           root: &mut json::Root,
+                           bin_data: &mut Vec<u8>,
+                           mat_cache: &mut HashMap<
+        (Option<usize>, [u32; 4], bool, Option<u32>),
+        json::Index<json::Material>,
+    >,
+                           gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>|
+     -> json::Index<json::Mesh> {
+        let prim = build_map_mesh_primitive(root, bin_data, mesh, mat_cache, gltf_texture_cache);
+        root.push(json::Mesh {
+            primitives: vec![prim],
+            weights: None,
+            name: Some(mesh.name.clone()),
+            extensions: Default::default(),
+            extras: Default::default(),
+        })
+    };
 
     // Export model instances.
     for (i, inst) in scene.model_instances.iter().enumerate() {
@@ -799,6 +972,35 @@ pub fn export_map_scene_glb(
         scene_nodes.push(node);
     }
 
+    // Export vegetation instances (one node per instance, sharing cached meshes).
+    for (mesh_idx, positions) in &scene.vegetation_instances {
+        let gltf_mesh = if let Some(&cached) = gltf_mesh_cache.get(mesh_idx) {
+            cached
+        } else {
+            let mesh = &scene.model_meshes[*mesh_idx];
+            let m = build_gltf_mesh(
+                *mesh_idx,
+                mesh,
+                &mut root,
+                &mut bin_data,
+                &mut mat_cache,
+                &gltf_texture_cache,
+            );
+            gltf_mesh_cache.insert(*mesh_idx, m);
+            m
+        };
+
+        for (i, pos) in positions.iter().enumerate() {
+            let node = root.push(json::Node {
+                mesh: Some(gltf_mesh),
+                name: Some(format!("Tree_{mesh_idx}_{i}")),
+                translation: Some(*pos),
+                ..Default::default()
+            });
+            scene_nodes.push(node);
+        }
+    }
+
     // Finalize GLB.
     while !bin_data.len().is_multiple_of(4) {
         bin_data.push(0);
@@ -853,7 +1055,10 @@ fn build_map_mesh_primitive(
     root: &mut json::Root,
     bin_data: &mut Vec<u8>,
     mesh: &MapMesh,
-    mat_cache: &mut HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>>,
+    mat_cache: &mut HashMap<
+        (Option<usize>, [u32; 4], bool, Option<u32>),
+        json::Index<json::Material>,
+    >,
     gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>,
 ) -> json::mesh::Primitive {
     let mut attributes = BTreeMap::new();
@@ -1035,16 +1240,27 @@ fn build_map_mesh_primitive(
         attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), uv);
     }
 
-    // Material: deduplicate by (texture index, base color, alpha blend).
+    // Material: deduplicate by (texture index, base color, alpha blend, alpha cutoff).
     // Encode base_color as [u32; 4] for HashMap key (f32 isn't Hash).
     let color_key = mesh.base_color.map(|c| c.to_bits());
-    let mat_key = (mesh.albedo_texture, color_key, mesh.alpha_blend);
+    let cutoff_key = mesh.alpha_cutoff.map(|c| c.to_bits());
+    let mat_key = (mesh.albedo_texture, color_key, mesh.alpha_blend, cutoff_key);
 
     let material = *mat_cache.entry(mat_key).or_insert_with(|| {
         if let Some(tex_idx) = mesh.albedo_texture
             && let Some(&gltf_tex) = gltf_texture_cache.get(&tex_idx)
         {
             // Textured material: reference the shared glTF Texture.
+            let (alpha_mode, alpha_cutoff_val, double_sided) =
+                if let Some(cutoff) = mesh.alpha_cutoff {
+                    (
+                        Valid(json::material::AlphaMode::Mask),
+                        Some(json::material::AlphaCutoff(cutoff)),
+                        true,
+                    )
+                } else {
+                    (Valid(json::material::AlphaMode::Opaque), None, false)
+                };
             root.push(json::Material {
                 name: Some(mesh.name.clone()),
                 pbr_metallic_roughness: json::material::PbrMetallicRoughness {
@@ -1057,6 +1273,9 @@ fn build_map_mesh_primitive(
                     base_color_factor: json::material::PbrBaseColorFactor([1.0, 1.0, 1.0, 1.0]),
                     ..Default::default()
                 },
+                alpha_mode,
+                alpha_cutoff: alpha_cutoff_val,
+                double_sided,
                 ..Default::default()
             })
         } else if mesh.alpha_blend {

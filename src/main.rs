@@ -266,6 +266,15 @@ enum Commands {
         #[arg(long)]
         no_water: bool,
 
+        /// Skip vegetation (trees/bushes from forest.bin)
+        #[arg(long)]
+        no_vegetation: bool,
+
+        /// Vegetation grid cell size in meters for decimation. One tree per species
+        /// per cell is kept. Larger values = fewer trees. 0 = no decimation.
+        #[arg(long, default_value = "20")]
+        vegetation_density: f32,
+
         /// Skip loading model textures
         #[arg(long)]
         no_textures: bool,
@@ -1068,6 +1077,8 @@ fn run() -> Result<(), Report> {
             terrain_step,
             no_terrain,
             no_water,
+            no_vegetation,
+            vegetation_density,
             no_textures,
             max_texture_size,
         } => {
@@ -1080,6 +1091,8 @@ fn run() -> Result<(), Report> {
                 terrain_step,
                 no_terrain,
                 no_water,
+                no_vegetation,
+                vegetation_density,
                 no_textures,
                 max_texture_size,
             )?;
@@ -1587,18 +1600,10 @@ fn run_export_model(
 /// The `<bounds>` element has chunk coordinates (100m per chunk). We convert to
 /// world units: `min * 100`, `(max + 1) * 100`.
 fn parse_space_bounds(xml: &str) -> Option<gltf_export::SpaceBounds> {
-    // Simple string-based extraction — the XML is ~500 bytes.
-    // Attributes may be on separate lines with tabs/spaces.
-    let bounds_start = xml.find("<bounds")?;
-    let bounds_end = xml[bounds_start..].find("/>")? + bounds_start + 2;
-    let tag = &xml[bounds_start..bounds_end];
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let bounds = doc.descendants().find(|n| n.has_tag_name("bounds"))?;
 
-    let attr = |name: &str| -> Option<f32> {
-        let prefix = format!("{name}=\"");
-        let start = tag.find(&prefix)? + prefix.len();
-        let end = tag[start..].find('"')? + start;
-        tag[start..end].parse().ok()
-    };
+    let attr = |name: &str| -> Option<f32> { bounds.attribute(name)?.parse().ok() };
 
     let min_x = attr("minX")?;
     let max_x = attr("maxX")?;
@@ -1613,6 +1618,21 @@ fn parse_space_bounds(xml: &str) -> Option<gltf_export::SpaceBounds> {
     })
 }
 
+/// Extract the lightmap shadow DDS path from space.ubersettings XML.
+fn parse_lightmap_path(xml: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let node = doc
+        .descendants()
+        .find(|n| n.has_tag_name("lightMapShadow"))?;
+    let value = node.descendants().find(|n| n.has_tag_name("value"))?;
+    let path = value.text()?.trim();
+    if path.is_empty() || path == "null" {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_export_map(
     space_dir: &Path,
@@ -1623,13 +1643,18 @@ fn run_export_map(
     terrain_step: u32,
     no_terrain: bool,
     no_water: bool,
+    no_vegetation: bool,
+    vegetation_density: f32,
     no_textures: bool,
     max_texture_size: Option<u32>,
 ) -> Result<(), Report> {
     use wowsunpack::export::gltf_export;
+    use wowsunpack::export::texture;
     use wowsunpack::models::assets_bin;
+    use wowsunpack::models::forest;
     use wowsunpack::models::geometry;
     use wowsunpack::models::merged_models;
+    use wowsunpack::models::speedtree;
     use wowsunpack::models::terrain;
 
     /// Join a directory path with a filename, handling both VFS and disk paths.
@@ -1759,7 +1784,21 @@ fn run_export_map(
         }
     };
 
-    // 6. Load terrain.bin if terrain is enabled.
+    // 6. Load space.ubersettings for terrain lightmap path.
+    let lightmap_path = if !no_textures && !no_terrain {
+        let uber_path = space_file(space_dir, "space.ubersettings", no_vfs);
+        match read_file_data(&uber_path, no_vfs, vfs) {
+            Ok(data) => {
+                let xml = String::from_utf8_lossy(&data);
+                parse_lightmap_path(&xml)
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // 7. Load terrain.bin if terrain is enabled.
     let terrain_data = if !no_terrain {
         let terrain_path = space_file(space_dir, "terrain.bin", no_vfs);
         match read_file_data(&terrain_path, no_vfs, vfs) {
@@ -1786,15 +1825,18 @@ fn run_export_map(
     };
 
     // 7. Build map environment config.
+    let sea_level = 0.0f32;
     let terrain_cfg = terrain_data.as_ref().map(|t| gltf_export::TerrainConfig {
         terrain: t,
         bounds: &bounds,
         step: terrain_step,
+        sea_level,
+        lightmap_path: lightmap_path.clone(),
     });
     let water_cfg = if !no_water {
         Some(gltf_export::WaterConfig {
             bounds: &bounds,
-            sea_level: 0.0,
+            sea_level,
         })
     } else {
         None
@@ -1804,7 +1846,93 @@ fn run_export_map(
         water: water_cfg,
     };
 
-    // 8. Build the format-agnostic MapScene.
+    // 8. Load vegetation from forest.bin + stsdk files.
+    let vegetation_data = if !no_vegetation {
+        let forest_path = space_file(space_dir, "forest.bin", no_vfs);
+        match read_file_data(&forest_path, no_vfs, vfs) {
+            Ok(data) => match forest::parse_forest(&data) {
+                Ok(forest_data) => {
+                    println!(
+                        "  Forest: {} species, {} instances",
+                        forest_data.species.len(),
+                        forest_data.instances.len()
+                    );
+
+                    let mut species_list = Vec::new();
+                    for species_path in &forest_data.species {
+                        // Load stsdk file for this species.
+                        let stsdk_result: Option<gltf_export::VegetationSpecies> = (|| {
+                            let stsdk_data =
+                                read_file_data(&PathBuf::from(species_path), no_vfs, vfs).ok()?;
+                            let mesh = speedtree::parse_stsdk(&stsdk_data).ok()?;
+
+                            // Derive albedo texture path: replace .stsdk with _spt_a.dds
+                            let albedo_png = if !no_textures {
+                                let base = species_path.trim_end_matches(".stsdk");
+                                // Try _spt_a.dds first, then _spt_a.dd0
+                                let tex_path = format!("{base}_spt_a.dds");
+                                let tex_data =
+                                    read_file_data(&PathBuf::from(&tex_path), no_vfs, vfs)
+                                        .or_else(|_| {
+                                            let dd0_path = format!("{base}_spt_a.dd0");
+                                            read_file_data(&PathBuf::from(&dd0_path), no_vfs, vfs)
+                                        })
+                                        .ok()?;
+                                texture::dds_to_png_resized(&tex_data, max_texture_size).ok()
+                            } else {
+                                None
+                            };
+
+                            Some(gltf_export::VegetationSpecies { mesh, albedo_png })
+                        })(
+                        );
+
+                        match stsdk_result {
+                            Some(species) => species_list.push(species),
+                            None => {
+                                eprintln!(
+                                    "  Warning: failed to load vegetation species: {species_path}"
+                                );
+                                // Push empty placeholder to keep indices aligned
+                                species_list.push(gltf_export::VegetationSpecies {
+                                    mesh: speedtree::SpeedTreeMesh {
+                                        positions: Vec::new(),
+                                        normals: Vec::new(),
+                                        uvs: Vec::new(),
+                                        indices: Vec::new(),
+                                    },
+                                    albedo_png: None,
+                                });
+                            }
+                        }
+                    }
+
+                    let instances: Vec<(usize, [f32; 3])> = forest_data
+                        .instances
+                        .iter()
+                        .map(|inst| (inst.species_index, [inst.x, inst.y, inst.z]))
+                        .collect();
+
+                    Some(gltf_export::VegetationData {
+                        species: species_list,
+                        instances,
+                    })
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not parse forest.bin: {e}");
+                    None
+                }
+            },
+            Err(_) => {
+                eprintln!("Warning: forest.bin not found; skipping vegetation.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 9. Build the format-agnostic MapScene.
     let vfs_for_textures = if no_textures { None } else { vfs };
     let scene = gltf_export::build_map_scene(
         &merged,
@@ -1816,6 +1944,8 @@ fn run_export_map(
         &env,
         bounds.clone(),
         max_texture_size,
+        vegetation_data.as_ref(),
+        vegetation_density,
     )
     .context("Failed to build map scene")?;
 
