@@ -272,16 +272,26 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
         .rsplit_once('/')
         .map(|(parent, _)| format!("{parent}/textures"));
 
+    // Albedo suffix priority: `_a` (standard PBS), `_od` (TILEDLAND overlay diffuse).
+    let albedo_suffixes = ["_a", "_od"];
+
+    // Search directories: textures/ sibling, MFM's dir, and TILED/ subdirectory
+    // (underwater TILEDLAND materials store textures in a TILED/ subdirectory).
+    let tiled_subdir = format!("{dir}/TILED");
+
     for base in texture_base_names(stem) {
         // Build candidate paths: prefer dd0 (high-res) over dds (low-res mip tail).
-        // Search textures/ sibling first, then fall back to MFM's own directory.
         let mut candidates = Vec::new();
-        if let Some(tex_dir) = &tex_sibling_dir {
-            candidates.push(format!("{tex_dir}/{base}_a.dd0"));
-            candidates.push(format!("{tex_dir}/{base}_a.dds"));
+        for suffix in &albedo_suffixes {
+            if let Some(tex_dir) = &tex_sibling_dir {
+                candidates.push(format!("{tex_dir}/{base}{suffix}.dd0"));
+                candidates.push(format!("{tex_dir}/{base}{suffix}.dds"));
+            }
+            candidates.push(format!("{dir}/{base}{suffix}.dd0"));
+            candidates.push(format!("{dir}/{base}{suffix}.dds"));
+            candidates.push(format!("{tiled_subdir}/{base}{suffix}.dd0"));
+            candidates.push(format!("{tiled_subdir}/{base}{suffix}.dds"));
         }
-        candidates.push(format!("{dir}/{base}_a.dd0"));
-        candidates.push(format!("{dir}/{base}_a.dds"));
 
         for path in &candidates {
             if let Ok(vfs_path) = vfs.join(path)

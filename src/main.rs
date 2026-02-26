@@ -141,6 +141,10 @@ enum Commands {
     },
     /// Grep files for the given regex. Only prints a binary match.
     Grep {
+        /// Only search files from assets.bin (not idx/pkg)
+        #[clap(long)]
+        assets: bool,
+
         /// Path filter
         #[clap(long)]
         path: Option<String>,
@@ -824,7 +828,11 @@ fn run() -> Result<(), Report> {
                 }
             }
         }
-        Commands::Grep { pattern, path } => {
+        Commands::Grep {
+            assets,
+            pattern,
+            path,
+        } => {
             let Some(vfs) = &vfs else {
                 bail!("Package file loader is unavailable. Check that the pkg_dir exists.");
             };
@@ -834,7 +842,16 @@ fn run() -> Result<(), Report> {
             let glob =
                 path.map(|glob| glob::Pattern::new(glob.as_str()).expect("invalid glob pattern"));
 
-            let files: Vec<(&String, &VfsEntry)> = file_tree.iter().collect();
+            let files: Vec<(&String, &VfsEntry)> = file_tree
+                .iter()
+                .filter(|(path, _)| {
+                    if assets {
+                        assets_bin_paths.contains(path.as_str())
+                    } else {
+                        true
+                    }
+                })
+                .collect();
 
             let buffer = ThreadLocal::<RefCell<Vec<u8>>>::new();
 
