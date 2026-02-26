@@ -65,17 +65,13 @@ fn subslice_offset(parent: &[u8], child: &[u8]) -> usize {
 /// Paths use `/`-prefixed format (e.g. `/content/foo.visual`), root = `"/"`.
 fn register_path_in_dirs(path: &str, dirs: &mut HashMap<String, BTreeSet<String>>) {
     let mut current = path.to_string();
-    loop {
-        let mut parent = match current.rfind('/') {
-            Some(pos) => current[..pos].to_string(),
-            None => break,
-        };
-
+    while let Some(pos) = current.rfind('/') {
+        let child_name = &current[pos + 1..];
+        let mut parent = current[..pos].to_string();
         if parent.is_empty() {
             parent = "/".to_string();
         }
 
-        let child_name = &current[current.rfind('/').unwrap() + 1..];
         dirs.entry(parent.clone())
             .or_default()
             .insert(child_name.to_string());

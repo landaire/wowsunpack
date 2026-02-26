@@ -31,9 +31,9 @@ pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
                 .file_name()
                 .to_str()
                 .and_then(|name| name.parse::<u32>().ok())
-            {
-                builds.push(build_num);
-            }
+        {
+            builds.push(build_num);
+        }
     }
     builds.sort();
     Ok(builds)
@@ -176,12 +176,11 @@ pub fn build_game_vfs(game_dir: &Path) -> Result<VfsPath, Report> {
         })
         .is_ok();
 
-    if assets_loaded
-        && let Ok(assets_vfs) = AssetsBinVfs::new(assets_bin_data) {
-            let assets_layer = VfsPath::new(assets_vfs);
-            let overlay = OverlayFS::new(&[assets_layer, pkg_vfs]);
-            return Ok(VfsPath::new(overlay));
-        }
+    if assets_loaded && let Ok(assets_vfs) = AssetsBinVfs::new(assets_bin_data) {
+        let assets_layer = VfsPath::new(assets_vfs);
+        let overlay = OverlayFS::new(&[assets_layer, pkg_vfs]);
+        return Ok(VfsPath::new(overlay));
+    }
 
     Ok(pkg_vfs)
 }

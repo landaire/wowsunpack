@@ -1378,7 +1378,6 @@ impl BuoyancyState {
     }
 }
 
-
 impl fmt::Display for BuoyancyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.description())
@@ -1444,7 +1443,6 @@ impl WeaponType {
         }
     }
 }
-
 
 impl fmt::Display for WeaponType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1523,7 +1521,6 @@ impl BatteryState {
         }
     }
 }
-
 
 impl fmt::Display for BatteryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

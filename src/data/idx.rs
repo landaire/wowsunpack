@@ -7,7 +7,7 @@
 //! - A file info table (compression, offset, size metadata)
 //! - A volumes table (which `.pkg` file contains the data)
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io;
 
 use thiserror::Error;

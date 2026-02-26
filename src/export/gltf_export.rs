@@ -294,6 +294,20 @@ pub struct MapScene {
     pub vegetation_instances: Vec<(usize, Vec<[f32; 3]>)>,
 }
 
+/// Cache key for deduplicating map materials by visual parameters.
+///
+/// Float fields are stored as `f32::to_bits()` so the key is `Hash + Eq`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MapMaterialKey {
+    albedo_texture: Option<usize>,
+    base_color_bits: [u32; 4],
+    alpha_blend: bool,
+    alpha_cutoff_bits: Option<u32>,
+}
+
+/// Material cache mapping unique material parameters to their glTF index.
+type MapMaterialCache = HashMap<MapMaterialKey, json::Index<json::Material>>;
+
 /// A single SpeedTree species with its mesh and optional albedo texture.
 pub struct VegetationSpecies {
     pub mesh: SpeedTreeMesh,
@@ -313,19 +327,35 @@ pub struct VegetationData {
 /// and water plane as configured. The returned [`MapScene`] is format-agnostic
 /// and can be serialized to GLB via [`export_map_scene_glb`] or consumed
 /// directly by a renderer.
-pub fn build_map_scene(
-    merged: &MergedModels,
-    geometry: &MergedGeometry,
-    space: Option<&SpaceInstances>,
-    db: Option<&PrototypeDatabase<'_>>,
-    lod: usize,
-    vfs: Option<&vfs::VfsPath>,
-    env: &MapEnvironment<'_>,
-    bounds: SpaceBounds,
-    max_texture_size: Option<u32>,
-    vegetation: Option<&VegetationData>,
-    vegetation_density: f32,
-) -> Result<MapScene, Report<ExportError>> {
+/// Parameters for [`build_map_scene`].
+pub struct BuildMapSceneParams<'a> {
+    pub merged: &'a MergedModels,
+    pub geometry: &'a MergedGeometry<'a>,
+    pub space: Option<&'a SpaceInstances>,
+    pub db: Option<&'a PrototypeDatabase<'a>>,
+    pub lod: usize,
+    pub vfs: Option<&'a vfs::VfsPath>,
+    pub env: &'a MapEnvironment<'a>,
+    pub bounds: SpaceBounds,
+    pub max_texture_size: Option<u32>,
+    pub vegetation: Option<&'a VegetationData>,
+    pub vegetation_density: f32,
+}
+
+pub fn build_map_scene(params: &BuildMapSceneParams<'_>) -> Result<MapScene, Report<ExportError>> {
+    let BuildMapSceneParams {
+        merged,
+        geometry,
+        space,
+        db,
+        lod,
+        vfs,
+        env,
+        ref bounds,
+        max_texture_size,
+        vegetation,
+        vegetation_density,
+    } = *params;
     let self_id_index = db.map(|db| db.build_self_id_index());
 
     // Shared texture storage: each unique texture is stored once.
@@ -583,7 +613,7 @@ pub fn build_map_scene(
         textures,
         terrain,
         water,
-        bounds,
+        bounds: bounds.clone(),
         vegetation_instances,
     })
 }
@@ -652,17 +682,9 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
         for gx in 0..out_w {
             let sx = (gx * step as usize).min(src_w - 1);
 
-            let sx_left = if sx >= step as usize {
-                sx - step as usize
-            } else {
-                0
-            };
+            let sx_left = sx.saturating_sub(step as usize);
             let sx_right = (sx + step as usize).min(src_w - 1);
-            let sy_up = if sy >= step as usize {
-                sy - step as usize
-            } else {
-                0
-            };
+            let sy_up = sy.saturating_sub(step as usize);
             let sy_down = (sy + step as usize).min(src_h - 1);
 
             let h_left = height_at(sx_left, sy);
@@ -834,10 +856,7 @@ pub fn export_map_scene_glb(
 
     // Material cache: (texture_index or None, base_color, alpha_blend) → glTF material.
     // This deduplicates materials that share the same texture + color + blend mode.
-    let mut mat_cache: HashMap<
-        (Option<usize>, [u32; 4], bool, Option<u32>),
-        json::Index<json::Material>,
-    > = HashMap::new();
+    let mut mat_cache: MapMaterialCache = HashMap::new();
 
     // glTF mesh cache: mesh index → glTF Mesh index.
     let mut gltf_mesh_cache: HashMap<usize, json::Index<json::Mesh>> = HashMap::new();
@@ -849,10 +868,7 @@ pub fn export_map_scene_glb(
                            mesh: &MapMesh,
                            root: &mut json::Root,
                            bin_data: &mut Vec<u8>,
-                           mat_cache: &mut HashMap<
-        (Option<usize>, [u32; 4], bool, Option<u32>),
-        json::Index<json::Material>,
-    >,
+                           mat_cache: &mut MapMaterialCache,
                            gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>|
      -> json::Index<json::Mesh> {
         let prim = build_map_mesh_primitive(root, bin_data, mesh, mat_cache, gltf_texture_cache);
@@ -1055,10 +1071,7 @@ fn build_map_mesh_primitive(
     root: &mut json::Root,
     bin_data: &mut Vec<u8>,
     mesh: &MapMesh,
-    mat_cache: &mut HashMap<
-        (Option<usize>, [u32; 4], bool, Option<u32>),
-        json::Index<json::Material>,
-    >,
+    mat_cache: &mut MapMaterialCache,
     gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>,
 ) -> json::mesh::Primitive {
     let mut attributes = BTreeMap::new();
@@ -1242,9 +1255,12 @@ fn build_map_mesh_primitive(
 
     // Material: deduplicate by (texture index, base color, alpha blend, alpha cutoff).
     // Encode base_color as [u32; 4] for HashMap key (f32 isn't Hash).
-    let color_key = mesh.base_color.map(|c| c.to_bits());
-    let cutoff_key = mesh.alpha_cutoff.map(|c| c.to_bits());
-    let mat_key = (mesh.albedo_texture, color_key, mesh.alpha_blend, cutoff_key);
+    let mat_key = MapMaterialKey {
+        albedo_texture: mesh.albedo_texture,
+        base_color_bits: mesh.base_color.map(|c| c.to_bits()),
+        alpha_blend: mesh.alpha_blend,
+        alpha_cutoff_bits: mesh.alpha_cutoff.map(|c| c.to_bits()),
+    };
 
     let material = *mat_cache.entry(mat_key).or_insert_with(|| {
         if let Some(tex_idx) = mesh.albedo_texture

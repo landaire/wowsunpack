@@ -4,9 +4,8 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 use crate::game_types::{
-    BuoyancyState, CameraMode, CollisionType, ControlPointType, Consumable, DeathCause, FinishType,
-    InteractiveZoneType, ShellHitType,
-    WeaponType,
+    BuoyancyState, CameraMode, CollisionType, Consumable, ControlPointType, DeathCause, FinishType,
+    InteractiveZoneType, ShellHitType, WeaponType,
 };
 
 fn read_vfs_file(vfs: &vfs::VfsPath, path: &str) -> Result<Vec<u8>, vfs::VfsError> {
@@ -430,10 +429,16 @@ impl BattleConstants {
                 (5, Cow::Borrowed(InteractiveZoneType::WeatherZone.name())),
                 (6, Cow::Borrowed(InteractiveZoneType::DropZone.name())),
                 (7, Cow::Borrowed(InteractiveZoneType::ConsumableZone.name())),
-                (8, Cow::Borrowed(InteractiveZoneType::ColoredByRelation.name())),
+                (
+                    8,
+                    Cow::Borrowed(InteractiveZoneType::ColoredByRelation.name()),
+                ),
                 (9, Cow::Borrowed(InteractiveZoneType::ControlPoint.name())),
                 (10, Cow::Borrowed(InteractiveZoneType::RescueZone.name())),
-                (11, Cow::Borrowed(InteractiveZoneType::OrbitalStrikeZone.name())),
+                (
+                    11,
+                    Cow::Borrowed(InteractiveZoneType::OrbitalStrikeZone.name()),
+                ),
             ]),
             control_point_types: HashMap::from([
                 (1, Cow::Borrowed(ControlPointType::Control.name())),
@@ -1155,9 +1160,10 @@ fn parse_integer_enum(xml: &str, enum_name: &str) -> Option<HashMap<i32, Cow<'st
         if child.has_tag_name("const")
             && let (Some(name), Some(value_str)) =
                 (child.attribute("name"), child.attribute("value"))
-                && let Ok(value) = value_str.trim().parse::<i32>() {
-                    map.insert(value, Cow::Owned(name.to_string()));
-                }
+            && let Ok(value) = value_str.trim().parse::<i32>()
+        {
+            map.insert(value, Cow::Owned(name.to_string()));
+        }
     }
 
     if map.is_empty() { None } else { Some(map) }

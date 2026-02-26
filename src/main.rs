@@ -1045,16 +1045,16 @@ fn run() -> Result<(), Report> {
             list_textures,
             no_vfs,
         } => {
-            run_export_model(
-                &file,
-                &output,
+            run_export_model(&ExportModelParams {
+                file: &file,
+                output: &output,
                 lod,
                 no_textures,
                 damaged,
                 list_textures,
                 no_vfs,
-                vfs.as_ref(),
-            )?;
+                vfs: vfs.as_ref(),
+            })?;
         }
         Commands::ExportShip {
             name,
@@ -1482,16 +1482,28 @@ fn run_assets_bin(
     Ok(())
 }
 
-fn run_export_model(
-    file: &Path,
-    output: &Path,
+struct ExportModelParams<'a> {
+    file: &'a Path,
+    output: &'a Path,
     lod: usize,
     no_textures: bool,
     damaged: bool,
     list_textures: bool,
     no_vfs: bool,
-    vfs: Option<&VfsPath>,
-) -> Result<(), Report> {
+    vfs: Option<&'a VfsPath>,
+}
+
+fn run_export_model(params: &ExportModelParams<'_>) -> Result<(), Report> {
+    let ExportModelParams {
+        file,
+        output,
+        lod,
+        no_textures,
+        damaged,
+        list_textures,
+        no_vfs,
+        vfs,
+    } = *params;
     use wowsunpack::export::gltf_export;
     use wowsunpack::export::ship::{build_texture_set, collect_mfm_info};
     use wowsunpack::export::texture;
@@ -1520,8 +1532,7 @@ fn run_export_model(
         .map(|stem| format!("{stem}.visual"));
 
     // Load assets.bin into function scope so the borrow for PrototypeDatabase lives long enough.
-    let assets_bin_data = if vfs.is_some() && visual_suffix.is_some() {
-        let vfs = vfs.unwrap();
+    let assets_bin_data = if let (Some(vfs), Some(_)) = (vfs, &visual_suffix) {
         let result: Result<Vec<u8>, Report> = (|| {
             let mut buf = Vec::new();
             vfs.join("content/assets.bin")
@@ -1951,19 +1962,19 @@ fn run_export_map(
 
     // 9. Build the format-agnostic MapScene.
     let vfs_for_textures = if no_textures { None } else { vfs };
-    let scene = gltf_export::build_map_scene(
-        &merged,
-        &geom,
-        space.as_ref(),
-        db.as_ref(),
+    let scene = gltf_export::build_map_scene(&gltf_export::BuildMapSceneParams {
+        merged: &merged,
+        geometry: &geom,
+        space: space.as_ref(),
+        db: db.as_ref(),
         lod,
-        vfs_for_textures,
-        &env,
-        bounds.clone(),
+        vfs: vfs_for_textures,
+        env: &env,
+        bounds: bounds.clone(),
         max_texture_size,
-        vegetation_data.as_ref(),
+        vegetation: vegetation_data.as_ref(),
         vegetation_density,
-    )
+    })
     .context("Failed to build map scene")?;
 
     // 9. Export to GLB.

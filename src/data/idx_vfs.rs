@@ -4,7 +4,7 @@
 //! implements [`Prime`] (sync) or [`AsyncPrime`] (async). The VFS itself never
 //! performs I/O — it delegates to the source for raw byte access.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::Cursor;
 use std::ops::Range;
