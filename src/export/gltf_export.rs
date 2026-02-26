@@ -248,8 +248,8 @@ pub struct MapMesh {
     pub uvs: Vec<[f32; 2]>,
     /// Triangle indices into the vertex arrays.
     pub indices: Vec<u32>,
-    /// Albedo texture as PNG bytes, if available.
-    pub albedo_png: Option<Vec<u8>>,
+    /// Index into [`MapScene::textures`] for the albedo texture, if any.
+    pub albedo_texture: Option<usize>,
     /// Base color factor (used when no texture). RGBA linear.
     pub base_color: [f32; 4],
     /// Alpha blending mode: false = opaque, true = blend.
@@ -273,6 +273,8 @@ pub struct MapScene {
     pub model_meshes: Vec<MapMesh>,
     /// Positioned model instances referencing `model_meshes` by range.
     pub model_instances: Vec<MapModelInstance>,
+    /// Shared albedo textures (PNG bytes). Meshes reference these by index.
+    pub textures: Vec<Vec<u8>>,
     /// Terrain mesh, if generated.
     pub terrain: Option<MapMesh>,
     /// Water plane mesh, if generated.
@@ -296,11 +298,14 @@ pub fn build_map_scene(
     vfs: Option<&vfs::VfsPath>,
     env: &MapEnvironment<'_>,
     bounds: SpaceBounds,
+    max_texture_size: Option<u32>,
 ) -> Result<MapScene, Report<ExportError>> {
     let self_id_index = db.map(|db| db.build_self_id_index());
 
-    // Cache: MFM full path → Option<PNG bytes>
-    let mut texture_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+    // Shared texture storage: each unique texture is stored once.
+    let mut textures: Vec<Vec<u8>> = Vec::new();
+    // Cache: MFM full path → Option<texture index>
+    let mut texture_cache: HashMap<String, Option<usize>> = HashMap::new();
 
     // Build path_id → model index map for instance lookups.
     let path_to_model: HashMap<u64, usize> = merged
@@ -343,17 +348,21 @@ pub fn build_map_scene(
         };
 
         for prim in primitives {
-            // Load texture on demand via full MFM path.
-            let albedo_png = if let Some(vfs) = vfs
+            // Load texture on demand via full MFM path (deduplicated).
+            let albedo_texture = if let Some(vfs) = vfs
                 && let Some(mfm_path) = &prim.mfm_full_path
             {
-                texture_cache
-                    .entry(mfm_path.clone())
-                    .or_insert_with(|| {
-                        texture::load_base_albedo_bytes(vfs, mfm_path)
-                            .and_then(|dds_bytes| texture::dds_to_png(&dds_bytes).ok())
-                    })
-                    .clone()
+                *texture_cache.entry(mfm_path.clone()).or_insert_with(|| {
+                    texture::load_base_albedo_bytes(vfs, mfm_path)
+                        .and_then(|dds_bytes| {
+                            texture::dds_to_png_resized(&dds_bytes, max_texture_size).ok()
+                        })
+                        .map(|png_bytes| {
+                            let idx = textures.len();
+                            textures.push(png_bytes);
+                            idx
+                        })
+                })
             } else {
                 None
             };
@@ -364,7 +373,7 @@ pub fn build_map_scene(
                 normals: prim.normals,
                 uvs: prim.uvs,
                 indices: prim.indices,
-                albedo_png,
+                albedo_texture,
                 base_color: [1.0, 1.0, 1.0, 1.0],
                 alpha_blend: false,
             });
@@ -412,10 +421,10 @@ pub fn build_map_scene(
     // Generate water plane.
     let water = env.water.as_ref().map(generate_water_mesh);
 
-    let tex_count = texture_cache.values().filter(|v| v.is_some()).count();
-    let tex_total = texture_cache.len();
+    let tex_tried = texture_cache.len();
+    let tex_loaded = textures.len();
     eprintln!(
-        "Map scene: {} model meshes, {} instances, {tex_count}/{tex_total} textures loaded",
+        "Map scene: {} model meshes, {} instances, {tex_loaded}/{tex_tried} textures loaded",
         model_meshes.len(),
         model_instances.len(),
     );
@@ -429,6 +438,7 @@ pub fn build_map_scene(
     Ok(MapScene {
         model_meshes,
         model_instances,
+        textures,
         terrain,
         water,
         bounds,
@@ -561,7 +571,7 @@ fn generate_terrain_mesh(cfg: &TerrainConfig<'_>) -> MapMesh {
         normals,
         uvs,
         indices,
-        albedo_png: None,
+        albedo_texture: None,
         base_color: [0.3, 0.35, 0.25, 1.0],
         alpha_blend: false,
     }
@@ -591,7 +601,7 @@ fn generate_water_mesh(cfg: &WaterConfig<'_>) -> MapMesh {
         normals,
         uvs,
         indices,
-        albedo_png: None,
+        albedo_texture: None,
         base_color: [0.1, 0.3, 0.5, 0.6],
         alpha_blend: true,
     }
@@ -617,52 +627,91 @@ pub fn export_map_scene_glb(
 
     let mut bin_data: Vec<u8> = Vec::new();
 
-    // Material cache: mesh index → glTF material index.
-    let mut mat_cache: HashMap<usize, json::Index<json::Material>> = HashMap::new();
+    // Embed shared textures once, cache glTF texture index per texture array index.
+    let mut gltf_texture_cache: HashMap<usize, json::Index<json::Texture>> = HashMap::new();
+    for (tex_idx, png_bytes) in scene.textures.iter().enumerate() {
+        let byte_offset = bin_data.len();
+        bin_data.extend_from_slice(png_bytes);
+        pad_to_4(&mut bin_data);
+
+        let bv = root.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64::from(png_bytes.len()),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            target: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        let image = root.push(json::Image {
+            buffer_view: Some(bv),
+            mime_type: Some(json::image::MimeType("image/png".to_string())),
+            uri: None,
+            name: Some(format!("texture_{tex_idx}")),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        let tex = root.push(json::Texture {
+            source: image,
+            sampler: None,
+            name: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+        gltf_texture_cache.insert(tex_idx, tex);
+    }
+
+    // Material cache: (texture_index or None, base_color, alpha_blend) → glTF material.
+    // This deduplicates materials that share the same texture + color + blend mode.
+    let mut mat_cache: HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>> =
+        HashMap::new();
 
     // glTF mesh cache: mesh index → glTF Mesh index.
     let mut gltf_mesh_cache: HashMap<usize, json::Index<json::Mesh>> = HashMap::new();
 
     let mut scene_nodes: Vec<json::Index<json::Node>> = Vec::new();
 
-    // Helper: create or get a glTF Mesh for a MapMesh by index.
-    let get_or_create_mesh = |mesh_idx: usize,
-                              mesh: &MapMesh,
-                              root: &mut json::Root,
-                              bin_data: &mut Vec<u8>,
-                              mat_cache: &mut HashMap<usize, json::Index<json::Material>>,
-                              gltf_mesh_cache: &mut HashMap<usize, json::Index<json::Mesh>>|
-     -> json::Index<json::Mesh> {
-        if let Some(&cached) = gltf_mesh_cache.get(&mesh_idx) {
-            return cached;
-        }
-
-        let prim = build_map_mesh_primitive(root, bin_data, mesh, mesh_idx, mat_cache);
-        let gltf_mesh = root.push(json::Mesh {
-            primitives: vec![prim],
-            weights: None,
-            name: Some(mesh.name.clone()),
-            extensions: Default::default(),
-            extras: Default::default(),
-        });
-        gltf_mesh_cache.insert(mesh_idx, gltf_mesh);
-        gltf_mesh
-    };
+    // Helper closure args collected into a struct to avoid borrowing issues.
+    let build_gltf_mesh =
+        |_mesh_idx: usize,
+         mesh: &MapMesh,
+         root: &mut json::Root,
+         bin_data: &mut Vec<u8>,
+         mat_cache: &mut HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>>,
+         gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>|
+         -> json::Index<json::Mesh> {
+            let prim =
+                build_map_mesh_primitive(root, bin_data, mesh, mat_cache, gltf_texture_cache);
+            root.push(json::Mesh {
+                primitives: vec![prim],
+                weights: None,
+                name: Some(mesh.name.clone()),
+                extensions: Default::default(),
+                extras: Default::default(),
+            })
+        };
 
     // Export model instances.
     for (i, inst) in scene.model_instances.iter().enumerate() {
         // Collect glTF meshes for this instance's model.
         let mut instance_meshes = Vec::new();
         for mesh_idx in inst.mesh_range.clone() {
-            let mesh = &scene.model_meshes[mesh_idx];
-            let gltf_mesh = get_or_create_mesh(
-                mesh_idx,
-                mesh,
-                &mut root,
-                &mut bin_data,
-                &mut mat_cache,
-                &mut gltf_mesh_cache,
-            );
+            let gltf_mesh = if let Some(&cached) = gltf_mesh_cache.get(&mesh_idx) {
+                cached
+            } else {
+                let mesh = &scene.model_meshes[mesh_idx];
+                let m = build_gltf_mesh(
+                    mesh_idx,
+                    mesh,
+                    &mut root,
+                    &mut bin_data,
+                    &mut mat_cache,
+                    &gltf_texture_cache,
+                );
+                gltf_mesh_cache.insert(mesh_idx, m);
+                m
+            };
             instance_meshes.push(gltf_mesh);
         }
 
@@ -704,9 +753,13 @@ pub fn export_map_scene_glb(
 
     // Export terrain mesh.
     if let Some(terrain) = &scene.terrain {
-        let mesh_idx = scene.model_meshes.len(); // unique index beyond model meshes
-        let prim =
-            build_map_mesh_primitive(&mut root, &mut bin_data, terrain, mesh_idx, &mut mat_cache);
+        let prim = build_map_mesh_primitive(
+            &mut root,
+            &mut bin_data,
+            terrain,
+            &mut mat_cache,
+            &gltf_texture_cache,
+        );
         let gltf_mesh = root.push(json::Mesh {
             primitives: vec![prim],
             weights: None,
@@ -724,9 +777,13 @@ pub fn export_map_scene_glb(
 
     // Export water plane.
     if let Some(water) = &scene.water {
-        let mesh_idx = scene.model_meshes.len() + 1;
-        let prim =
-            build_map_mesh_primitive(&mut root, &mut bin_data, water, mesh_idx, &mut mat_cache);
+        let prim = build_map_mesh_primitive(
+            &mut root,
+            &mut bin_data,
+            water,
+            &mut mat_cache,
+            &gltf_texture_cache,
+        );
         let gltf_mesh = root.push(json::Mesh {
             primitives: vec![prim],
             weights: None,
@@ -796,8 +853,8 @@ fn build_map_mesh_primitive(
     root: &mut json::Root,
     bin_data: &mut Vec<u8>,
     mesh: &MapMesh,
-    mesh_idx: usize,
-    mat_cache: &mut HashMap<usize, json::Index<json::Material>>,
+    mat_cache: &mut HashMap<(Option<usize>, [u32; 4], bool), json::Index<json::Material>>,
+    gltf_texture_cache: &HashMap<usize, json::Index<json::Texture>>,
 ) -> json::mesh::Primitive {
     let mut attributes = BTreeMap::new();
 
@@ -978,17 +1035,30 @@ fn build_map_mesh_primitive(
         attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), uv);
     }
 
-    // Material: reuse or create.
-    let material = *mat_cache.entry(mesh_idx).or_insert_with(|| {
-        if let Some(png_bytes) = &mesh.albedo_png {
-            create_textured_material(
-                root,
-                bin_data,
-                png_bytes,
-                &mesh.name,
-                Some(mesh.name.clone()),
-                None,
-            )
+    // Material: deduplicate by (texture index, base color, alpha blend).
+    // Encode base_color as [u32; 4] for HashMap key (f32 isn't Hash).
+    let color_key = mesh.base_color.map(|c| c.to_bits());
+    let mat_key = (mesh.albedo_texture, color_key, mesh.alpha_blend);
+
+    let material = *mat_cache.entry(mat_key).or_insert_with(|| {
+        if let Some(tex_idx) = mesh.albedo_texture
+            && let Some(&gltf_tex) = gltf_texture_cache.get(&tex_idx)
+        {
+            // Textured material: reference the shared glTF Texture.
+            root.push(json::Material {
+                name: Some(mesh.name.clone()),
+                pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+                    base_color_texture: Some(json::texture::Info {
+                        index: gltf_tex,
+                        tex_coord: 0,
+                        extensions: Default::default(),
+                        extras: Default::default(),
+                    }),
+                    base_color_factor: json::material::PbrBaseColorFactor([1.0, 1.0, 1.0, 1.0]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
         } else if mesh.alpha_blend {
             root.push(json::Material {
                 name: Some(mesh.name.clone()),

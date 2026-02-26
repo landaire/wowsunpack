@@ -18,6 +18,76 @@ pub enum TextureError {
     PngEncode(String),
 }
 
+/// Decode DDS bytes to PNG bytes (RGBA8), optionally downsampling to a max size.
+///
+/// If `max_size` is `Some(n)`, the image is downsampled using box filtering so
+/// that neither dimension exceeds `n`. This is a simple but effective way to
+/// reduce texture memory for map-scale visualization.
+pub fn dds_to_png_resized(
+    dds_bytes: &[u8],
+    max_size: Option<u32>,
+) -> Result<Vec<u8>, Report<TextureError>> {
+    let dds = image_dds::ddsfile::Dds::read(&mut Cursor::new(dds_bytes))
+        .map_err(|e| Report::new(TextureError::DdsParse(e.to_string())))?;
+
+    let rgba_image = image_dds::image_from_dds(&dds, 0)
+        .map_err(|e| Report::new(TextureError::DdsDecode(e.to_string())))?;
+
+    let (w, h) = (rgba_image.width(), rgba_image.height());
+
+    // Downsample if needed.
+    let (out_w, out_h, pixels) = if let Some(max) = max_size
+        && (w > max || h > max)
+    {
+        let scale = (max as f32 / w as f32).min(max as f32 / h as f32);
+        let nw = ((w as f32 * scale) as u32).max(1);
+        let nh = ((h as f32 * scale) as u32).max(1);
+        let src = rgba_image.as_raw();
+        let mut dst = vec![0u8; (nw * nh * 4) as usize];
+        // Box filter: average source pixels that map to each destination pixel.
+        for dy in 0..nh {
+            let sy0 = (dy as f64 * h as f64 / nh as f64) as u32;
+            let sy1 = (((dy + 1) as f64 * h as f64 / nh as f64) as u32).min(h);
+            for dx in 0..nw {
+                let sx0 = (dx as f64 * w as f64 / nw as f64) as u32;
+                let sx1 = (((dx + 1) as f64 * w as f64 / nw as f64) as u32).min(w);
+                let mut r = 0u32;
+                let mut g = 0u32;
+                let mut b = 0u32;
+                let mut a = 0u32;
+                let mut count = 0u32;
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let i = (sy * w + sx) as usize * 4;
+                        r += src[i] as u32;
+                        g += src[i + 1] as u32;
+                        b += src[i + 2] as u32;
+                        a += src[i + 3] as u32;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    let di = (dy * nw + dx) as usize * 4;
+                    dst[di] = (r / count) as u8;
+                    dst[di + 1] = (g / count) as u8;
+                    dst[di + 2] = (b / count) as u8;
+                    dst[di + 3] = (a / count) as u8;
+                }
+            }
+        }
+        (nw, nh, dst)
+    } else {
+        (w, h, rgba_image.into_raw())
+    };
+
+    let mut png_buf = Vec::new();
+    PngEncoder::new(&mut png_buf)
+        .write_image(&pixels, out_w, out_h, ExtendedColorType::Rgba8)
+        .map_err(|e| Report::new(TextureError::PngEncode(e.to_string())))?;
+
+    Ok(png_buf)
+}
+
 /// Decode DDS bytes to PNG bytes (RGBA8).
 pub fn dds_to_png(dds_bytes: &[u8]) -> Result<Vec<u8>, Report<TextureError>> {
     let dds = image_dds::ddsfile::Dds::read(&mut Cursor::new(dds_bytes))
@@ -124,9 +194,10 @@ pub fn texture_base_names(mfm_stem: &str) -> Vec<String> {
     let mut names = vec![mfm_stem.to_string()];
     for suffix in MFM_STRIP_SUFFIXES {
         if let Some(stripped) = mfm_stem.strip_suffix(suffix)
-            && !names.contains(&stripped.to_string()) {
-                names.push(stripped.to_string());
-            }
+            && !names.contains(&stripped.to_string())
+        {
+            names.push(stripped.to_string());
+        }
     }
     names
 }
@@ -165,13 +236,13 @@ pub fn load_texture_bytes(
 
         for path in &candidates {
             if let Ok(vfs_path) = vfs.join(path)
-                && let Ok(mut file) = vfs_path.open_file() {
-                    let mut data = Vec::new();
-                    if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty()
-                    {
-                        return Some((base, data));
-                    }
+                && let Ok(mut file) = vfs_path.open_file()
+            {
+                let mut data = Vec::new();
+                if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty() {
+                    return Some((base, data));
                 }
+            }
         }
     }
 
@@ -214,13 +285,13 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
 
         for path in &candidates {
             if let Ok(vfs_path) = vfs.join(path)
-                && let Ok(mut file) = vfs_path.open_file() {
-                    let mut data = Vec::new();
-                    if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty()
-                    {
-                        return Some(data);
-                    }
+                && let Ok(mut file) = vfs_path.open_file()
+            {
+                let mut data = Vec::new();
+                if std::io::Read::read_to_end(&mut file, &mut data).is_ok() && !data.is_empty() {
+                    return Some(data);
                 }
+            }
         }
     }
 
@@ -233,9 +304,10 @@ pub fn load_base_albedo_bytes(vfs: &vfs::VfsPath, mfm_full_path: &str) -> Option
 fn strip_channel_suffix(scheme: &str) -> &str {
     for suffix in TEXTURE_CHANNEL_SUFFIXES {
         if let Some(stripped) = scheme.strip_suffix(suffix)
-            && !stripped.is_empty() {
-                return stripped;
-            }
+            && !stripped.is_empty()
+        {
+            return stripped;
+        }
     }
     scheme
 }
@@ -272,10 +344,11 @@ pub fn discover_texture_schemes(vfs: &vfs::VfsPath, mfm_stems: &[String]) -> Vec
             for name in &dds_names {
                 if let Some(rest) = name.strip_prefix(&prefix)
                     && let Some(raw_scheme) = rest.strip_suffix(".dds")
-                        && !raw_scheme.is_empty() {
-                            let scheme = strip_channel_suffix(raw_scheme);
-                            schemes.insert(scheme.to_string());
-                        }
+                    && !raw_scheme.is_empty()
+                {
+                    let scheme = strip_channel_suffix(raw_scheme);
+                    schemes.insert(scheme.to_string());
+                }
             }
         }
     }

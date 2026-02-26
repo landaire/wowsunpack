@@ -269,6 +269,11 @@ enum Commands {
         /// Skip loading model textures
         #[arg(long)]
         no_textures: bool,
+
+        /// Maximum texture dimension (e.g. 512, 1024). Textures larger than this
+        /// are downsampled with box filtering. Reduces GLB file size significantly.
+        #[arg(long)]
+        max_texture_size: Option<u32>,
     },
     /// Inspect armor model geometry and GameParams thickness data for a ship
     Armor {
@@ -1064,6 +1069,7 @@ fn run() -> Result<(), Report> {
             no_terrain,
             no_water,
             no_textures,
+            max_texture_size,
         } => {
             run_export_map(
                 &space_dir,
@@ -1075,6 +1081,7 @@ fn run() -> Result<(), Report> {
                 no_terrain,
                 no_water,
                 no_textures,
+                max_texture_size,
             )?;
         }
         Commands::Armor { name, hull } => {
@@ -1617,6 +1624,7 @@ fn run_export_map(
     no_terrain: bool,
     no_water: bool,
     no_textures: bool,
+    max_texture_size: Option<u32>,
 ) -> Result<(), Report> {
     use wowsunpack::export::gltf_export;
     use wowsunpack::models::assets_bin;
@@ -1807,6 +1815,7 @@ fn run_export_map(
         vfs_for_textures,
         &env,
         bounds.clone(),
+        max_texture_size,
     )
     .context("Failed to build map scene")?;
 
