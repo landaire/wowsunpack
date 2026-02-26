@@ -17,11 +17,11 @@ use crate::data::idx;
 use crate::data::idx_vfs::IdxVfs;
 use crate::data::wrappers::mmap::MmapPkgSource;
 use crate::data::{DataFileWithCallback, Version};
-use crate::error::ErrorKind;
+use crate::error::GameDataError;
 use crate::rpc::entitydefs::{EntitySpec, parse_scripts};
 
 /// List all available build numbers in the game directory's `bin/` folder, sorted ascending.
-pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
+pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, GameDataError> {
     let bin_dir = game_dir.join("bin");
     let mut builds: Vec<u32> = Vec::new();
     for entry in read_dir(&bin_dir)? {
@@ -40,18 +40,18 @@ pub fn list_available_builds(game_dir: &Path) -> Result<Vec<u32>, ErrorKind> {
 }
 
 /// Find the build directory in the game directory that matches the replay's version.
-pub fn find_matching_build(game_dir: &Path, replay_version: &Version) -> Result<u32, ErrorKind> {
+pub fn find_matching_build(
+    game_dir: &Path,
+    replay_version: &Version,
+) -> Result<u32, GameDataError> {
     let available_builds = list_available_builds(game_dir)?;
 
     if available_builds.contains(&replay_version.build) {
         Ok(replay_version.build)
     } else {
-        let available: Vec<String> = available_builds.iter().map(|b| b.to_string()).collect();
-        Err(ErrorKind::ParsingFailure(format!(
-            "Replay build {} not found in game directory. Available builds: [{}]",
-            replay_version.build,
-            available.join(", ")
-        )))
+        Err(GameDataError::BuildNotFound {
+            build: replay_version.build,
+        })
     }
 }
 
@@ -66,7 +66,7 @@ pub struct GameResources {
 pub fn load_game_resources(
     game_dir: &Path,
     replay_version: &Version,
-) -> Result<GameResources, ErrorKind> {
+) -> Result<GameResources, GameDataError> {
     let build = find_matching_build(game_dir, replay_version)?;
 
     let idx_dir = game_dir.join("bin").join(build.to_string()).join("idx");
@@ -82,9 +82,7 @@ pub fn load_game_resources(
 
     let pkgs_path = game_dir.join("res_packages");
     if !pkgs_path.exists() {
-        return Err(ErrorKind::ParsingFailure(
-            "Invalid game directory -- res_packages not found".to_string(),
-        ));
+        return Err(GameDataError::ResPackagesNotFound);
     }
 
     let pkg_source = MmapPkgSource::new(&pkgs_path);
@@ -94,15 +92,9 @@ pub fn load_game_resources(
     let specs = {
         let vfs_ref = &vfs;
         let loader = DataFileWithCallback::new(move |path: &str| {
-            let file_path = vfs_ref
-                .join(path)
-                .map_err(|e| ErrorKind::ParsingFailure(format!("VFS path error: {e}")))?;
+            let file_path = vfs_ref.join(path)?;
             let mut data = Vec::new();
-            file_path
-                .open_file()
-                .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
-                .read_to_end(&mut data)
-                .map_err(ErrorKind::IoError)?;
+            file_path.open_file()?.read_to_end(&mut data)?;
             Ok(Cow::Owned(data))
         });
         parse_scripts(&loader)?
@@ -130,7 +122,7 @@ pub fn translations_path(game_dir: &Path, build: u32) -> PathBuf {
 /// instead.
 pub fn build_game_vfs(game_dir: &Path) -> Result<VfsPath, Report> {
     let builds = list_available_builds(game_dir)
-        .map_err(|e| rootcause::report!("Failed to list builds: {e}"))?;
+        .attach_with(|| format!("game_dir: {}", game_dir.display()))?;
     let latest_build = builds
         .last()
         .ok_or_else(|| rootcause::report!("No builds found in {}/bin", game_dir.display()))?;
@@ -149,9 +141,9 @@ pub fn build_game_vfs(game_dir: &Path) -> Result<VfsPath, Report> {
     {
         let entry = entry?;
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            let data = std::fs::read(entry.path())?;
-            let parsed = idx::parse(&data)
-                .map_err(|e| rootcause::report!("Failed to parse idx file: {e}"))?;
+            let path = entry.path();
+            let data = std::fs::read(&path).attach_with(|| format!("path: {}", path.display()))?;
+            let parsed = idx::parse(&data).attach_with(|| format!("path: {}", path.display()))?;
             idx_files.push(parsed);
         }
     }

@@ -2,7 +2,7 @@ use serde_json::Map;
 
 use std::io::{Read, Write};
 
-use crate::error::ErrorKind;
+use crate::error::GameDataError;
 
 fn hashable_pickle_to_json(pickled: pickled::HashableValue) -> serde_json::Value {
     match pickled {
@@ -106,12 +106,10 @@ pub fn read_game_params_as_json<W: Write>(
     pretty_print: bool,
     vfs: &vfs::VfsPath,
     writer: &mut W,
-) -> Result<(), crate::error::ErrorKind> {
+) -> Result<(), crate::error::GameDataError> {
     let mut game_params_data = Vec::new();
-    vfs.join("content/GameParams.data")
-        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS join error: {e}")))?
-        .open_file()
-        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+    vfs.join("content/GameParams.data")?
+        .open_file()?
         .read_to_end(&mut game_params_data)?;
 
     let decoded = super::game_params_to_pickle(game_params_data)?;
@@ -120,7 +118,7 @@ pub fn read_game_params_as_json<W: Write>(
     let converted = if let pickled::Value::List(list) = decoded {
         pickle_to_json(list.into_raw_or_cloned().into_iter().next().unwrap())
     } else {
-        return Err(ErrorKind::InvalidGameParamsData);
+        return Err(GameDataError::InvalidGameParamsData);
     };
 
     println!("converted to json");

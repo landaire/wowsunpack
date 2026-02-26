@@ -18,17 +18,16 @@ use pickled::DeOptions;
 /// expensive.
 pub fn game_params_to_pickle(
     mut game_params_data: Vec<u8>,
-) -> Result<pickled::Value, crate::error::ErrorKind> {
+) -> Result<pickled::Value, crate::error::GameDataError> {
     game_params_data.reverse();
 
     let mut decoder = ZlibDecoder::new(Cursor::new(game_params_data));
 
-    pickled::value_from_reader(
+    Ok(pickled::value_from_reader(
         &mut decoder,
         DeOptions::default()
             .replace_unresolved_globals()
             .replace_recursive_structures()
             .decode_strings(),
-    )
-    .map_err(|err| err.into())
+    )?)
 }

@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use crate::error::ErrorKind;
+use crate::error::GameDataError;
 
 #[cfg(feature = "cbor")]
 fn hashable_pickle_to_cbor(pickled: pickled::HashableValue) -> serde_cbor::Value {
@@ -94,14 +94,12 @@ pub fn pickle_to_cbor(pickled: pickled::Value) -> serde_cbor::Value {
 pub fn read_game_params_as_cbor<W: Write>(
     vfs: &vfs::VfsPath,
     writer: &mut W,
-) -> Result<(), crate::error::ErrorKind> {
+) -> Result<(), crate::error::GameDataError> {
     use super::game_params_to_pickle;
 
     let mut game_params_data = Vec::new();
-    vfs.join("content/GameParams.data")
-        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS join error: {e}")))?
-        .open_file()
-        .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+    vfs.join("content/GameParams.data")?
+        .open_file()?
         .read_to_end(&mut game_params_data)?;
 
     let decoded = game_params_to_pickle(game_params_data)?;
@@ -109,8 +107,8 @@ pub fn read_game_params_as_cbor<W: Write>(
     let converted = if let pickled::Value::List(list) = decoded {
         pickle_to_cbor(list.into_raw_or_cloned().into_iter().next().unwrap())
     } else {
-        return Err(ErrorKind::InvalidGameParamsData);
+        return Err(GameDataError::InvalidGameParamsData);
     };
 
-    serde_cbor::to_writer(writer, &converted).map_err(|e| e.into())
+    Ok(serde_cbor::to_writer(writer, &converted)?)
 }

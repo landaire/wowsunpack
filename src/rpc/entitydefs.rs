@@ -248,7 +248,7 @@ fn parse_def(def: &[u8], aliases: &TypeAliases) -> DefFile {
 
 pub fn parse_scripts(
     gamedata: &impl DataFileLoader,
-) -> Result<Vec<EntitySpec>, crate::error::ErrorKind> {
+) -> Result<Vec<EntitySpec>, crate::error::GameDataError> {
     /*let alias_path = gamedata.lookup("scripts/entity_defs/alias.xml");
 
     let aliases = parse_aliases(&alias_path);*/

@@ -1,5 +1,4 @@
 use crate::data::parser_utils::WResult;
-use crate::error::*;
 #[cfg(feature = "serde")]
 use serde::ser::{SerializeMap, SerializeSeq, SerializeTuple};
 use std::collections::HashMap;
@@ -9,6 +8,25 @@ use winnow::binary::{
     le_f32, le_f64, le_i8, le_i16, le_i32, le_i64, le_u8, le_u16, le_u32, le_u64,
 };
 use winnow::token::take;
+
+/// Type alias matching winnow's default error for binary parsers.
+type WinnowErr = winnow::error::ErrMode<winnow::error::ContextError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RpcError {
+    #[error("{0}")]
+    Parse(WinnowErr),
+    #[error("Unknown FixedDict flag: {flag:#x}")]
+    UnknownFixedDictFlag { flag: u8 },
+}
+
+impl From<WinnowErr> for RpcError {
+    fn from(e: WinnowErr) -> Self {
+        RpcError::Parse(e)
+    }
+}
+
+type IResult<T> = Result<T, RpcError>;
 
 pub type TypeAliases = HashMap<String, ArgType>;
 
@@ -79,12 +97,9 @@ impl PrimitiveType {
     }
 }
 
-/// Type alias matching winnow's default error for binary parsers.
-type WinnowErr = winnow::error::ErrMode<winnow::error::ContextError>;
-
-/// Helper to read a single u8 via winnow, returning our `Error` type.
+/// Helper to read a single u8 via winnow.
 fn read_u8(input: &mut &[u8]) -> IResult<u8> {
-    le_u8::<_, WinnowErr>.parse_next(input).map_err(Error::from)
+    Ok(le_u8::<_, WinnowErr>.parse_next(input)?)
 }
 
 /// Parse a length-prefixed byte sequence: u8 length, or 0xFF then u16 length + u8 unknown.
@@ -387,10 +402,7 @@ impl ArgType {
                     if flag == 0 {
                         return Ok(ArgValue::NullableFixedDict(None));
                     } else if flag != 1 {
-                        return Err(failure_from_kind(ErrorKind::UnknownFixedDictFlag {
-                            flag,
-                            _packet: input.to_vec(),
-                        }));
+                        return Err(RpcError::UnknownFixedDictFlag { flag });
                     }
                 }
                 let mut dict: HashMap<&'b str, ArgValue<'b>> = HashMap::new();

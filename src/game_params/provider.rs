@@ -13,7 +13,7 @@ use tracing::debug;
 use crate::{
     Rc,
     data::{DataFileWithCallback, ResourceLoader},
-    error::ErrorKind,
+    error::GameDataError,
     game_params::convert::game_params_to_pickle,
     game_types::GameParamId,
     rpc::entitydefs::{EntitySpec, parse_scripts},
@@ -1174,14 +1174,12 @@ impl GameMetadataProvider {
     /// representation.
     ///
     /// See [`GameMetadataProvider::from_params`] if you wish to use caching.
-    pub fn from_vfs(vfs: &vfs::VfsPath) -> Result<GameMetadataProvider, ErrorKind> {
+    pub fn from_vfs(vfs: &vfs::VfsPath) -> Result<GameMetadataProvider, GameDataError> {
         debug!("deserializing gameparams");
 
         let mut game_params_data = Vec::new();
-        vfs.join("content/GameParams.data")
-            .map_err(|e| ErrorKind::ParsingFailure(format!("VFS join error: {e}")))?
-            .open_file()
-            .map_err(|e| ErrorKind::ParsingFailure(format!("VFS open error: {e}")))?
+        vfs.join("content/GameParams.data")?
+            .open_file()?
             .read_to_end(&mut game_params_data)?;
 
         let pickled_params: Value = game_params_to_pickle(game_params_data)?;
@@ -1495,7 +1493,7 @@ impl GameMetadataProvider {
     pub fn from_params_with_vfs(
         params: Vec<Param>,
         vfs: &vfs::VfsPath,
-    ) -> Result<GameMetadataProvider, ErrorKind> {
+    ) -> Result<GameMetadataProvider, GameDataError> {
         let param_id_to_translation_id = HashMap::from_iter(
             params
                 .iter()
@@ -1528,7 +1526,7 @@ impl GameMetadataProvider {
 
     /// Similar to [`Self::from_params`], but does not allow looking up specs. Useful for scenarios where you
     /// want to use utility functions for only game params.
-    pub fn from_params_no_specs(params: Vec<Param>) -> Result<GameMetadataProvider, ErrorKind> {
+    pub fn from_params_no_specs(params: Vec<Param>) -> Result<GameMetadataProvider, GameDataError> {
         let param_id_to_translation_id = HashMap::from_iter(
             params
                 .iter()

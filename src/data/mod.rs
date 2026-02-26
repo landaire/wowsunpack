@@ -19,7 +19,7 @@ pub mod wrappers;
 use std::borrow::Cow;
 
 use crate::Rc;
-use crate::error::ErrorKind;
+use crate::error::GameDataError;
 use crate::game_params::types::Param;
 use crate::game_types::GameParamId;
 use crate::rpc::entitydefs::EntitySpec;
@@ -76,7 +76,7 @@ impl Version {
 }
 
 pub trait DataFileLoader {
-    fn get(&self, path: &str) -> Result<Cow<'static, [u8]>, ErrorKind>;
+    fn get(&self, path: &str) -> Result<Cow<'static, [u8]>, GameDataError>;
 }
 
 pub struct DataFileWithCallback<F> {
@@ -85,7 +85,7 @@ pub struct DataFileWithCallback<F> {
 
 impl<F> DataFileWithCallback<F>
 where
-    F: Fn(&str) -> Result<Cow<'static, [u8]>, ErrorKind>,
+    F: Fn(&str) -> Result<Cow<'static, [u8]>, GameDataError>,
 {
     pub fn new(callback: F) -> Self {
         Self { callback }
@@ -94,9 +94,9 @@ where
 
 impl<F> DataFileLoader for DataFileWithCallback<F>
 where
-    F: Fn(&str) -> Result<Cow<'static, [u8]>, ErrorKind>,
+    F: Fn(&str) -> Result<Cow<'static, [u8]>, GameDataError>,
 {
-    fn get(&self, path: &str) -> Result<Cow<'static, [u8]>, ErrorKind> {
+    fn get(&self, path: &str) -> Result<Cow<'static, [u8]>, GameDataError> {
         (self.callback)(path)
     }
 }
