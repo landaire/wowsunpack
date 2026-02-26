@@ -1,13 +1,14 @@
+use crate::data::parser_utils::WResult;
 use crate::error::*;
-use nom::number::complete::{le_i8, le_i16, le_i32, le_i64, le_u8, le_u64};
-use nom::{
-    bytes::complete::take, number::complete::le_f32, number::complete::le_f64,
-    number::complete::le_u16, number::complete::le_u32,
-};
 #[cfg(feature = "serde")]
 use serde::ser::{SerializeMap, SerializeSeq, SerializeTuple};
 use std::collections::HashMap;
 use std::convert::TryInto;
+use winnow::Parser;
+use winnow::binary::{
+    le_f32, le_f64, le_i8, le_i16, le_i32, le_i64, le_u8, le_u16, le_u32, le_u64,
+};
+use winnow::token::take;
 
 pub type TypeAliases = HashMap<String, ArgType>;
 
@@ -39,100 +40,64 @@ pub enum PrimitiveType {
 }
 
 impl PrimitiveType {
-    #[allow(clippy::result_large_err)]
-    fn parse_value<'replay, 'argtype>(
-        &'argtype self,
-        i: &'replay [u8],
-    ) -> IResult<&'replay [u8], ArgValue<'argtype>> {
-        match self {
-            PrimitiveType::Uint8 => {
-                let (i, v) = le_u8(i)?;
-                Ok((i, ArgValue::Uint8(v)))
-            }
-            PrimitiveType::Uint16 => {
-                let (i, v) = le_u16(i)?;
-                Ok((i, ArgValue::Uint16(v)))
-            }
-            PrimitiveType::Uint32 => {
-                let (i, v) = le_u32(i)?;
-                Ok((i, ArgValue::Uint32(v)))
-            }
-            PrimitiveType::Uint64 => {
-                let (i, v) = le_u64(i)?;
-                Ok((i, ArgValue::Uint64(v)))
-            }
-            PrimitiveType::Int8 => {
-                let (i, v) = le_i8(i)?;
-                Ok((i, ArgValue::Int8(v)))
-            }
-            PrimitiveType::Int16 => {
-                let (i, v) = le_i16(i)?;
-                Ok((i, ArgValue::Int16(v)))
-            }
-            PrimitiveType::Int32 => {
-                let (i, v) = le_i32(i)?;
-                Ok((i, ArgValue::Int32(v)))
-            }
-            PrimitiveType::Int64 => {
-                let (i, v) = le_i64(i)?;
-                Ok((i, ArgValue::Int64(v)))
-            }
-            PrimitiveType::Float32 => {
-                let (i, v) = le_f32(i)?;
-                Ok((i, ArgValue::Float32(v)))
-            }
-            PrimitiveType::Float64 => {
-                let (i, v) = le_f64(i)?;
-                Ok((i, ArgValue::Float64(v)))
-            }
+    fn parse_value<'argtype>(&'argtype self, input: &mut &[u8]) -> WResult<ArgValue<'argtype>> {
+        Ok(match self {
+            PrimitiveType::Uint8 => ArgValue::Uint8(le_u8.parse_next(input)?),
+            PrimitiveType::Uint16 => ArgValue::Uint16(le_u16.parse_next(input)?),
+            PrimitiveType::Uint32 => ArgValue::Uint32(le_u32.parse_next(input)?),
+            PrimitiveType::Uint64 => ArgValue::Uint64(le_u64.parse_next(input)?),
+            PrimitiveType::Int8 => ArgValue::Int8(le_i8.parse_next(input)?),
+            PrimitiveType::Int16 => ArgValue::Int16(le_i16.parse_next(input)?),
+            PrimitiveType::Int32 => ArgValue::Int32(le_i32.parse_next(input)?),
+            PrimitiveType::Int64 => ArgValue::Int64(le_i64.parse_next(input)?),
+            PrimitiveType::Float32 => ArgValue::Float32(le_f32.parse_next(input)?),
+            PrimitiveType::Float64 => ArgValue::Float64(le_f64.parse_next(input)?),
             PrimitiveType::Vector2 => {
-                let (i, x) = le_f32(i)?;
-                let (i, y) = le_f32(i)?;
-                Ok((i, ArgValue::Vector2((x, y))))
+                let x = le_f32.parse_next(input)?;
+                let y = le_f32.parse_next(input)?;
+                ArgValue::Vector2((x, y))
             }
             PrimitiveType::Vector3 => {
-                let (i, x) = le_f32(i)?;
-                let (i, y) = le_f32(i)?;
-                let (i, z) = le_f32(i)?;
-                Ok((i, ArgValue::Vector3((x, y, z))))
+                let x = le_f32.parse_next(input)?;
+                let y = le_f32.parse_next(input)?;
+                let z = le_f32.parse_next(input)?;
+                ArgValue::Vector3((x, y, z))
             }
             PrimitiveType::Blob => {
-                let (i, size) = le_u8(i)?;
-                if size == 0xff {
-                    let (i, size) = le_u16(i)?;
-                    let (i, _unknown) = le_u8(i)?;
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::Blob(data.to_vec())))
-                } else {
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::Blob(data.to_vec())))
-                }
+                let data = parse_length_prefixed_bytes(input)?;
+                ArgValue::Blob(data)
             }
             PrimitiveType::String => {
-                let (i, size) = le_u8(i)?;
-                if size == 0xff {
-                    let (i, size) = le_u16(i)?;
-                    let (i, _unknown) = le_u8(i)?;
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::String(data.to_vec())))
-                } else {
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::String(data.to_vec())))
-                }
+                let data = parse_length_prefixed_bytes(input)?;
+                ArgValue::String(data)
             }
             PrimitiveType::UnicodeString => {
-                let (i, size) = le_u8(i)?;
-                if size == 0xff {
-                    let (i, size) = le_u16(i)?;
-                    let (i, _unknown) = le_u8(i)?;
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::UnicodeString(data.to_vec())))
-                } else {
-                    let (i, data) = take(size)(i)?;
-                    Ok((i, ArgValue::UnicodeString(data.to_vec())))
-                }
+                let data = parse_length_prefixed_bytes(input)?;
+                ArgValue::UnicodeString(data)
             }
-        }
+        })
+    }
+}
+
+/// Type alias matching winnow's default error for binary parsers.
+type WinnowErr = winnow::error::ErrMode<winnow::error::ContextError>;
+
+/// Helper to read a single u8 via winnow, returning our `Error` type.
+fn read_u8(input: &mut &[u8]) -> IResult<u8> {
+    le_u8::<_, WinnowErr>.parse_next(input).map_err(Error::from)
+}
+
+/// Parse a length-prefixed byte sequence: u8 length, or 0xFF then u16 length + u8 unknown.
+fn parse_length_prefixed_bytes(input: &mut &[u8]) -> WResult<Vec<u8>> {
+    let size = le_u8.parse_next(input)?;
+    if size == 0xff {
+        let size = le_u16.parse_next(input)?;
+        let _unknown = le_u8.parse_next(input)?;
+        let data = take(size as usize).parse_next(input)?;
+        Ok(data.to_vec())
+    } else {
+        let data = take(size as usize).parse_next(input)?;
+        Ok(data.to_vec())
     }
 }
 
@@ -402,51 +367,41 @@ impl ArgType {
         }
     }
 
-    #[allow(clippy::result_large_err)]
-    pub fn parse_value<'a, 'b>(&'b self, i: &'a [u8]) -> IResult<&'a [u8], ArgValue<'b>> {
+    pub fn parse_value<'a, 'b>(&'b self, input: &mut &'a [u8]) -> IResult<ArgValue<'b>> {
         match self {
-            Self::Primitive(p) => p.parse_value(i),
+            Self::Primitive(p) => Ok(p.parse_value(input)?),
             Self::Array((count, atype)) => {
-                let mut values = vec![];
-                let (mut i, length) = match count {
-                    Some(count) => (i, *count as u8),
-                    None => le_u8(i)?,
+                let length = match count {
+                    Some(count) => *count,
+                    None => read_u8(input)? as usize,
                 };
+                let mut values = Vec::with_capacity(length);
                 for _ in 0..length {
-                    let (new_i, element) = atype.parse_value(i)?;
-                    i = new_i;
-                    values.push(element);
+                    values.push(atype.parse_value(input)?);
                 }
-                Ok((i, ArgValue::Array(values)))
+                Ok(ArgValue::Array(values))
             }
             Self::FixedDict((allow_none, props)) => {
-                let mut dict: HashMap<&'b str, ArgValue<'b>> = HashMap::new();
-                let mut i = i;
-                //println!();
-                //println!("{} {:?}", allow_none, i);
                 if *allow_none {
-                    let (new_i, flag) = le_u8(i)?;
-                    i = new_i;
+                    let flag = read_u8(input)?;
                     if flag == 0 {
-                        return Ok((i, ArgValue::NullableFixedDict(None)));
+                        return Ok(ArgValue::NullableFixedDict(None));
                     } else if flag != 1 {
                         return Err(failure_from_kind(ErrorKind::UnknownFixedDictFlag {
                             flag,
-                            _packet: i.to_vec(),
+                            _packet: input.to_vec(),
                         }));
-                        //panic!("Unknown fixed dict flag {:?} in {:?}", flag, i);
                     }
                 }
+                let mut dict: HashMap<&'b str, ArgValue<'b>> = HashMap::new();
                 for property in props.iter() {
-                    //println!("{:?} {:?}", property.prop_type, i);
-                    let (new_i, element) = property.prop_type.parse_value(i)?;
-                    i = new_i;
+                    let element = property.prop_type.parse_value(input)?;
                     dict.insert(&property.name, element);
                 }
                 if *allow_none {
-                    Ok((i, ArgValue::NullableFixedDict(Some(dict))))
+                    Ok(ArgValue::NullableFixedDict(Some(dict)))
                 } else {
-                    Ok((i, ArgValue::FixedDict(dict)))
+                    Ok(ArgValue::FixedDict(dict))
                 }
             }
             Self::Tuple((_t, _count)) => {
@@ -730,14 +685,16 @@ mod test {
         //println!("{:#?}", t);
 
         let data = [0];
-        let (i, data) = t.parse_value(&data).unwrap();
-        assert_eq!(i.len(), 0);
-        assert_eq!(data, ArgValue::NullableFixedDict(None));
+        let mut input = &data[..];
+        let result = t.parse_value(&mut input).unwrap();
+        assert!(input.is_empty());
+        assert_eq!(result, ArgValue::NullableFixedDict(None));
 
         let data = [1, 5, 0, 0, 0];
-        let (i, data) = t.parse_value(&data).unwrap();
-        assert_eq!(i.len(), 0);
-        let m = match data {
+        let mut input = &data[..];
+        let result = t.parse_value(&mut input).unwrap();
+        assert!(input.is_empty());
+        let m = match result {
             ArgValue::NullableFixedDict(Some(h)) => h,
             _ => panic!(),
         };
@@ -754,10 +711,11 @@ mod test {
         //println!("{:#?}", t);
 
         let data = [1, 0, 3, 0];
-        let (i, data) = t.parse_value(&data).unwrap();
-        assert_eq!(i.len(), 0);
+        let mut input = &data[..];
+        let result = t.parse_value(&mut input).unwrap();
+        assert!(input.is_empty());
         assert_eq!(
-            data,
+            result,
             ArgValue::Array(vec![ArgValue::Uint16(1), ArgValue::Uint16(3)])
         );
     }

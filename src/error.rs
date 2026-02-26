@@ -5,16 +5,12 @@ use crate::data::Version;
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
-    backtrace: Vec<ErrorKind>,
 }
 
 #[derive(Error, Debug)]
 pub enum ErrorKind {
-    #[error("Nom error: {err:?}")]
-    Nom {
-        err: nom::error::ErrorKind,
-        _input: Vec<u8>,
-    },
+    #[error("Parse error: {detail}")]
+    ParseError { detail: String },
     #[cfg(feature = "json")]
     #[error("Error serializing or deserializing json: {err}")]
     SerdeJson {
@@ -80,70 +76,45 @@ pub enum ErrorKind {
     FileTreeError(#[from] crate::data::idx::IdxError),
 }
 
-impl nom::error::ParseError<&[u8]> for Error {
-    fn from_error_kind(input: &[u8], kind: nom::error::ErrorKind) -> Self {
+impl From<winnow::error::ErrMode<winnow::error::ContextError>> for Error {
+    fn from(e: winnow::error::ErrMode<winnow::error::ContextError>) -> Self {
         Self {
-            kind: ErrorKind::Nom {
-                err: kind,
-                _input: input.to_vec(),
+            kind: ErrorKind::ParseError {
+                detail: format!("{e}"),
             },
-            backtrace: Vec::new(),
         }
-    }
-
-    fn append(input: &[u8], kind: nom::error::ErrorKind, mut other: Self) -> Self {
-        other
-            .backtrace
-            .push(Self::from_error_kind(input, kind).kind);
-        other
     }
 }
 
-impl std::convert::From<nom::Err<Error>> for ErrorKind {
-    fn from(x: nom::Err<Error>) -> ErrorKind {
-        match x {
-            nom::Err::<Error>::Incomplete(_) => {
-                panic!("We can't handle incomplete replay files");
-            }
-            nom::Err::<Error>::Error(e) => e.kind,
-            nom::Err::<Error>::Failure(e) => e.kind,
+impl From<winnow::error::ErrMode<winnow::error::ContextError>> for ErrorKind {
+    fn from(e: winnow::error::ErrMode<winnow::error::ContextError>) -> Self {
+        ErrorKind::ParseError {
+            detail: format!("{e}"),
         }
     }
 }
 
 impl std::convert::From<std::str::Utf8Error> for Error {
     fn from(x: std::str::Utf8Error) -> Error {
-        Error {
-            kind: x.into(),
-            backtrace: vec![],
-        }
+        Error { kind: x.into() }
     }
 }
 
 impl std::convert::From<std::string::FromUtf8Error> for Error {
     fn from(x: std::string::FromUtf8Error) -> Error {
-        Error {
-            kind: x.into(),
-            backtrace: vec![],
-        }
+        Error { kind: x.into() }
     }
 }
 
 #[cfg(feature = "json")]
 impl std::convert::From<serde_json::Error> for Error {
     fn from(x: serde_json::Error) -> Error {
-        Error {
-            kind: x.into(),
-            backtrace: vec![],
-        }
+        Error { kind: x.into() }
     }
 }
 
-pub type IResult<I, T> = nom::IResult<I, T, Error>;
+pub type IResult<T> = Result<T, Error>;
 
-pub fn failure_from_kind(kind: ErrorKind) -> nom::Err<Error> {
-    nom::Err::Failure(Error {
-        kind,
-        backtrace: vec![],
-    })
+pub fn failure_from_kind(kind: ErrorKind) -> Error {
+    Error { kind }
 }
