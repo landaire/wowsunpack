@@ -1,3 +1,5 @@
+> **Note:** This repository has been archived. Development has moved to [wows-toolkit](https://github.com/landaire/wows-toolkit).
+
 # wowsunpack
 
 A utility for unpacking World of Warships game assets.
